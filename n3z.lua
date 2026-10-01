@@ -7,6 +7,10 @@
 
 local Players = game:GetService("Players")
 local localPlayer = Players.LocalPlayer
+local UserInputService = game:GetService("UserInputService")
+
+-- mobile: touch device without a keyboard -> mobile dock layout (mockup parity)
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 
 local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/"
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
@@ -94,7 +98,7 @@ end
 env.__N3Z_WINDOW = nil
 
 -- ---------- load hub pieces ----------
-local dockSrc = fetchHub("n3z-dock.lua")
+local dockSrc = fetchHub(isMobile and "n3z-dock-mobile.lua" or "n3z-dock.lua")
 local Dock = assert(loadstring(dockSrc, "@n3z-dock"))()
 local compatSrc = fetchHub("n3z-compat.lua")
 local makeWindow = assert(loadstring(compatSrc, "@n3z-compat"))()
@@ -120,7 +124,7 @@ end
 local gameName = activeMod and activeMod.game or tostring(game.Name)
 local modLine = (activeMod and (activeMod.name .. " " .. activeMod.version) or "no module") .. " • " .. N3Z_VERSION
 dock:SetHeader(gameName, "place " .. tostring(placeId) .. " · " .. localPlayer.Name, modLine)
-dock:SetMenuKeyName("RShift")
+dock:SetMenuKeyName(isMobile and "TAP" or "RShift")
 
 -- avatar (async, never blocks boot)
 task.spawn(function()
@@ -149,10 +153,17 @@ end
 
 -- ---------- SETTINGS tab ----------
 local profileName = "N3ZHUB/" .. (activeMod and activeMod.id or "global") .. "/settings/default.json"
-dock:AddRow("settings", {
-    kind = "action", name = "Menu Toggle Key", desc = "กดที่แถวแล้วกดปุ่มใหม่เพื่อเปลี่ยน",
-    chip = "RShift", rebindKey = true,
-})
+if isMobile then
+    -- mobile: no keyboard — tap the active tab to collapse/expand (mockup footer)
+    dock:AddRow("settings", {
+        kind = "action", name = "Menu Toggle", desc = "แตะแท็บที่เปิดอยู่ซ้ำเพื่อยุบ / กางเมนู",
+    })
+else
+    dock:AddRow("settings", {
+        kind = "action", name = "Menu Toggle Key", desc = "กดที่แถวแล้วกดปุ่มใหม่เพื่อเปลี่ยน",
+        chip = "RShift", rebindKey = true,
+    })
+end
 dock:AddRow("settings", {
     kind = "action", name = "Config Profile", desc = profileName,
     chip = "EDIT", clipboard = profileName,

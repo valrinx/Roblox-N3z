@@ -1,6 +1,12 @@
 -- ============================================================
--- N3Z HUB v2.1.0 · n3z-dock.lua
+-- N3Z HUB · dock.lua
 -- Native-GUI bottom dock for N3z Hub. No Drawing API.
+-- Returns the Dock class. n3z.lua loads this via loadstring.
+--
+-- UX: boot shows the dock bar only. Clicking a tab opens the
+-- floating panel above it; clicking the active tab collapses it.
+-- Every interactive row is clickable across its full width
+-- (the switch pill itself is a visual, like the HTML mockup).
 -- ============================================================
 
 local Players = game:GetService("Players")
@@ -9,24 +15,63 @@ local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local localPlayer = Players.LocalPlayer
 
--- ---------- theme ----------
+-- ---------- theme (matches n3z-dock.html mockup) ----------
 local C = {
-    panelBg  = Color3.fromRGB(11, 14, 20),
-    dockBg   = Color3.fromRGB(18, 21, 29),
-    rowBg    = Color3.fromRGB(17, 20, 28),
-    rowHover = Color3.fromRGB(23, 27, 38),
-    text     = Color3.fromRGB(232, 236, 244),
-    dark     = Color3.fromRGB(4, 18, 26),
-    muted    = Color3.fromRGB(139, 147, 167),
-    accent   = Color3.fromRGB(34, 211, 238),
-    accent2  = Color3.fromRGB(167, 139, 250),
+    panelBg  = Color3.fromRGB(13, 17, 28),    -- rgba(13,17,28,.97)
+    dockBg   = Color3.fromRGB(13, 17, 28),    -- rgba(13,17,28,.96)
+    rowHover = Color3.fromRGB(22, 29, 49),    -- #161d31
+    text     = Color3.fromRGB(223, 227, 238), -- #dfe3ee
+    dark     = Color3.fromRGB(4, 18, 26),     -- #04121a active-tab text
+    muted    = Color3.fromRGB(139, 147, 167), -- #8b93a7 inactive tabs
+    soft     = Color3.fromRGB(125, 138, 160), -- #7d8aa0 descriptions
+    accent   = Color3.fromRGB(34, 211, 238),  -- #22d3ee cyan
+    accent2  = Color3.fromRGB(167, 139, 250), -- #a78bfa avatar gradient
     danger   = Color3.fromRGB(248, 113, 113),
-    good     = Color3.fromRGB(52, 211, 153),
-    track    = Color3.fromRGB(38, 43, 56),
+    good     = Color3.fromRGB(52, 211, 153),  -- #34d399 toggle ON / ACTIVE
+    track    = Color3.fromRGB(42, 47, 66),    -- #2a2f42 toggle OFF track
+    knobOff  = Color3.fromRGB(138, 144, 166), -- #8a90a6
+    border   = Color3.fromRGB(38, 49, 74),    -- #26314a panel/dock border
+    line     = Color3.fromRGB(28, 35, 56),    -- #1c2338 hairlines
+    footText = Color3.fromRGB(95, 104, 128),  -- #5f6880 footer
+    kbdText  = Color3.fromRGB(159, 179, 200), -- #9fb3c8 key chips
+    kbdBd    = Color3.fromRGB(58, 74, 99),    -- #3a4a63 key chip border
 }
 local FONT      = Enum.Font.Gotham
 local FONT_MED  = Enum.Font.GothamMedium
 local FONT_BOLD = Enum.Font.GothamBold
+local FONT_MONO = Enum.Font.Code
+
+-- ---------- layouts: pc vs mobile (touch) ----------
+-- Mobile values mirror the landscape phone mockup (n3z-dock-mobile.html):
+-- 46px touch tabs, 52x30 switches, viewport-fitted panel, tap hint footer.
+local LAYOUTS = {
+    pc = {
+        panelW = 460, contentH = 330,
+        barH = 52, barCorner = 18,
+        tabH = 36, tabFont = 12, tabPad = 12,
+        indH = 36, indCorner = 12,
+        showAvatar = true,
+        rowPadL = 12, rowPadT = 11, rowCorner = 12,
+        nameFont = 13, nameH = 17, descFont = 11,
+        tglW = 40, tglH = 22, knob = 16, tglOnX = 29, tglOffX = 11,
+        sliderW = 150, sliderH = 30, sliderKnob = 12,
+        ddW = 130, ddH = 28, ddOptH = 26,
+        footerKeyChip = true,
+    },
+    mobile = {
+        panelW = 560, contentH = 220, -- refined from viewport below
+        barH = 62, barCorner = 20,
+        tabH = 46, tabFont = 11, tabPad = 15,
+        indH = 46, indCorner = 14,
+        showAvatar = false,
+        rowPadL = 12, rowPadT = 13, rowCorner = 14,
+        nameFont = 14, nameH = 18, descFont = 11,
+        tglW = 52, tglH = 30, knob = 24, tglOnX = 37, tglOffX = 15,
+        sliderW = 170, sliderH = 34, sliderKnob = 16,
+        ddW = 150, ddH = 34, ddOptH = 32,
+        footerKeyChip = false,
+    },
+}
 
 local function corner(inst, r)
     local u = Instance.new("UICorner")
@@ -35,11 +80,18 @@ local function corner(inst, r)
     return u
 end
 
-local function stroke(inst, transp)
+local function cornerRound(inst)
+    local u = Instance.new("UICorner")
+    u.CornerRadius = UDim.new(1, 0)
+    u.Parent = inst
+    return u
+end
+
+local function stroke(inst, color, transp, thickness)
     local s = Instance.new("UIStroke")
-    s.Color = Color3.fromRGB(255, 255, 255)
-    s.Transparency = transp or 0.93
-    s.Thickness = 1
+    s.Color = color or Color3.fromRGB(255, 255, 255)
+    s.Transparency = transp or 0.9
+    s.Thickness = thickness or 1
     s.Parent = inst
     return s
 end
@@ -52,6 +104,24 @@ local function pad(inst, l, t, r, b)
     p.PaddingBottom = UDim.new(0, b or 8)
     p.Parent = inst
     return p
+end
+
+-- Soft outer glow. Parented as a CHILD so it follows position/size
+-- tweens automatically; the solid center covers its middle, the
+-- oversized faint edge reads as light bloom.
+local function glow(inst, color, extra, transp, round)
+    local h = Instance.new("Frame")
+    h.Name = "GlowFx"
+    h.BackgroundColor3 = color
+    h.BackgroundTransparency = transp or 0.85
+    h.BorderSizePixel = 0
+    h.AnchorPoint = Vector2.new(0.5, 0.5)
+    h.Position = UDim2.new(0.5, 0, 0.5, 0)
+    local e = extra or 10
+    h.Size = UDim2.new(1, e, 1, e)
+    h.Parent = inst
+    if round then cornerRound(h) else corner(h, 14) end
+    return h
 end
 
 local function label(text, size, color, font)
@@ -68,12 +138,28 @@ end
 
 local function getGuiParent()
     local ok, hui = pcall(function() return gethui() end)
-    if ok and typeof(hui) == "Instance" and hui.Name ~= "RobloxGui" and not hui:IsA("ScreenGui") then
-        return hui
-    end
+    if ok and typeof(hui) == "Instance" then return hui end
     local ok2, cg = pcall(function() return game:GetService("CoreGui") end)
     if ok2 and cg then return cg end
     return localPlayer:WaitForChild("PlayerGui")
+end
+
+local function keyName(kc)
+    if type(kc) == "string" then
+        return (kc:gsub("^ENUM_", ""))
+    end
+    if typeof(kc) == "EnumItem" then return kc.Name end
+    return tostring(kc)
+end
+
+local KEY_SHORT = {
+    RightShift = "RShift", LeftShift = "LShift",
+    RightControl = "RCtrl", LeftControl = "LCtrl",
+    RightAlt = "RAlt", LeftAlt = "LAlt",
+}
+local function keyShort(kc)
+    local n = keyName(kc)
+    return KEY_SHORT[n] or n
 end
 
 -- ============================================================
@@ -92,9 +178,29 @@ function Dock.new(opts)
     self._unloadFns = {}
     self._tabs = {}       -- tabId -> {btn=, page=}
     self._tabIds = {}
-    self._activeTab = "combat"
+    self._tabToggles = {} -- tabId -> {toggle handles} (footer count)
+    self._tabInfo = {}    -- tabId -> static footer text
+    self._activeTab = nil -- boot: dock bar only, nothing selected
     self._menuKey = opts.menuKey or Enum.KeyCode.RightShift
     self._visible = true
+    self._dead = false
+    -- layout: "pc" default, "mobile" for touch devices (mockup parity)
+    local layoutName = (opts.layout == "mobile") and "mobile" or "pc"
+    local L = LAYOUTS[layoutName]
+    if layoutName == "mobile" then
+        -- fit the panel to the real viewport (landscape phones are short)
+        local vx, vy = 844, 390
+        pcall(function()
+            local vs = workspace.CurrentCamera.ViewportSize
+            vx, vy = vs.X, vs.Y
+        end)
+        L = setmetatable({
+            panelW = math.min(560, math.max(320, vx - 32)),
+            contentH = math.clamp(vy - 190, 160, 330),
+        }, { __index = L })
+    end
+    self._layout = L
+    self._isMobile = (layoutName == "mobile")
 
     local function conn(c) table.insert(self._conns, c) return c end
     self._conn = conn
@@ -126,17 +232,18 @@ function Dock.new(opts)
     stageLayout.Parent = stage
     self._stage = stage
 
-    -- panel
+    -- panel (hidden until a tab is picked)
     local panel = Instance.new("Frame")
     panel.Name = "Panel"
     panel.BackgroundColor3 = C.panelBg
-    panel.BackgroundTransparency = 0.06
-    panel.Size = UDim2.new(0, 470, 0, 0)
+    panel.BackgroundTransparency = 0.03
+    panel.Size = UDim2.new(0, L.panelW, 0, 0)
     panel.AutomaticSize = Enum.AutomaticSize.Y
     panel.LayoutOrder = 1
+    panel.Visible = false
     panel.Parent = stage
-    corner(panel, 14)
-    stroke(panel, 0.9)
+    corner(panel, 16)
+    stroke(panel, C.border, 0)
     self._panel = panel
 
     local panelPad = Instance.new("UIPadding")
@@ -160,40 +267,69 @@ function Dock.new(opts)
     header.Parent = panel
 
     local dot = Instance.new("Frame")
-    dot.Size = UDim2.new(0, 8, 0, 8)
+    dot.Name = "LiveDot"
+    dot.Size = UDim2.new(0, 9, 0, 9)
     dot.Position = UDim2.new(0, 2, 0.5, -4)
     dot.BackgroundColor3 = C.good
+    dot.BorderSizePixel = 0
     dot.Parent = header
-    corner(dot, 4)
+    cornerRound(dot)
+    local dotGlow = glow(dot, C.good, 10, 0.8, true)
+    -- pulse like the mockup's .ctx .dot (2.6s breathe)
+    task.delay(0.5, function()
+        local function breathe()
+            if self._dead or not dot.Parent then return end
+            TweenService:Create(dotGlow,
+                TweenInfo.new(1.3, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+                { BackgroundTransparency = 0.55 }):Play()
+            task.delay(1.3, function()
+                if self._dead or not dot.Parent then return end
+                TweenService:Create(dotGlow,
+                    TweenInfo.new(1.3, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+                    { BackgroundTransparency = 0.85 }):Play()
+                task.delay(1.3, breathe)
+            end)
+        end
+        breathe()
+    end)
 
     local gameLabel = label("…", 13, C.text, FONT_MED)
-    gameLabel.Position = UDim2.new(0, 18, 0, 2)
-    gameLabel.Size = UDim2.new(1, -150, 0, 18)
+    gameLabel.Position = UDim2.new(0, 20, 0, 2)
+    gameLabel.Size = UDim2.new(1, -160, 0, 18)
     gameLabel.Parent = header
     self._gameLabel = gameLabel
 
-    local placeLabel = label("…", 10, C.muted, FONT)
-    placeLabel.Position = UDim2.new(0, 18, 0, 21)
-    placeLabel.Size = UDim2.new(1, -150, 0, 14)
+    local placeLabel = label("…", 10, C.soft, FONT)
+    placeLabel.Position = UDim2.new(0, 20, 0, 21)
+    placeLabel.Size = UDim2.new(1, -160, 0, 14)
     placeLabel.Parent = header
     self._placeLabel = placeLabel
 
-    local verLabel = label("…", 10, C.accent, FONT_MED)
+    local verLabel = label("…", 11, C.accent, FONT_MONO)
     verLabel.AnchorPoint = Vector2.new(1, 0)
     verLabel.Position = UDim2.new(1, 0, 0, 12)
-    verLabel.Size = UDim2.new(0, 130, 0, 16)
+    verLabel.Size = UDim2.new(0, 140, 0, 16)
     verLabel.TextXAlignment = Enum.TextXAlignment.Right
     verLabel.Parent = header
     self._verLabel = verLabel
+
+    local hairline = Instance.new("Frame")
+    hairline.Name = "Hairline"
+    hairline.BackgroundColor3 = C.line
+    hairline.BorderSizePixel = 0
+    hairline.AnchorPoint = Vector2.new(0, 1)
+    hairline.Position = UDim2.new(0, 0, 1, 0)
+    hairline.Size = UDim2.new(1, 0, 0, 1)
+    hairline.Parent = header
 
     -- content (scrolling, fixed height)
     local content = Instance.new("ScrollingFrame")
     content.Name = "Content"
     content.LayoutOrder = 2
     content.BackgroundTransparency = 1
-    content.Size = UDim2.new(1, 0, 0, 330)
+    content.Size = UDim2.new(1, 0, 0, L.contentH)
     content.ScrollBarThickness = 3
-    content.ScrollBarImageColor3 = C.track
+    content.ScrollBarImageColor3 = C.border
     content.AutomaticCanvasSize = Enum.AutomaticSize.Y
     content.CanvasSize = UDim2.new(0, 0, 0, 0)
     content.ScrollingDirection = Enum.ScrollingDirection.Y
@@ -205,32 +341,62 @@ function Dock.new(opts)
     contentLayout.Parent = content
     self._content = content
 
-    -- footer
+    -- footer: count left, menu-key chip right
     local footer = Instance.new("Frame")
     footer.Name = "Footer"
     footer.LayoutOrder = 3
     footer.BackgroundTransparency = 1
-    footer.Size = UDim2.new(1, 0, 0, 18)
+    footer.Size = UDim2.new(1, 0, 0, 22)
     footer.Parent = panel
-    local footLabel = label("RShift — toggle dock", 10, C.muted, FONT)
-    footLabel.AnchorPoint = Vector2.new(1, 0.5)
-    footLabel.Position = UDim2.new(1, 0, 0.5, 0)
-    footLabel.Size = UDim2.new(1, 0, 0, 16)
-    footLabel.TextXAlignment = Enum.TextXAlignment.Right
-    footLabel.Parent = footer
-    self._footLabel = footLabel
+
+    local footLine = Instance.new("Frame")
+    footLine.BackgroundColor3 = C.line
+    footLine.BorderSizePixel = 0
+    footLine.Size = UDim2.new(1, 0, 0, 1)
+    footLine.Parent = footer
+
+    local countLabel = label("N3Z HUB", 11, C.footText, FONT)
+    countLabel.Position = UDim2.new(0, 0, 0, 5)
+    countLabel.Size = UDim2.new(1, -80, 0, 16)
+    countLabel.Parent = footer
+    self._countLabel = countLabel
+
+    if L.footerKeyChip then
+        local kbdChip = Instance.new("TextLabel")
+        kbdChip.BackgroundTransparency = 1
+        kbdChip.Text = keyShort(self._menuKey)
+        kbdChip.TextSize = 10
+        kbdChip.TextColor3 = C.kbdText
+        kbdChip.Font = FONT_MONO
+        kbdChip.AutomaticSize = Enum.AutomaticSize.XY
+        kbdChip.AnchorPoint = Vector2.new(1, 0)
+        kbdChip.Position = UDim2.new(1, 0, 0, 3)
+        kbdChip.Parent = footer
+        corner(kbdChip, 5)
+        stroke(kbdChip, C.kbdBd, 0)
+        pad(kbdChip, 8, 3, 8, 3)
+        self._footKbd = kbdChip
+    else
+        -- mobile: no keyboard — hint label replaces the key chip (mockup footer)
+        local hint = label("⌄ tap tab to collapse", 11, C.accent, FONT)
+        hint.AnchorPoint = Vector2.new(1, 0)
+        hint.Position = UDim2.new(1, 0, 0, 5)
+        hint.Size = UDim2.new(0, 180, 0, 16)
+        hint.TextXAlignment = Enum.TextXAlignment.Right
+        hint.Parent = footer
+    end
 
     -- dock bar
     local bar = Instance.new("Frame")
     bar.Name = "DockBar"
     bar.BackgroundColor3 = C.dockBg
-    bar.BackgroundTransparency = 0.06
+    bar.BackgroundTransparency = 0.04
     bar.AutomaticSize = Enum.AutomaticSize.X
-    bar.Size = UDim2.new(0, 0, 0, 52)
+    bar.Size = UDim2.new(0, 0, 0, L.barH)
     bar.LayoutOrder = 2
     bar.Parent = stage
-    corner(bar, 16)
-    stroke(bar, 0.9)
+    corner(bar, L.barCorner)
+    stroke(bar, C.border, 0)
     local barPad = Instance.new("UIPadding")
     barPad.PaddingLeft = UDim.new(0, 8)
     barPad.PaddingRight = UDim.new(0, 8)
@@ -261,19 +427,25 @@ function Dock.new(opts)
     ind.Name = "Indicator"
     ind.BackgroundColor3 = C.accent
     ind.BackgroundTransparency = 0
+    ind.BorderSizePixel = 0
     ind.AnchorPoint = Vector2.new(0, 0.5)
     ind.Position = UDim2.new(0, 8, 0.5, 0)
-    ind.Size = UDim2.new(0, 60, 0, 36)
+    ind.Size = UDim2.new(0, 60, 0, L.indH)
     ind.ZIndex = 0
     ind.Visible = false
     ind.Parent = bar
-    corner(ind, 10)
+    corner(ind, L.indCorner)
+    glow(ind, C.accent, 12, 0.85, false)
     self._indicator = ind
 
     -- pin the indicator under the active tab. Waits for real layout sizes
     -- (buttons use AutomaticSize.X) before measuring; instant on boot,
     -- spring-tweened on tab switches, re-pinned when the bar resizes.
     local function pinIndicator(animate)
+        if not self._activeTab then
+            ind.Visible = false
+            return
+        end
         task.spawn(function()
             local t = self._tabs[self._activeTab]
             if not t then return end
@@ -292,7 +464,7 @@ function Dock.new(opts)
             local padInst = barInst:FindFirstChildOfClass("UIPadding")
             if padInst then padL = padInst.PaddingLeft.Offset end
             local bp = btn.AbsolutePosition - barInst.AbsolutePosition
-            local size = UDim2.new(0, btn.AbsoluteSize.X, 0, 36)
+            local size = UDim2.new(0, btn.AbsoluteSize.X, 0, L.indH)
             local pos = UDim2.new(0, bp.X - padL, 0.5, 0)
             indInst.Visible = true
             if animate then
@@ -314,11 +486,11 @@ function Dock.new(opts)
     logo.Name = "Logo"
     logo.BackgroundTransparency = 1
     logo.RichText = true
-    logo.Text = '<font color="#E8ECF4"><b>N3Z</b></font><font color="#22D3EE"><b>·</b></font>'
+    logo.Text = '<font color="#DFE3EE"><b>N3Z</b></font><font color="#22D3EE"><b>·</b></font>'
     logo.TextSize = 14
     logo.Font = FONT_BOLD
     logo.AutomaticSize = Enum.AutomaticSize.X
-    logo.Size = UDim2.new(0, 0, 0, 36)
+    logo.Size = UDim2.new(0, 0, 0, L.tabH)
     logo.LayoutOrder = -1
     logo.Parent = tabsRow
 
@@ -327,19 +499,44 @@ function Dock.new(opts)
         self:AddTab(TAB_LABEL[id], id)
     end
 
-    -- avatar at the end of the bar
+    -- spacer before avatar (mockup: 6px left margin)
+    if L.showAvatar then
+    local spacer = Instance.new("Frame")
+    spacer.Name = "AvatarGap"
+    spacer.BackgroundTransparency = 1
+    spacer.Size = UDim2.new(0, 2, 0, 1)
+    spacer.LayoutOrder = 999
+    spacer.Parent = tabsRow
+
+    -- avatar with gradient ring + glow (mockup .du)
+    local avWrap = Instance.new("Frame")
+    avWrap.Name = "Avatar"
+    avWrap.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    avWrap.BorderSizePixel = 0
+    avWrap.Size = UDim2.new(0, 38, 0, 38)
+    avWrap.LayoutOrder = 1000
+    avWrap.Parent = tabsRow
+    cornerRound(avWrap)
+    local grad = Instance.new("UIGradient")
+    grad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, C.accent),
+        ColorSequenceKeypoint.new(1, C.accent2),
+    })
+    grad.Rotation = 135
+    grad.Parent = avWrap
+    glow(avWrap, C.accent, 8, 0.85, true)
     local av = Instance.new("ImageLabel")
-    av.Name = "Avatar"
-    av.BackgroundColor3 = C.track
+    av.Name = "AvatarImage"
+    av.BackgroundColor3 = C.panelBg
+    av.BorderSizePixel = 0
+    av.AnchorPoint = Vector2.new(0.5, 0.5)
+    av.Position = UDim2.new(0.5, 0, 0.5, 0)
     av.Size = UDim2.new(0, 34, 0, 34)
     av.Image = ""
-    av.LayoutOrder = 1000
-    av.Parent = tabsRow
-    corner(av, 17)
-    stroke(av, 0.75)
+    av.Parent = avWrap
+    cornerRound(av)
     self._avatar = av
-
-    self:SetActiveTab("combat")
+    end
 
     -- menu key
     conn(UserInputService.InputBegan:Connect(function(input, gpe)
@@ -354,6 +551,7 @@ end
 
 -- ---------- tabs ----------
 function Dock:AddTab(tabLabel, tabId)
+    local L = self._layout
     tabId = tabId or string.lower(tostring(tabLabel))
     if self._tabs[tabId] then return tabId end
 
@@ -362,18 +560,20 @@ function Dock:AddTab(tabLabel, tabId)
     btn.BackgroundTransparency = 1
     btn.AutoButtonColor = false
     btn.Text = string.upper(tostring(tabLabel))
-    btn.TextSize = 12
+    btn.TextSize = L.tabFont
     btn.TextColor3 = C.muted
-    btn.Font = FONT_BOLD
+    btn.Font = FONT_MED
     btn.AutomaticSize = Enum.AutomaticSize.X
-    btn.Size = UDim2.new(0, 0, 0, 36)
+    btn.Size = UDim2.new(0, 0, 0, L.tabH)
     btn.ZIndex = 1
     btn.LayoutOrder = #self._tabIds
     btn.Parent = self._tabsRow
     local btnPad = Instance.new("UIPadding")
-    btnPad.PaddingLeft = UDim.new(0, 12)
-    btnPad.PaddingRight = UDim.new(0, 12)
+    btnPad.PaddingLeft = UDim.new(0, L.tabPad)
+    btnPad.PaddingRight = UDim.new(0, L.tabPad)
     btnPad.Parent = btn
+    local pressScale = Instance.new("UIScale")
+    pressScale.Parent = btn
 
     local page = Instance.new("Frame")
     page.Name = "Page_" .. tabId
@@ -389,25 +589,153 @@ function Dock:AddTab(tabLabel, tabId)
     pageLayout.Parent = page
 
     local id = tabId
+    local this = self
     self._conn(btn.MouseButton1Click:Connect(function()
-        self:SetActiveTab(id)
+        this:SetActiveTab(id)
+    end))
+    -- hover: brighten (mockup .di:hover)
+    self._conn(btn.MouseEnter:Connect(function()
+        if this._activeTab ~= id then btn.TextColor3 = C.text end
+    end))
+    self._conn(btn.MouseLeave:Connect(function()
+        if this._activeTab ~= id then btn.TextColor3 = C.muted end
+    end))
+    -- press: subtle scale (mockup .di:active)
+    self._conn(btn.MouseButton1Down:Connect(function()
+        TweenService:Create(pressScale, TweenInfo.new(0.1), { Scale = 0.96 }):Play()
+    end))
+    self._conn(btn.MouseButton1Up:Connect(function()
+        TweenService:Create(pressScale, TweenInfo.new(0.12), { Scale = 1 }):Play()
     end))
 
     table.insert(self._tabIds, tabId)
     self._tabs[tabId] = { btn = btn, page = page, order = #self._tabIds }
+    self._tabToggles[tabId] = {}
     return tabId
 end
 
+-- Clicking a tab opens its panel; clicking the active tab collapses it.
 function Dock:SetActiveTab(tabId)
     if not self._tabs[tabId] then return end
+    if self._activeTab == tabId then
+        self._activeTab = nil
+        for id, t in pairs(self._tabs) do
+            t.page.Visible = false
+            t.btn.TextColor3 = C.muted
+            t.btn.Font = FONT_MED
+        end
+        self._panel.Visible = false
+        if self._indicator then self._indicator.Visible = false end
+        self:_updateFooter()
+        return
+    end
     self._activeTab = tabId
+    self._panel.Visible = true
     for id, t in pairs(self._tabs) do
         local active = (id == tabId)
         t.page.Visible = active
         t.btn.TextColor3 = active and C.dark or C.muted
+        t.btn.Font = active and FONT_BOLD or FONT_MED
     end
     -- slide the indicator under the active button (robust pin: waits for layout)
     if self._pinIndicator then self._pinIndicator(true) end
+    self:_animateRows(self._tabs[tabId].page)
+    self:_updateFooter()
+end
+
+-- staggered row entrance (mockup rowIn): fresh snapshot each switch so
+-- dynamic colors (toggles) restore to their CURRENT state, then fade in.
+function Dock:_animateRows(page)
+    local rows = {}
+    for _, c in ipairs(page:GetChildren()) do
+        if c:IsA("GuiObject") and c.Name == "Row" then rows[#rows + 1] = c end
+    end
+    table.sort(rows, function(a, b) return (a.LayoutOrder or 0) < (b.LayoutOrder or 0) end)
+    for i, row in ipairs(rows) do
+        local snap = {}
+        local function rec(inst)
+            if inst:IsA("GuiObject") then
+                local bt = inst.BackgroundTransparency
+                if type(bt) == "number" and bt < 1 then
+                    snap[#snap + 1] = { inst = inst, prop = "BackgroundTransparency", target = bt }
+                end
+            end
+            if inst:IsA("TextLabel") or inst:IsA("TextButton") then
+                local tt = inst.TextTransparency
+                if type(tt) == "number" and tt < 1 then
+                    snap[#snap + 1] = { inst = inst, prop = "TextTransparency", target = tt }
+                end
+            end
+            if inst:IsA("ImageLabel") then
+                local it = inst.ImageTransparency
+                if type(it) == "number" and it < 1 then
+                    snap[#snap + 1] = { inst = inst, prop = "ImageTransparency", target = it }
+                end
+            end
+            for _, ch in ipairs(inst:GetChildren()) do
+                if ch.ClassName == "UIStroke" then
+                    local st = ch.Transparency
+                    if type(st) == "number" and st < 1 then
+                        snap[#snap + 1] = { inst = ch, prop = "Transparency", target = st }
+                    end
+                else
+                    rec(ch)
+                end
+            end
+        end
+        rec(row)
+        if #snap > 0 then
+            for _, s in ipairs(snap) do
+                if s.prop == "Transparency" then s.inst.Transparency = 1
+                elseif s.prop == "BackgroundTransparency" then s.inst.BackgroundTransparency = 1
+                elseif s.prop == "TextTransparency" then s.inst.TextTransparency = 1
+                elseif s.prop == "ImageTransparency" then s.inst.ImageTransparency = 1 end
+            end
+            task.delay((i - 1) * 0.04, function()
+                if self._dead or not row.Parent then return end
+                for _, s in ipairs(snap) do
+                    local goal = {}
+                    goal[s.prop] = s.target
+                    TweenService:Create(s.inst, TweenInfo.new(0.25,
+                        Enum.EasingStyle.Quad, Enum.EasingDirection.Out), goal):Play()
+                end
+            end)
+        end
+    end
+end
+
+function Dock:_refreshToggleCount()
+    local id = self._activeTab
+    if not id then return end
+    local hs = self._tabToggles[id]
+    if hs and #hs > 0 then
+        local on = 0
+        for _, h in ipairs(hs) do
+            if h:Get() then on = on + 1 end
+        end
+        self._countLabel.Text = string.upper(id) .. " — " .. on .. "/" .. #hs .. " ON"
+    end
+end
+
+function Dock:_updateFooter()
+    local id = self._activeTab
+    if not id then
+        self._countLabel.Text = "N3Z HUB"
+        return
+    end
+    local hs = self._tabToggles[id]
+    if hs and #hs > 0 then
+        self:_refreshToggleCount()
+    elseif self._tabInfo[id] then
+        self._countLabel.Text = self._tabInfo[id]
+    else
+        self._countLabel.Text = string.upper(id)
+    end
+end
+
+function Dock:SetTabInfo(tabId, text)
+    self._tabInfo[tabId] = text
+    self:_updateFooter()
 end
 
 function Dock:ClearRows(tabId)
@@ -426,57 +754,73 @@ function Dock:SetHeader(gameName, placeLine, modLine)
 end
 
 function Dock:SetAvatar(content)
-    if content and content ~= "" then
+    if self._avatar and content and content ~= "" then
         self._avatar.Image = content
     end
 end
 
-function Dock:SetMenuKey(key, name)
-    if typeof(key) == "EnumItem" then
-        self._menuKey = key
-    elseif type(key) == "string" then
-        local found = Enum.KeyCode[key]
-        if found then self._menuKey = found end
-    end
-    self:SetMenuKeyName(name or (self._menuKey and self._menuKey.Name) or tostring(key))
-end
-
 function Dock:SetMenuKeyName(name)
-    self._footLabel.Text = tostring(name) .. " — toggle dock"
+    if self._footKbd then self._footKbd.Text = tostring(name) end
 end
 
-function Dock:SetTabInfo(tabId, info)
-    local t = self._tabs[tabId]
-    if t then
-        t.info = info
-    end
+-- Rebind the menu toggle key: click the chip, press any key.
+function Dock:StartKeyRebind(chip)
+    if self._rebinding then return end
+    self._rebinding = true
+    local old = chip and chip.Text or nil
+    if chip then chip.Text = "…" end
+    local conn
+    conn = UserInputService.InputBegan:Connect(function(input, gpe)
+        if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+        if input.KeyCode ~= Enum.KeyCode.Escape then
+            self._menuKey = input.KeyCode
+            local short = keyShort(input.KeyCode)
+            if chip then chip.Text = short end
+            self:SetMenuKeyName(short)
+        elseif chip and old then
+            chip.Text = old
+        end
+        conn:Disconnect()
+        self._rebinding = false
+    end)
 end
 
 -- ---------- rows ----------
 local _rowOrder = 0
-function Dock:_baseRow(tabId, height)
+function Dock:_baseRow(tabId, noHover)
     local t = self._tabs[tabId]
     assert(t, "Dock:AddRow unknown tab " .. tostring(tabId))
-    _rowOrder += 1
+    local L = self._layout
+    _rowOrder = _rowOrder + 1
+    -- The row is ONE button: clicking anywhere on it activates the control,
+    -- exactly like the mockup's .frow. Nested buttons are avoided on purpose.
     local row = Instance.new("TextButton")
     row.Name = "Row"
-    row.BackgroundColor3 = C.rowBg
-    row.BackgroundTransparency = 0.25
+    row.BackgroundColor3 = C.rowHover
+    row.BackgroundTransparency = 1 -- transparent until hover (mockup)
     row.AutoButtonColor = false
     row.Text = ""
     row.Size = UDim2.new(1, 0, 0, 0)
     row.AutomaticSize = Enum.AutomaticSize.Y
     row.LayoutOrder = _rowOrder
     row.Parent = t.page
-    corner(row, 10)
-    pad(row, 12, 9, 12, 9)
-    -- hover
-    self._conn(row.MouseEnter:Connect(function()
-        TweenService:Create(row, TweenInfo.new(0.15), { BackgroundColor3 = C.rowHover }):Play()
-    end))
-    self._conn(row.MouseLeave:Connect(function()
-        TweenService:Create(row, TweenInfo.new(0.15), { BackgroundColor3 = C.rowBg }):Play()
-    end))
+    corner(row, L.rowCorner)
+    local rp = pad(row, L.rowPadL, L.rowPadT, L.rowPadL, L.rowPadT)
+    if not noHover then
+        -- hover: highlight + slight right nudge (mockup translateX via padding)
+        self._conn(row.MouseEnter:Connect(function()
+            TweenService:Create(row, TweenInfo.new(0.15),
+                { BackgroundColor3 = C.rowHover, BackgroundTransparency = 0 }):Play()
+            TweenService:Create(rp, TweenInfo.new(0.15),
+                { PaddingLeft = UDim.new(0, L.rowPadL + 3) }):Play()
+        end))
+        self._conn(row.MouseLeave:Connect(function()
+            TweenService:Create(row, TweenInfo.new(0.15),
+                { BackgroundTransparency = 1 }):Play()
+            TweenService:Create(rp, TweenInfo.new(0.15),
+                { PaddingLeft = UDim.new(0, L.rowPadL) }):Play()
+        end))
+    end
     return row
 end
 
@@ -492,21 +836,23 @@ function Dock:_rightZone(row)
     l.FillDirection = Enum.FillDirection.Horizontal
     l.VerticalAlignment = Enum.VerticalAlignment.Center
     l.Padding = UDim.new(0, 8)
+    l.SortOrder = Enum.SortOrder.LayoutOrder
     l.Parent = z
     return z
 end
 
 function Dock:_textBlock(row, name, desc)
+    local L = self._layout
     local holder = Instance.new("Frame")
     holder.BackgroundTransparency = 1
     holder.Size = UDim2.new(1, -170, 0, 0)
     holder.AutomaticSize = Enum.AutomaticSize.Y
     holder.Parent = row
-    local nl = label(name or "", 13, C.text, FONT_MED)
-    nl.Size = UDim2.new(1, 0, 0, 17)
+    local nl = label(name or "", L.nameFont, C.text, FONT_MED)
+    nl.Size = UDim2.new(1, 0, 0, L.nameH)
     nl.Parent = holder
     if desc and desc ~= "" then
-        local dl = label(desc, 11, C.muted, FONT)
+        local dl = label(desc, L.descFont, C.soft, FONT)
         dl.Size = UDim2.new(1, 0, 0, 14)
         dl.Position = UDim2.new(0, 0, 0, 18)
         dl.Parent = holder
@@ -514,45 +860,51 @@ function Dock:_textBlock(row, name, desc)
     else
         holder.Size = UDim2.new(1, -170, 0, 18)
     end
-    return nl, dl, holder
+    return holder
 end
 
-local function makeChip(parent, text, accentColor)
+-- key chip (mockup .kbd): mono, bordered
+local function makeKbd(parent, text)
     local chip = Instance.new("TextLabel")
-    chip.BackgroundColor3 = C.track
-    chip.BackgroundTransparency = 0.2
+    chip.Name = "KeyChip"
+    chip.BackgroundTransparency = 1
     chip.Text = text
     chip.TextSize = 10
-    chip.TextColor3 = accentColor or C.muted
-    chip.Font = FONT_BOLD
+    chip.TextColor3 = C.kbdText
+    chip.Font = FONT_MONO
     chip.AutomaticSize = Enum.AutomaticSize.XY
     chip.Parent = parent
-    corner(chip, 6)
-    local p = Instance.new("UIPadding")
-    p.PaddingLeft = UDim.new(0, 8)
-    p.PaddingRight = UDim.new(0, 8)
-    p.PaddingTop = UDim.new(0, 4)
-    p.PaddingBottom = UDim.new(0, 4)
-    p.Parent = chip
+    corner(chip, 5)
+    stroke(chip, C.kbdBd, 0)
+    pad(chip, 8, 3, 8, 3)
     return chip
 end
 
+-- toggle switch (mockup .tgl): the pill is a pure visual — the ROW
+-- handles the click. ON = green track/knob with glow, springy motion.
 local function makeToggle(parent, initial, onFlip, dock)
-    local pill = Instance.new("TextButton")
-    pill.BackgroundColor3 = initial and C.accent or C.track
-    pill.BackgroundTransparency = initial and 0.15 or 0.2
-    pill.Text = ""
-    pill.AutoButtonColor = false
-    pill.Size = UDim2.new(0, 40, 0, 22)
+    local L = dock._layout
+    local pill = Instance.new("Frame")
+    pill.Name = "Toggle"
+    pill.BackgroundColor3 = initial and C.good or C.track
+    pill.BackgroundTransparency = initial and 0.72 or 0
+    pill.BorderSizePixel = 0
+    pill.Size = UDim2.new(0, L.tglW, 0, L.tglH)
     pill.Parent = parent
-    corner(pill, 11)
+    corner(pill, L.tglH / 2)
+    local inset = stroke(pill, C.good, initial and 0.6 or 1)
+    inset.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
     local knob = Instance.new("Frame")
-    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    knob.Size = UDim2.new(0, 16, 0, 16)
-    knob.AnchorPoint = Vector2.new(0, 0.5)
-    knob.Position = initial and UDim2.new(1, -19, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)
+    knob.Name = "Knob"
+    knob.BackgroundColor3 = initial and C.good or C.knobOff
+    knob.BorderSizePixel = 0
+    knob.Size = UDim2.new(0, L.knob, 0, L.knob)
+    knob.AnchorPoint = Vector2.new(0.5, 0.5)
+    knob.Position = initial and UDim2.new(0, L.tglOnX, 0.5, 0) or UDim2.new(0, L.tglOffX, 0.5, 0)
     knob.Parent = pill
-    corner(knob, 8)
+    cornerRound(knob)
+    local knobGlow = glow(knob, C.good, 8, initial and 0.8 or 1, true)
 
     local state = initial == true
     local handle = {}
@@ -563,29 +915,31 @@ local function makeToggle(parent, initial, onFlip, dock)
         v = (v == true)
         if v == state then return end
         state = v
-        pill.BackgroundColor3 = state and C.accent or C.track
-        pill.BackgroundTransparency = state and 0.15 or 0.2
+        pill.BackgroundColor3 = state and C.good or C.track
+        pill.BackgroundTransparency = state and 0.72 or 0
+        inset.Transparency = state and 0.6 or 1
+        knob.BackgroundColor3 = state and C.good or C.knobOff
+        knobGlow.BackgroundTransparency = state and 0.8 or 1
         knob:TweenPosition(
-            state and UDim2.new(1, -19, 0.5, 0) or UDim2.new(0, 3, 0.5, 0),
-            Enum.EasingDirection.Out, Enum.EasingStyle.Back, 0.22, true
+            state and UDim2.new(0, L.tglOnX, 0.5, 0) or UDim2.new(0, L.tglOffX, 0.5, 0),
+            Enum.EasingDirection.Out, Enum.EasingStyle.Back, 0.3, true
         )
         fire(state)
+        dock:_refreshToggleCount()
     end
     function handle:Get() return state end
-    dock._conn(pill.MouseButton1Click:Connect(function()
-        handle:Set(not state)
-    end))
     return handle
 end
 
 function Dock:AddRow(tabId, def)
     def = def or {}
+    local L = self._layout
     local kind = def.kind or "toggle"
 
     if kind == "section" then
         local t = self._tabs[tabId]
-        _rowOrder += 1
-        local s = label(string.upper(tostring(def.text or "")), 10, C.muted, FONT_BOLD)
+        _rowOrder = _rowOrder + 1
+        local s = label(string.upper(tostring(def.text or "")), 10, C.soft, FONT_BOLD)
         s.Size = UDim2.new(1, 0, 0, 16)
         s.LayoutOrder = _rowOrder
         s.Parent = t.page
@@ -593,8 +947,8 @@ function Dock:AddRow(tabId, def)
     end
 
     if kind == "label" then
-        local row = self:_baseRow(tabId)
-        local l = label(tostring(def.text or ""), 11, C.muted, FONT)
+        local row = self:_baseRow(tabId, true)
+        local l = label(tostring(def.text or ""), 11, C.soft, FONT)
         l.Size = UDim2.new(1, -24, 0, 0)
         l.AutomaticSize = Enum.AutomaticSize.Y
         l.TextWrapped = true
@@ -603,35 +957,43 @@ function Dock:AddRow(tabId, def)
     end
 
     if kind == "modulecard" then
-        local row = self:_baseRow(tabId)
+        local row = self:_baseRow(tabId, true) -- no hover nudge on cards
+        local st = stroke(row, def.active and C.accent or C.border, 0)
         if def.active then
-            stroke(row, 0.55).Color = C.accent
+            row.BackgroundColor3 = C.accent
+            row.BackgroundTransparency = 0.94
+            glow(row, C.accent, 12, 0.88, false)
         end
         local holder = Instance.new("Frame")
         holder.BackgroundTransparency = 1
-        holder.Size = UDim2.new(1, -120, 0, 34)
+        holder.Size = UDim2.new(1, -120, 0, 36)
         holder.Parent = row
-        local nl = label(def.name or "", 13, C.text, FONT_MED)
-        nl.Size = UDim2.new(1, 0, 0, 17)
+        local nl = label(def.name or "", 14, C.text, FONT_BOLD)
+        nl.Size = UDim2.new(1, 0, 0, 18)
         nl.Parent = holder
-        local sl = label(def.sub or "", 11, C.muted, FONT)
+        local sl = label(def.sub or "", 10, C.soft, FONT_MONO)
         sl.Size = UDim2.new(1, 0, 0, 14)
-        sl.Position = UDim2.new(0, 0, 0, 18)
+        sl.Position = UDim2.new(0, 0, 0, 20)
         sl.Parent = holder
         local z = self:_rightZone(row)
         local pill = Instance.new("TextLabel")
+        pill.Name = "StatePill"
         pill.Text = def.active and "ACTIVE" or "IDLE"
         pill.TextSize = 10
         pill.Font = FONT_BOLD
-        pill.TextColor3 = def.active and Color3.fromRGB(4, 18, 26) or C.muted
-        pill.BackgroundColor3 = def.active and C.accent or C.track
-        pill.BackgroundTransparency = def.active and 0 or 0.2
+        pill.TextColor3 = def.active and C.dark or C.muted
+        pill.BackgroundColor3 = def.active and C.good or C.track
+        pill.BackgroundTransparency = def.active and 0 or 0
         pill.AutomaticSize = Enum.AutomaticSize.XY
         pill.Parent = z
         corner(pill, 8)
         pad(pill, 10, 5, 10, 5)
         if def.onPress then
+            local lastFire = 0
             self._conn(row.MouseButton1Click:Connect(function()
+                local now = os.clock()
+                if now - lastFire < 0.25 then return end
+                lastFire = now
                 task.spawn(pcall, def.onPress)
             end))
         end
@@ -640,101 +1002,63 @@ function Dock:AddRow(tabId, def)
 
     -- interactive rows: text block left, control right
     local row = self:_baseRow(tabId)
-    local nameLabel, descLabel, textHolder = self:_textBlock(row, def.name, def.desc)
+    self:_textBlock(row, def.name, def.desc)
     local z = self:_rightZone(row)
 
     if kind == "toggle" then
-        if def.key then makeChip(z, tostring(def.key)) end
+        if def.key then makeKbd(z, tostring(def.key)) end
         local h = makeToggle(z, def.value == true, def.onChange, self)
+        -- clicking anywhere on the row flips the switch (mockup .frow)
+        self._conn(row.MouseButton1Click:Connect(function()
+            h:Set(not h:Get())
+        end))
+        -- hover: knob grows slightly (mockup .tgl:hover::after)
+        local knob = z:FindFirstChild("Toggle", true) and z:FindFirstChild("Toggle", true):FindFirstChild("Knob")
+        if knob then
+            self._conn(row.MouseEnter:Connect(function()
+                TweenService:Create(knob, TweenInfo.new(0.12), { Size = UDim2.new(0, L.knob + 2, 0, L.knob + 2) }):Play()
+            end))
+            self._conn(row.MouseLeave:Connect(function()
+                TweenService:Create(knob, TweenInfo.new(0.12), { Size = UDim2.new(0, L.knob, 0, L.knob) }):Play()
+            end))
+        end
+        if not self._tabToggles[tabId] then self._tabToggles[tabId] = {} end
+        table.insert(self._tabToggles[tabId], h)
         return h
     end
 
     if kind == "action" then
-        if def.chip then
-            local chipBtn = Instance.new("TextButton")
-            chipBtn.BackgroundColor3 = C.track
-            chipBtn.BackgroundTransparency = 0.2
-            chipBtn.Text = tostring(def.chip)
-            chipBtn.TextSize = 10
-            chipBtn.TextColor3 = C.accent
-            chipBtn.Font = FONT_BOLD
-            chipBtn.AutomaticSize = Enum.AutomaticSize.XY
-            chipBtn.AutoButtonColor = false
-            chipBtn.Parent = z
-            corner(chipBtn, 6)
-            local p = Instance.new("UIPadding")
-            p.PaddingLeft = UDim.new(0, 8)
-            p.PaddingRight = UDim.new(0, 8)
-            p.PaddingTop = UDim.new(0, 4)
-            p.PaddingBottom = UDim.new(0, 4)
-            p.Parent = chipBtn
-
-            local handle = { button = chipBtn }
-            function handle:SetText(t) chipBtn.Text = tostring(t) end
-
+        local chipRef = nil
+        if def.chip then chipRef = makeKbd(z, tostring(def.chip)) end
+        local lastFire = 0
+        local function firePress()
+            -- guard: the inner button and the row can both observe the same
+            -- physical click (no nested-button double-fire)
+            local now = os.clock()
+            if now - lastFire < 0.25 then return end
+            lastFire = now
             if def.rebindKey then
-                local capturing = false
-                local connInput
-                local function startCapture()
-                    if capturing then return end
-                    capturing = true
-                    chipBtn.Text = "[...]"
-                    chipBtn.TextColor3 = C.accent2
-                    if connInput then connInput:Disconnect() end
-                    local armedAt = os.clock()
-                    connInput = UserInputService.InputBegan:Connect(function(input, gpe)
-                        if os.clock() - armedAt < 0.12 then return end
-                        if input.UserInputType == Enum.UserInputType.Keyboard then
-                            if input.KeyCode == Enum.KeyCode.Escape then
-                                capturing = false
-                                chipBtn.Text = self._menuKey and self._menuKey.Name or tostring(def.chip)
-                                chipBtn.TextColor3 = C.accent
-                                if connInput then connInput:Disconnect() connInput = nil end
-                                return
-                            end
-                            if input.KeyCode ~= Enum.KeyCode.Unknown then
-                                self:SetMenuKey(input.KeyCode, input.KeyCode.Name)
-                                chipBtn.Text = input.KeyCode.Name
-                                chipBtn.TextColor3 = C.accent
-                                capturing = false
-                                if connInput then connInput:Disconnect() connInput = nil end
-                                if def.onRebind then
-                                    task.spawn(pcall, def.onRebind, input.KeyCode, input.KeyCode.Name)
-                                end
-                            end
-                        end
-                    end)
-                    self._conn(connInput)
-                end
-
-                self._conn(row.MouseButton1Click:Connect(startCapture))
-                self._conn(chipBtn.MouseButton1Click:Connect(startCapture))
-            elseif def.clipboard then
-                local function copyClip()
-                    pcall(function()
-                        if setclipboard then setclipboard(def.clipboard)
-                        elseif toclipboard then toclipboard(def.clipboard)
-                        end
-                    end)
-                    chipBtn.Text = "COPIED"
-                    chipBtn.TextColor3 = C.good
-                    task.delay(1.2, function()
-                        chipBtn.Text = tostring(def.chip)
-                        chipBtn.TextColor3 = C.accent
-                    end)
-                end
-                self._conn(row.MouseButton1Click:Connect(copyClip))
-                self._conn(chipBtn.MouseButton1Click:Connect(copyClip))
-            elseif def.onPress then
-                local function fire()
-                    task.spawn(pcall, def.onPress)
-                end
-                self._conn(row.MouseButton1Click:Connect(fire))
-                self._conn(chipBtn.MouseButton1Click:Connect(fire))
+                self:StartKeyRebind(chipRef)
+                return
             end
-            return handle
-        elseif def.buttonText then
+            if def.clipboard then
+                pcall(setclipboard, tostring(def.clipboard))
+                if chipRef then
+                    local oldText = chipRef.Text
+                    chipRef.Text = "COPIED"
+                    task.delay(1, function()
+                        if not self._dead and chipRef.Parent then
+                            chipRef.Text = oldText
+                        end
+                    end)
+                end
+            end
+            if def.onPress then task.spawn(pcall, def.onPress) end
+        end
+        self._conn(row.MouseButton1Click:Connect(firePress))
+        if def.buttonText then
             local b = Instance.new("TextButton")
+            b.Name = "ActionButton"
             b.Text = tostring(def.buttonText)
             b.TextSize = 11
             b.Font = FONT_BOLD
@@ -746,24 +1070,15 @@ function Dock:AddRow(tabId, def)
             b.Parent = z
             corner(b, 8)
             pad(b, 12, 6, 12, 6)
-            if def.danger then stroke(b, 0.5).Color = C.danger end
-            local handle = { button = b }
-            function handle:SetText(t) b.Text = tostring(t) end
-            if def.onPress then
-                local function fire()
-                    task.spawn(pcall, def.onPress)
-                end
-                self._conn(b.MouseButton1Click:Connect(fire))
-                self._conn(row.MouseButton1Click:Connect(fire))
-            end
-            return handle
+            if def.danger then stroke(b, C.danger, 0.5).ApplyStrokeMode = Enum.ApplyStrokeMode.Border end
+            self._conn(b.MouseButton1Click:Connect(firePress))
         end
         return {}
     end
 
     if kind == "button" then
         local b = Instance.new("TextButton")
-        b.Text = tostring(def.buttonText or def.name or "Button")
+        b.Text = tostring(def.name or "Button")
         b.TextSize = 11
         b.Font = FONT_MED
         b.TextColor3 = C.text
@@ -774,114 +1089,13 @@ function Dock:AddRow(tabId, def)
         b.Parent = z
         corner(b, 8)
         pad(b, 12, 6, 12, 6)
-
-        local handle = { button = b }
-        function handle:SetName(n)
-            local str = tostring(n)
-            b.Text = str
-            if nameLabel then nameLabel.Text = str end
-        end
-        function handle:Set(t)
-            if type(t) == "table" and t.Name ~= nil then
-                handle:SetName(t.Name)
-            elseif type(t) == "string" then
-                handle:SetName(t)
-            end
-        end
-
-        local labelProxy = {}
-        setmetatable(labelProxy, {
-            __index = function(_, k)
-                if k == "Text" then return b.Text end
-                return b[k]
-            end,
-            __newindex = function(_, k, v)
-                if k == "Text" then
-                    handle:SetName(v)
-                else
-                    pcall(function() b[k] = v end)
-                end
-            end,
-        })
-        handle.label = labelProxy
-
+        local handle = {}
+        function handle:SetName(n) b.Text = tostring(n) end
         if def.onPress then
-            local function fire()
+            self._conn(b.MouseButton1Click:Connect(function()
                 task.spawn(pcall, def.onPress)
-            end
-            self._conn(b.MouseButton1Click:Connect(fire))
-            self._conn(row.MouseButton1Click:Connect(fire))
+            end))
         end
-        return handle
-    end
-
-    if kind == "keybind" then
-        local currentKey = tostring(def.value or def.default or def.key or "None")
-        local chip = Instance.new("TextButton")
-        chip.BackgroundColor3 = C.track
-        chip.BackgroundTransparency = 0.2
-        chip.Text = "[" .. currentKey .. "]"
-        chip.TextSize = 11
-        chip.TextColor3 = C.accent
-        chip.Font = FONT_BOLD
-        chip.AutomaticSize = Enum.AutomaticSize.XY
-        chip.AutoButtonColor = false
-        chip.Parent = z
-        corner(chip, 6)
-        pad(chip, 10, 5, 10, 5)
-
-        local capturing = false
-        local connInput
-        local handle = { button = chip, key = currentKey }
-
-        function handle:Set(newKey)
-            if typeof(newKey) == "EnumItem" then
-                newKey = newKey.Name
-            end
-            newKey = tostring(newKey or "None")
-            handle.key = newKey
-            chip.Text = "[" .. newKey .. "]"
-            chip.TextColor3 = C.accent
-            capturing = false
-            if connInput then connInput:Disconnect() connInput = nil end
-            if def.onChange then task.spawn(pcall, def.onChange, newKey) end
-            if def.callback then task.spawn(pcall, def.callback, newKey) end
-        end
-
-        local function startCapture()
-            if capturing then return end
-            capturing = true
-            chip.Text = "[...]"
-            chip.TextColor3 = C.accent2
-            if connInput then connInput:Disconnect() end
-            local armedAt = os.clock()
-            connInput = UserInputService.InputBegan:Connect(function(input, gpe)
-                if os.clock() - armedAt < 0.12 then return end
-                if input.UserInputType == Enum.UserInputType.Keyboard then
-                    if input.KeyCode == Enum.KeyCode.Escape then
-                        capturing = false
-                        chip.Text = "[" .. handle.key .. "]"
-                        chip.TextColor3 = C.accent
-                        if connInput then connInput:Disconnect() connInput = nil end
-                        return
-                    end
-                    if input.KeyCode ~= Enum.KeyCode.Unknown then
-                        handle:Set(input.KeyCode.Name)
-                    end
-                elseif input.UserInputType == Enum.UserInputType.MouseButton1
-                    or input.UserInputType == Enum.UserInputType.MouseButton2
-                    or input.UserInputType == Enum.UserInputType.MouseButton3 then
-                    handle:Set(input.UserInputType.Name)
-                end
-            end)
-            self._conn(connInput)
-        end
-
-        self._conn(row.MouseButton1Click:Connect(startCapture))
-        self._conn(chip.MouseButton1Click:Connect(startCapture))
-
-        handle.label = chip
-        handle.keyText = chip
         return handle
     end
 
@@ -893,10 +1107,10 @@ function Dock:AddRow(tabId, def)
 
         local wrap = Instance.new("Frame")
         wrap.BackgroundTransparency = 1
-        wrap.Size = UDim2.new(0, 150, 0, 30)
+        wrap.Size = UDim2.new(0, L.sliderW, 0, L.sliderH)
         wrap.Parent = z
 
-        local valLabel = label("", 11, C.accent, FONT_MED)
+        local valLabel = label("", 11, C.accent, FONT_MONO)
         valLabel.AnchorPoint = Vector2.new(1, 0)
         valLabel.Position = UDim2.new(1, 0, 0, 0)
         valLabel.Size = UDim2.new(1, 0, 0, 14)
@@ -905,6 +1119,7 @@ function Dock:AddRow(tabId, def)
 
         local track = Instance.new("TextButton")
         track.BackgroundColor3 = C.track
+        track.BorderSizePixel = 0
         track.Text = ""
         track.AutoButtonColor = false
         track.AnchorPoint = Vector2.new(0, 1)
@@ -915,16 +1130,18 @@ function Dock:AddRow(tabId, def)
 
         local fill = Instance.new("Frame")
         fill.BackgroundColor3 = C.accent
+        fill.BorderSizePixel = 0
         fill.Size = UDim2.new(0, 0, 1, 0)
         fill.Parent = track
         corner(fill, 3)
 
         local knob = Instance.new("Frame")
         knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-        knob.Size = UDim2.new(0, 12, 0, 12)
+        knob.BorderSizePixel = 0
+        knob.Size = UDim2.new(0, L.sliderKnob, 0, L.sliderKnob)
         knob.AnchorPoint = Vector2.new(0.5, 0.5)
         knob.Parent = track
-        corner(knob, 6)
+        cornerRound(knob)
 
         local handle = {}
         local function render()
@@ -971,7 +1188,6 @@ function Dock:AddRow(tabId, def)
                 dragging = false
             end
         end))
-        -- row click (not on track) also toggles nothing; keep row press harmless
         render()
         return handle
     end
@@ -984,11 +1200,13 @@ function Dock:AddRow(tabId, def)
         local btn = Instance.new("TextButton")
         btn.BackgroundColor3 = C.track
         btn.BackgroundTransparency = 0.2
+        btn.BorderSizePixel = 0
         btn.Text = ""
         btn.AutoButtonColor = false
-        btn.Size = UDim2.new(0, 130, 0, 28)
+        btn.Size = UDim2.new(0, L.ddW, 0, L.ddH)
         btn.Parent = z
         corner(btn, 8)
+        stroke(btn, C.border, 0.4)
         local btnLabel = label(tostring(value), 11, C.text, FONT_MED)
         btnLabel.Position = UDim2.new(0, 10, 0, 0)
         btnLabel.Size = UDim2.new(1, -30, 1, 0)
@@ -1010,6 +1228,7 @@ function Dock:AddRow(tabId, def)
         local optsLayout = Instance.new("UIListLayout")
         optsLayout.FillDirection = Enum.FillDirection.Vertical
         optsLayout.Padding = UDim.new(0, 4)
+        optsLayout.SortOrder = Enum.SortOrder.LayoutOrder
         optsLayout.Parent = opts
         local optsPad = Instance.new("UIPadding")
         optsPad.PaddingTop = UDim.new(0, 8)
@@ -1022,11 +1241,12 @@ function Dock:AddRow(tabId, def)
             end
             for _, opt in ipairs(options) do
                 local ob = Instance.new("TextButton")
-                ob.BackgroundColor3 = (opt == value) and C.track or C.rowBg
+                ob.BackgroundColor3 = (opt == value) and C.track or C.panelBg
                 ob.BackgroundTransparency = 0.1
+                ob.BorderSizePixel = 0
                 ob.AutoButtonColor = false
                 ob.Text = ""
-                ob.Size = UDim2.new(1, 0, 0, 26)
+                ob.Size = UDim2.new(1, 0, 0, L.ddOptH)
                 ob.Parent = opts
                 corner(ob, 7)
                 local ol = label(tostring(opt), 11, (opt == value) and C.accent or C.text, FONT)
@@ -1077,25 +1297,14 @@ function Dock:OnUnload(fn)
 end
 
 function Dock:Destroy()
-    self._visible = false
-    if self._stage then
-        pcall(function() self._stage.Visible = false end)
-    end
-    if self._gui then
-        pcall(function() self._gui.Enabled = false end)
-    end
+    self._dead = true
     for _, fn in ipairs(self._unloadFns) do
         pcall(fn)
     end
-    table.clear(self._unloadFns)
     for _, c in ipairs(self._conns) do
         pcall(function() c:Disconnect() end)
     end
-    table.clear(self._conns)
-    if self._gui then
-        pcall(function() self._gui:Destroy() end)
-        self._gui = nil
-    end
+    pcall(function() self._gui:Destroy() end)
 end
 
 return Dock
