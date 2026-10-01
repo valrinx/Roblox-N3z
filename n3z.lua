@@ -9,9 +9,10 @@
 local Players = game:GetService("Players")
 local localPlayer = Players.LocalPlayer
 
-local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/"
+local WORKER_URL = "https://n3z-hub.apiwatteen2.workers.dev/"
+local REPO_URL = WORKER_URL
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
-local HUB_URL = REPO_URL
+local HUB_URL = WORKER_URL
 
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: one object {id, name, version, game, placeIds, file, envKey?}
