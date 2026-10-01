@@ -116,7 +116,7 @@ local compatSrc = fetchHub("n3z-compat.lua")
 local makeWindow = assert(loadstring(compatSrc, "@n3z-compat"))()
 
 -- ---------- build ----------
-local dock = Dock.new({ menuKey = Enum.KeyCode.RightShift })
+local dock = Dock.new({ menuKey = Enum.KeyCode.K })
 local Window = makeWindow(dock)
 env.__N3Z_WINDOW = Window
 -- NOTE: __RAVEN_WINDOW alias is set AFTER the module loads (see below).
@@ -136,7 +136,7 @@ end
 local gameName = activeMod and activeMod.game or tostring(game.Name)
 local modLine = (activeMod and (activeMod.name .. " " .. activeMod.version) or "no module") .. " • " .. N3Z_VERSION
 dock:SetHeader(gameName, "place " .. tostring(placeId) .. " · " .. localPlayer.Name, modLine)
-dock:SetMenuKeyName(isMobile and "TAP" or "RShift")
+dock:SetMenuKeyName(isMobile and "TAP" or "K")
 
 -- avatar (async, never blocks boot)
 task.spawn(function()
@@ -173,7 +173,7 @@ if isMobile then
 else
     dock:AddRow("settings", {
         kind = "action", name = "Menu Toggle Key", desc = "กดที่แถวแล้วกดปุ่มใหม่เพื่อเปลี่ยน",
-        chip = "RShift", rebindKey = true,
+        chip = "K", rebindKey = true,
     })
 end
 dock:AddRow("settings", {

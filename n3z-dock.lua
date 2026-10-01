@@ -181,7 +181,7 @@ function Dock.new(opts)
     self._tabToggles = {} -- tabId -> {toggle handles} (footer count)
     self._tabInfo = {}    -- tabId -> static footer text
     self._activeTab = nil -- boot: dock bar only, nothing selected
-    self._menuKey = opts.menuKey or Enum.KeyCode.RightShift
+    self._menuKey = opts.menuKey or Enum.KeyCode.K
     self._visible = true
     self._dead = false
     -- layout: "pc" default, "mobile" for touch devices (mockup parity)
