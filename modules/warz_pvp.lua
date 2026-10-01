@@ -20,6 +20,21 @@ return function(Window, ctx)
     local localPlayer = Players.LocalPlayer
     local camera = Workspace.CurrentCamera
 
+    -- Read-only access to WarZ's own current hit-shape solver.
+    -- We only query the currently locked target, never every player per frame.
+    local WarzHitboxes = nil
+    pcall(function()
+        local shared = ReplicatedStorage:FindFirstChild("Shared")
+        local warz = shared and shared:FindFirstChild("warz")
+        local module = warz and warz:FindFirstChild("WarzHitboxes")
+        if module and module:IsA("ModuleScript") then
+            local api = require(module)
+            if type(api) == "table" and type(api.DataShapes) == "function" then
+                WarzHitboxes = api
+            end
+        end
+    end)
+
     -- Clean up previous instance (ghost UI prevention)
     local environment = (type(getgenv) == "function" and getgenv()) or _G
     if type(environment.__RAVEN_WARZPVP) == "table"
@@ -32,7 +47,7 @@ return function(Window, ctx)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.4.5"
+    environment.RAVEN_WARZPVP_VER = "1.4.8"
 
     local running = true
     local connections = {}
@@ -57,6 +72,7 @@ return function(Window, ctx)
         aimbot = false,
         aimMaxDist = 500,
         aimFov = 150,
+        aimPosition = "Auto",
         aimResponse = 0.35,
         aimKeyName = "MouseButton2",
         autoHeal = false,
@@ -64,6 +80,7 @@ return function(Window, ctx)
         healSlot = 3,
         healCooldown = 0,
         noRecoil = false,
+        instantPickup = false,
     }
 
     -- Track every section we create so destroy() can remove them from the
@@ -192,33 +209,127 @@ return function(Window, ctx)
     -- WarzHitboxes builds its Chest capsule from Bip01_Spine2 -> Bip01_Neck.
     -- Aim at the middle of that exact animated segment instead of guessing
     -- from the merged Body mesh. This stays inside the game's real hit volume.
-    local function getAimPoint(character)
+    local AIM_POSITION_OPTIONS = { "Auto", "Head", "Neck", "Body", "Waist", "Arms", "Legs" }
+
+    local BONE_GROUPS = {
+        Head = { "Bip01_Head" },
+        Neck = { "Bip01_Neck" },
+        Body = { "Bip01_Spine2", "Bip01_Neck" },
+        Waist = { "Bip01_Spine", "Bip01_Pelvis" },
+        Arms = {
+            "Bip01_L_UpperArm", "Bip01_L_Forearm", "Bip01_L_Hand",
+            "Bip01_R_UpperArm", "Bip01_R_Forearm", "Bip01_R_Hand",
+        },
+        Legs = {
+            "Bip01_L_Thigh", "Bip01_L_Calf", "Bip01_L_Foot",
+            "Bip01_R_Thigh", "Bip01_R_Calf", "Bip01_R_Foot",
+        },
+        Auto = {
+            "Bip01_Head", "Bip01_Neck", "Bip01_Spine2", "Bip01_Spine1",
+            "Bip01_Spine", "Bip01_Pelvis",
+            "Bip01_L_UpperArm", "Bip01_L_Forearm", "Bip01_L_Hand",
+            "Bip01_R_UpperArm", "Bip01_R_Forearm", "Bip01_R_Hand",
+            "Bip01_L_Thigh", "Bip01_L_Calf", "Bip01_L_Foot",
+            "Bip01_R_Thigh", "Bip01_R_Calf", "Bip01_R_Foot",
+        },
+    }
+
+    local SHAPE_GROUPS = {
+        Head = { Bip01_Head = true },
+        Neck = { Throat = true, Bip01_Neck = true },
+        Body = { Chest = true, Bip01_Spine2 = true },
+        Waist = { Waist = true, Bip01_Spine = true, Bip01_Pelvis = true },
+        Arms = {
+            Bip01_L_UpperArm = true, Bip01_L_Forearm = true, Bip01_L_Hand = true,
+            Bip01_R_UpperArm = true, Bip01_R_Forearm = true, Bip01_R_Hand = true,
+        },
+        Legs = {
+            Bip01_L_Thigh = true, Bip01_L_Calf = true, Bip01_L_Foot = true, Bip01_L_Toe0 = true,
+            Bip01_R_Thigh = true, Bip01_R_Calf = true, Bip01_R_Foot = true, Bip01_R_Toe0 = true,
+        },
+    }
+
+    local function closestScreenPoint(points)
+        local center = camera.ViewportSize / 2
+        local bestPoint, bestName, bestPixels = nil, nil, math.huge
+        for _, item in ipairs(points) do
+            local point, name = item.point, item.name
+            if typeof(point) == "Vector3" then
+                local view, on = camera:WorldToViewportPoint(point)
+                if on and view.Z > 0 then
+                    local pixels = (Vector2.new(view.X, view.Y) - center).Magnitude
+                    if pixels < bestPixels then
+                        bestPoint, bestName, bestPixels = point, name, pixels
+                    end
+                end
+            end
+        end
+        return bestPoint, bestName, bestPixels
+    end
+
+    local function getBoneAimPoint(character, mode)
+        mode = BONE_GROUPS[mode] and mode or "Auto"
         local player = Players:GetPlayerFromCharacter(character)
         local live = getLiveAim(player)
         if live then
-            local spine2 = findLiveBone(live, "Bip01_Spine2")
-            local neck = findLiveBone(live, "Bip01_Neck")
-            local a, b = boneWorldPosition(spine2), boneWorldPosition(neck)
-            if a and b then
-                return a:Lerp(b, 0.5), "Chest"
+            local points = {}
+            for _, boneName in ipairs(BONE_GROUPS[mode]) do
+                local pos = boneWorldPosition(findLiveBone(live, boneName))
+                if pos then
+                    table.insert(points, { point = pos, name = boneName })
+                end
             end
 
-            local headBone = findLiveBone(live, "Bip01_Head")
-            local headPos = boneWorldPosition(headBone)
-            if headPos then
-                return headPos, "Head"
+            -- Chest/Waist represent volumes between two bones; their midpoint
+            -- is a better broad-phase estimate than either endpoint alone.
+            if mode == "Body" then
+                local a = boneWorldPosition(findLiveBone(live, "Bip01_Spine2"))
+                local b = boneWorldPosition(findLiveBone(live, "Bip01_Neck"))
+                if a and b then return a:Lerp(b, 0.5), "ChestBone" end
+            elseif mode == "Waist" then
+                local a = boneWorldPosition(findLiveBone(live, "Bip01_Spine"))
+                local b = boneWorldPosition(findLiveBone(live, "Bip01_Pelvis"))
+                if a and b then return a:Lerp(b, 0.5), "WaistBone" end
             end
 
-            local body = live:FindFirstChild("Body")
-            if body and body:IsA("BasePart") and body.Transparency < 1 then
-                return body.Position, "Body"
-            end
+            local point, name = closestScreenPoint(points)
+            if point then return point, name end
         end
 
-        local torso = bodyPart(character, "UpperTorso")
+        local fallback = bodyPart(character, "UpperTorso")
             or bodyPart(character, "Torso")
             or bodyPart(character, "Head")
-        return torso and torso.Position or nil, torso and torso.Name or nil
+        return fallback and fallback.Position or nil, fallback and fallback.Name or nil
+    end
+
+    local function shapeAllowed(mode, name)
+        if mode == "Auto" then return true end
+        local group = SHAPE_GROUPS[mode]
+        return group ~= nil and group[name] == true
+    end
+
+    local function getExactAimPoint(character, mode)
+        mode = BONE_GROUPS[mode] and mode or "Auto"
+
+        -- WarzHitboxes.DataShapes returns the exact current geometry used by
+        -- the game. Pick the eligible hit-shape center nearest the crosshair.
+        if WarzHitboxes and type(WarzHitboxes.DataShapes) == "function" then
+            local ok, shapes = pcall(WarzHitboxes.DataShapes, character, false)
+            if ok and type(shapes) == "table" then
+                local points = {}
+                for _, shape in ipairs(shapes) do
+                    if shapeAllowed(mode, shape.name) and typeof(shape.cf) == "CFrame" then
+                        table.insert(points, {
+                            point = shape.cf.Position,
+                            name = shape.name,
+                        })
+                    end
+                end
+                local point, name = closestScreenPoint(points)
+                if point then return point, name end
+            end
+        end
+        return getBoneAimPoint(character, mode)
     end
 
     local BODY_PARTS = {
@@ -758,60 +869,80 @@ return function(Window, ctx)
 
     -- [[ Aimbot: mouse-driven (no hitbox edits, no hooks, no remotes) ]]
     -- Drives the real mouse via mousemoverel() so the game's own camera
-    -- turns toward the target. Target = head closest to crosshair within FOV.
+    -- turns toward the target. Target = center of the game's animated Chest
+    -- hit volume (Bip01_Spine2 -> Bip01_Neck) closest to the crosshair.
     -- Target lock: once aiming starts, stick to the locked player until the
     -- lock goes invalid (dead / respawned / left FOV / out of range). Without
-    -- this the "nearest head" scan flickers between close targets and the
+    -- this the nearest-target scan flickers between close targets and the
     -- crosshair whips back and forth at high response.
     local aimLockPlayer = nil
     local aimLockCharacter = nil
     local aimHeld = false
     local capturingAimKey = false -- true while the custom aim-key button listens
 
-    local function canSeeAimPart(character, head)
+    local function canSeeAimPoint(character, point)
         local origin = camera.CFrame.Position
-        local direction = head.Position - origin
+        local direction = point - origin
         if direction.Magnitude < 0.01 then return false end
+
         local params = RaycastParams.new()
         params.FilterType = Enum.RaycastFilterType.Exclude
-        local ignored = {}
-        if localPlayer.Character then table.insert(ignored, localPlayer.Character) end
-        local hitboxes = Workspace:FindFirstChild("WarzHitboxes")
-        if hitboxes then table.insert(ignored, hitboxes) end
-        params.FilterDescendantsInstances = ignored
+        params.FilterDescendantsInstances = localPlayer.Character and { localPlayer.Character } or {}
         params.IgnoreWater = true
+
         local hit = Workspace:Raycast(origin, direction, params)
-        return not hit or hit.Instance:IsDescendantOf(character)
+        if not hit then return true end
+        if hit.Instance:IsDescendantOf(character) then return true end
+
+        -- CanQuery is disabled on WarZ character/LiveAim parts, so an obstacle
+        -- very near the target point should not incorrectly invalidate the lock.
+        return (hit.Position - origin).Magnitude >= direction.Magnitude - 0.15
     end
 
-    local function validAimHead(character, maxFov)
+    local function validAimPoint(character, maxFov, exact)
         if not isAlive(character) then return nil, nil end
-        local head = getAimPart(character)
-        if not head then return nil, nil end
-        local position = head.Position
-        if (position - camera.CFrame.Position).Magnitude > settings.aimMaxDist then
+        local point = exact
+            and getExactAimPoint(character, settings.aimPosition)
+            or getBoneAimPoint(character, settings.aimPosition)
+        if not point then return nil, nil end
+        if (point - camera.CFrame.Position).Magnitude > settings.aimMaxDist then
             return nil, nil
         end
-        local view, on = camera:WorldToViewportPoint(position)
+
+        local view, on = camera:WorldToViewportPoint(point)
         if not on or view.Z <= 0 then return nil, nil end
         local center = camera.ViewportSize / 2
         local pixels = (Vector2.new(view.X, view.Y) - center).Magnitude
         if pixels > maxFov then return nil, nil end
-        return head, pixels
+        return point, pixels
     end
 
     local function scanAimTarget()
-        local best, bestP, bestPx = nil, nil, settings.aimFov
+        -- Broad phase: cheap animated-bone screen distance for all players.
+        -- Narrow phase: exact WarzHitboxes Chest + LOS for only the closest few.
+        local candidates = {}
         for _, p in ipairs(Players:GetPlayers()) do
             if p ~= localPlayer then
                 local character = p.Character
-                local head, pixels = validAimHead(character, bestPx)
-                if head and pixels < bestPx and canSeeAimPart(character, head) then
-                    best, bestP, bestPx = head, p, pixels
+                local point, pixels = validAimPoint(character, settings.aimFov, false)
+                if point and pixels then
+                    table.insert(candidates, { player = p, pixels = pixels })
                 end
             end
         end
-        return best, bestP
+        table.sort(candidates, function(a, b)
+            return a.pixels < b.pixels
+        end)
+
+        for i = 1, math.min(4, #candidates) do
+            local p = candidates[i].player
+            local character = p.Character
+            local point, pixels = validAimPoint(character, settings.aimFov, true)
+            if point and pixels and canSeeAimPoint(character, point) then
+                return point, p
+            end
+        end
+        return nil, nil
     end
 
     local function getAimTarget()
@@ -819,13 +950,14 @@ return function(Window, ctx)
         if player then
             local character = aimLockCharacter
             if character and player.Character == character then
-                local head = validAimHead(character, settings.aimFov * 1.25)
-                if head and canSeeAimPart(character, head) then
-                    return head
+                local point = validAimPoint(character, settings.aimFov * 1.25, true)
+                if point and canSeeAimPoint(character, point) then
+                    return point
                 end
             end
             aimLockPlayer, aimLockCharacter = nil, nil
         end
+
         local best, bestP = scanAimTarget()
         aimLockPlayer = bestP
         aimLockCharacter = bestP and bestP.Character or nil
@@ -955,7 +1087,7 @@ return function(Window, ctx)
         if not aimHeld or not hasMouseMove then aimLockPlayer, aimLockCharacter = nil, nil return end
         local target = getAimTarget()
         if target then
-            local v, on = camera:WorldToViewportPoint(target.Position)
+            local v, on = camera:WorldToViewportPoint(target)
             if on and v.Z > 0 then
                 local center = camera.ViewportSize / 2
                 local ox, oy = v.X - center.X, v.Y - center.Y
@@ -1081,6 +1213,18 @@ return function(Window, ctx)
         Callback = function(v)
             settings.aimbot = v
             if not v then aimHeld, aimLockPlayer, aimLockCharacter = false, nil, nil end
+        end,
+    })
+    CombatTab:CreateDropdown({
+        Name = "Aim Position",
+        Options = AIM_POSITION_OPTIONS,
+        CurrentOption = "Auto",
+        Flag = "WZP_AimPosition",
+        Callback = function(v)
+            if BONE_GROUPS[v] then
+                settings.aimPosition = v
+                aimLockPlayer, aimLockCharacter = nil, nil
+            end
         end,
     })
     -- Custom aim-key button. The library keybind control cannot capture
@@ -1272,6 +1416,36 @@ return function(Window, ctx)
     _G.__WZP_ApplyNoRecoil = applyNoRecoil
 
     trackSection(CombatTab, "No Recoil")
+-- Instant Pickup (Tier 2): patch LootHold.Step to commit instantly
+local _origLootHoldStep = nil
+local function applyInstantPickup()
+    local lhMod
+    for _, c in ipairs(localPlayer.PlayerScripts.Client:GetDescendants()) do
+        if c.Name == "LootHold" and c:IsA("ModuleScript") then
+            local ok, mod = pcall(require, c)
+            if ok and mod then lhMod = mod break end
+        end
+    end
+    if not lhMod then return end
+    if settings.instantPickup then
+        if not _origLootHoldStep then
+            _origLootHoldStep = lhMod.Step
+            lhMod.Step = function(self, uid, target, holding, t)
+                if self.uid and not self.committed and holding then
+                    self.started = t - 2
+                    self.nextUse = t - 1
+                end
+                return _origLootHoldStep(self, uid, target, holding, t)
+            end
+        end
+    else
+        if _origLootHoldStep then
+            lhMod.Step = _origLootHoldStep
+            _origLootHoldStep = nil
+        end
+    end
+end
+
     CombatTab:CreateToggle({
         Name = "No Recoil",
         CurrentValue = false,
@@ -1281,9 +1455,18 @@ return function(Window, ctx)
             pcall(applyNoRecoil)
         end,
     })
+    CombatTab:CreateToggle({
+        Name = "Instant Pickup",
+        CurrentValue = false,
+        Flag = "WZP_InstantPickup",
+        Callback = function(v)
+            settings.instantPickup = v
+            pcall(applyInstantPickup)
+        end,
+    })
     pcall(function()
         if type(CombatTab.CreateLabel) == "function" then
-            CombatTab:CreateLabel("Hold the aim key to aim at nearest head in FOV")
+            CombatTab:CreateLabel("Aim Position: Auto chooses the nearest real WarZ hit-shape to FOV center")
         end
         if type(Window.SortTabs) == "function" then
             Window:SortTabs({ "Overview", "Visuals", "Combat", "Settings" })
@@ -1416,6 +1599,7 @@ return function(Window, ctx)
             running = running,
             aimbot = settings.aimbot,
             aimKey = settings.aimKeyName,
+            aimPosition = settings.aimPosition,
             aimHeld = aimHeld,
             target = aimLockPlayer and aimLockPlayer.Name or nil,
             skeleton = {entries = entries, lines = lines, visible = visible, ready = ready},
@@ -1444,8 +1628,8 @@ return function(Window, ctx)
                 return n
             end,
             aimTarget = function()
-                local t = getAimTarget()
-                return t and t.Parent and t.Parent.Name or nil
+                local point = getAimTarget()
+                return point and aimLockPlayer and aimLockPlayer.Name or nil
             end,
             fovVisible = function() return fovCircle and fovCircle.Visible or false end,
             hasMouseMove = function() return hasMouseMove end,
@@ -1453,6 +1637,15 @@ return function(Window, ctx)
             resolveInputName = resolveInputName,
             aimKeyName = function() return settings.aimKeyName end,
             setAimKey = function(name) aimKeyProxy:Set(name) end,
+            aimPosition = function() return settings.aimPosition end,
+            setAimPosition = function(mode)
+                if BONE_GROUPS[mode] then
+                    settings.aimPosition = mode
+                    aimLockPlayer, aimLockCharacter = nil, nil
+                    return true
+                end
+                return false
+            end,
             skeletonStats = function()
                 local entries, lines, visible, ready = 0, 0, 0, 0
                 for _, e in pairs(espCache) do
