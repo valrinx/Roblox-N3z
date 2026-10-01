@@ -1,4 +1,4 @@
-# ⚡ Roblox-N3z (N3Z HUB)
+# ⚡ Roblox-N3z (N3Z HUB v2.1.0)
 
 A high-performance Roblox script hub featuring a modern **Native-GUI bottom dock UI**, responsive controls, and high-framerate visual and combat enhancements.
 
@@ -39,9 +39,9 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/valrinx/Roblox-N3z/ma
 
 ## 🎮 Supported Game Modules
 
-| Module | Game | Place ID | Features |
-| :--- | :--- | :--- | :--- |
-| **WarZPVP** | WarZPVP OPEN BETA | `135187059974536` | Skeleton ESP, Aimbot, Auto Heal, No Recoil, Loot Radar |
+| Module | Game | Place ID | Version | Features |
+| :--- | :--- | :--- | :--- | :--- |
+| **WarZPVP** | WarZPVP OPEN BETA | `135187059974536` | `v1.4.5` | Skeleton ESP, Aimbot, Auto Heal, No Recoil, Loot Radar |
 | **Steal An Egg** | Steal An Egg | `107778070777162` | Auto Farm, ESP, Teleport |
 | **Illegal Soccer** | Illegal Soccer | `126987974021910` | Auto Goal, Speed, Stamina, Ball ESP |
 | **Wanted** | Wanted | `14438406081` | ESP, Silent Aim, Triggerbot |

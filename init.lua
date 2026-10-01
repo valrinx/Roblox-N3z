@@ -1,8 +1,6 @@
 -- ============================================================
--- Roblox-N3z · init.lua
+-- Roblox-N3z v2.1.0 · init.lua
 -- Entrypoint wrapper for N3z HUB
--- Run:
---   loadstring(game:HttpGet("https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/init.lua"))()
 -- ============================================================
 
 local ok, res = pcall(function()

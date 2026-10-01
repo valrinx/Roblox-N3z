@@ -1,9 +1,8 @@
 -- ============================================================
--- N3Z HUB · n3z.lua  (entrypoint)
+-- N3Z HUB v2.1.0 · n3z.lua (entrypoint)
 -- Native-GUI dock hub. Run:
 --   loadstring(game:HttpGet(
---     "https://raw.githubusercontent.com/valrinx/Roblox--Library/main/N3z%20HUB/n3z.lua"))()
--- Modules from the old project run UNCHANGED via n3z-compat.lua.
+--     "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/n3z.lua"))()
 -- ============================================================
 
 local Players = game:GetService("Players")
@@ -13,10 +12,12 @@ local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/"
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
 local HUB_URL = REPO_URL
 
+local N3Z_VERSION = "v2.1.0"
+
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: one object {id, name, version, game, placeIds, file, envKey?}
 local MODULES = {
-    { id = "warzpvp", name = "WarZPVP", version = "v1.4.4", game = "WarZPVP OPEN BETA",
+    { id = "warzpvp", name = "WarZPVP", version = "v1.4.5", game = "WarZPVP OPEN BETA",
       placeIds = { 135187059974536 }, file = "modules/warz_pvp.lua", envKey = "__RAVEN_WARZPVP" },
     { id = "stealanegg", name = "Steal An Egg", version = "v1.2.7", game = "Steal An Egg",
       placeIds = { 107778070777162 }, file = "modules/steal_an_egg.lua" },
@@ -117,7 +118,7 @@ for _, m in ipairs(MODULES) do
 end
 
 local gameName = activeMod and activeMod.game or tostring(game.Name)
-local modLine = activeMod and (activeMod.name .. " " .. activeMod.version) or "no module"
+local modLine = (activeMod and (activeMod.name .. " " .. activeMod.version) or "no module") .. " • " .. N3Z_VERSION
 dock:SetHeader(gameName, "place " .. tostring(placeId) .. " · " .. localPlayer.Name, modLine)
 dock:SetMenuKeyName("RShift")
 

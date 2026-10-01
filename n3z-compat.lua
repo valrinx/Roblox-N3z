@@ -1,11 +1,6 @@
 -- ============================================================
--- N3Z HUB · compat.lua
+-- N3Z HUB v2.1.0 · n3z-compat.lua
 -- DrawingUI-style Window adapter over the native dock.
--- Lets existing RAVENHUB modules run UNCHANGED:
---   return function(Window, ctx) ... Window:CreateTab("Combat") ...
--- Tab mapping: combat-ish -> COMBAT dock tab, visual/esp-ish -> VISUALS,
--- anything else becomes an extra dock tab (appended after the fixed 4).
--- Usage: local makeWindow = loadstring(compatSrc)(); local Window = makeWindow(dock)
 -- ============================================================
 
 return function(dock)

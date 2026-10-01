@@ -1,7 +1,6 @@
 -- ============================================================
--- N3Z HUB · dock.lua
+-- N3Z HUB v2.1.0 · n3z-dock.lua
 -- Native-GUI bottom dock for N3z Hub. No Drawing API.
--- Returns the Dock class. n3z.lua loads this via loadstring.
 -- ============================================================
 
 local Players = game:GetService("Players")
