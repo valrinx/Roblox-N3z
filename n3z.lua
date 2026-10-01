@@ -16,7 +16,7 @@ local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/"
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
 local HUB_URL = REPO_URL
 
-local N3Z_VERSION = "v2.1.0"
+local N3Z_VERSION = "v2.1.1"
 
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: one object {id, name, version, game, placeIds, file, envKey?}
@@ -35,57 +35,69 @@ local MODULES = {
       placeIds = { 106986181033085 }, file = "modules/frisbee_frenzy.lua" },
 }
 
--- ---------- fetch: dev server first, then local file (dev), then GitHub ----------
-local function fetch(localPath, urlPath)
-    local devOk, devRes = pcall(function()
-        return game:HttpGet("http://localhost:8999/N3z%20HUB/" .. localPath .. "?_cb=" .. tostring(os.time()))
+-- ---------- source resolution ----------
+-- Production/raw GitHub boot must use GitHub first so stale executor files
+-- cannot silently override freshly pushed modules. For local development:
+--     getgenv().__N3Z_DEV_LOCAL = true
+local bootEnv = (type(getgenv) == "function" and getgenv()) or _G
+local DEV_LOCAL = bootEnv.__N3Z_DEV_LOCAL == true
+
+local function fetchGitHub(urlPath)
+    local sep = string.find(urlPath, "?", 1, true) and "&" or "?"
+    local ok, content = pcall(function()
+        return game:HttpGet(REPO_URL .. urlPath .. sep .. "_cb=" .. tostring(os.time()))
     end)
-    if devOk and type(devRes) == "string" and #devRes > 100 then
-        return devRes
+    if ok and type(content) == "string" and #content > 100 then
+        return content
     end
-    local devOk2, devRes2 = pcall(function()
-        return game:HttpGet("http://localhost:8999/" .. localPath .. "?_cb=" .. tostring(os.time()))
-    end)
-    if devOk2 and type(devRes2) == "string" and #devRes2 > 100 then
-        return devRes2
+    return nil
+end
+
+local function fetchLocal(localPath)
+    if type(readfile) ~= "function" or type(isfile) ~= "function" then
+        return nil
     end
-    if type(readfile) == "function" and type(isfile) == "function" then
-        local ok, isF = pcall(isfile, HUB_DIR .. localPath)
-        if ok and isF then
-            local ok2, content = pcall(readfile, HUB_DIR .. localPath)
+    for _, path in ipairs({ HUB_DIR .. localPath, localPath }) do
+        local ok, exists = pcall(isfile, path)
+        if ok and exists then
+            local ok2, content = pcall(readfile, path)
             if ok2 and type(content) == "string" and #content > 0 then
                 return content
             end
         end
-        local ok3, isF2 = pcall(isfile, localPath)
-        if ok3 and isF2 then
-            local ok4, content = pcall(readfile, localPath)
-            if ok4 and type(content) == "string" and #content > 0 then
-                return content
-            end
+    end
+    return nil
+end
+
+local function fetchDevHttp(localPath)
+    for _, base in ipairs({
+        "http://localhost:8999/N3z%20HUB/",
+        "http://localhost:8999/",
+    }) do
+        local ok, content = pcall(function()
+            return game:HttpGet(base .. localPath .. "?_cb=" .. tostring(os.time()))
+        end)
+        if ok and type(content) == "string" and #content > 100 then
+            return content
         end
     end
-    return game:HttpGet(REPO_URL .. urlPath)
+    return nil
+end
+
+local function fetch(localPath, urlPath)
+    if DEV_LOCAL then
+        return fetchDevHttp(localPath)
+            or fetchLocal(localPath)
+            or fetchGitHub(urlPath)
+            or error("N3Z: failed to fetch " .. tostring(urlPath))
+    end
+    return fetchGitHub(urlPath)
+        or fetchLocal(localPath)
+        or error("N3Z: failed to fetch " .. tostring(urlPath))
 end
 
 local function fetchHub(name)
-    local devOk, devRes = pcall(function()
-        return game:HttpGet("http://localhost:8999/N3z%20HUB/" .. name .. "?_cb=" .. tostring(os.time()))
-    end)
-    if devOk and type(devRes) == "string" and #devRes > 100 then
-        return devRes
-    end
-    if type(readfile) == "function" and type(isfile) == "function" then
-        local lp = HUB_DIR .. name
-        local ok, isF = pcall(isfile, lp)
-        if ok and isF then
-            local ok2, content = pcall(readfile, lp)
-            if ok2 and type(content) == "string" and #content > 0 then
-                return content
-            end
-        end
-    end
-    return game:HttpGet(HUB_URL .. name)
+    return fetch(name, name)
 end
 
 -- ---------- env ----------
