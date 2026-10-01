@@ -1078,13 +1078,25 @@ function Dock:OnUnload(fn)
 end
 
 function Dock:Destroy()
+    self._visible = false
+    if self._stage then
+        pcall(function() self._stage.Visible = false end)
+    end
+    if self._gui then
+        pcall(function() self._gui.Enabled = false end)
+    end
     for _, fn in ipairs(self._unloadFns) do
         pcall(fn)
     end
+    table.clear(self._unloadFns)
     for _, c in ipairs(self._conns) do
         pcall(function() c:Disconnect() end)
     end
-    pcall(function() self._gui:Destroy() end)
+    table.clear(self._conns)
+    if self._gui then
+        pcall(function() self._gui:Destroy() end)
+        self._gui = nil
+    end
 end
 
 return Dock

@@ -171,6 +171,7 @@ unloadAll = function()
         end)
     end
     pcall(function() Window:Destroy() end)
+    pcall(function() dock:Destroy() end)
     env.__N3Z_WINDOW = nil
     env.__RAVEN_WINDOW = nil
 end
