@@ -8,6 +8,7 @@
 --   v1.5.2 - automatic per-weapon ballistic prediction (lead + gravity drop).
 --   v1.6.0 - native ScreenGui visual fallback for mobile executors without Drawing API.
 --   v1.6.1 - mobile-safe non-aim helpers and deterministic cleanup.
+--   v1.6.2 - force native visual backend on Android/iOS.
 --   Read-only visuals + mouse-driven aim.
 --   WarZ notes: FFA + Party/Clan relation colors, skip dead via WarzDead attribute,
 --   character = R15 (Head/HumanoidRootPart), WarzHitboxes folder present.
@@ -90,7 +91,7 @@ return function(Window, ctx)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.6.1"
+    environment.RAVEN_WARZPVP_VER = "1.6.2"
 
     local persistedAimKey = "MouseButton2"
     pcall(function()
@@ -158,10 +159,33 @@ return function(Window, ctx)
         table.clear(uiSections)
     end
 
+    local isMobileVisualClient = false
+    pcall(function()
+        local platform = UserInputService:GetPlatform()
+        isMobileVisualClient = platform == Enum.Platform.Android
+            or platform == Enum.Platform.IOS
+    end)
     local hasDrawing = type(Drawing) == "table" and type(Drawing.new) == "function"
     local nativeDrawingGui = nil
     local nativeDrawingObjects = {}
 
+    local function getMobileNativeDrawingParent()
+        if type(gethui) == "function" then
+            local ok, parent = pcall(gethui)
+            if ok and parent then return parent end
+        end
+
+        local okCore, coreGui = pcall(game.GetService, game, "CoreGui")
+        if okCore and coreGui then return coreGui end
+
+        local playerGui = localPlayer:FindFirstChildOfClass("PlayerGui")
+        if not playerGui then
+            pcall(function()
+                playerGui = localPlayer:WaitForChild("PlayerGui", 2)
+            end)
+        end
+        return playerGui
+    end
     local function getNativeDrawingParent()
         local playerGui = localPlayer:FindFirstChildOfClass("PlayerGui")
         if not playerGui then
@@ -184,7 +208,9 @@ return function(Window, ctx)
         if nativeDrawingGui and nativeDrawingGui.Parent then
             return nativeDrawingGui
         end
-        local parent = getNativeDrawingParent()
+        local parent = isMobileVisualClient
+            and getMobileNativeDrawingParent()
+            or getNativeDrawingParent()
         if not parent then return nil end
 
         local gui = Instance.new("ScreenGui")
@@ -192,7 +218,7 @@ return function(Window, ctx)
         gui.IgnoreGuiInset = true
         gui.ResetOnSpawn = false
         gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-        gui.DisplayOrder = 20
+        gui.DisplayOrder = isMobileVisualClient and 998 or 20
         pcall(function()
             gui.ScreenInsets = Enum.ScreenInsets.None
         end)
@@ -370,6 +396,10 @@ return function(Window, ctx)
     end
 
     local function safeDrawing(drawingType)
+        if isMobileVisualClient then
+            return newNativeDrawing(drawingType)
+        end
+
         if hasDrawing then
             local ok, obj = pcall(Drawing.new, drawingType)
             if ok and obj then
@@ -2318,7 +2348,7 @@ end
         return {
             version = environment.RAVEN_WARZPVP_VER,
             running = running,
-            visualBackend = hasDrawing and "Drawing" or "NativeGui",
+            visualBackend = isMobileVisualClient and "NativeGui" or (hasDrawing and "Drawing" or "NativeGui"),
             aimbot = settings.aimbot,
             aimKey = settings.aimKeyName,
             aimPosition = settings.aimPosition,
