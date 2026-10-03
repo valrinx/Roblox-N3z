@@ -1,5 +1,5 @@
 -- ============================================================
--- N3Z HUB v2.2.2 - n3z.lua (entrypoint)
+-- N3Z HUB v2.2.3 - n3z.lua (entrypoint)
 -- Native-GUI dock hub. Run:
 --   loadstring(game:HttpGet(
 --     "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/n3z.lua"))()
@@ -10,14 +10,34 @@ local localPlayer = Players.LocalPlayer
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 
--- mobile: touch device without a keyboard -> mobile dock layout (mockup parity)
-local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+-- Mobile routing is platform-based so Android/iOS always use the mobile dock
+-- even when an executor reports KeyboardEnabled/MouseEnabled as true.
+-- Desktop platforms never fall into the mobile path because of touch flags.
+local function detectMobilePlatform()
+    local platform = nil
+    pcall(function()
+        platform = UserInputService:GetPlatform()
+    end)
+
+    if platform == Enum.Platform.Android or platform == Enum.Platform.IOS then
+        return true
+    end
+
+    -- Fallback only for runtimes where GetPlatform is unavailable.
+    if platform == nil then
+        return UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+    end
+
+    return false
+end
+
+local isMobile = detectMobilePlatform()
 
 local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/"
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
 local HUB_URL = REPO_URL
 
-local N3Z_VERSION = "v2.2.2"
+local N3Z_VERSION = "v2.2.3"
 
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: one object {id, name, version, game, placeIds, file, envKey?}
