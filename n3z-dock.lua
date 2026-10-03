@@ -48,7 +48,7 @@ local FONT_MONO = Enum.Font.Code
 local LAYOUTS = {
     pc = {
         panelW = 460, contentH = 330,
-        barH = 52, barCorner = 18,
+        barW = 460, barH = 52, barCorner = 18,
         tabH = 36, tabFont = 12, tabPad = 12,
         indH = 36, indCorner = 12,
         showAvatar = true,
@@ -179,6 +179,7 @@ function Dock.new(opts)
     self._unloadFns = {}
     self._tabs = {}       -- tabId -> {btn=, page=}
     self._tabIds = {}
+    self._primaryTabIds = {}
     self._tabToggles = {} -- tabId -> {toggle handles} (footer count)
     self._tabInfo = {}    -- tabId -> static footer text
     self._activeTab = nil -- boot: dock bar only, nothing selected
@@ -525,8 +526,13 @@ function Dock.new(opts)
     bar.BackgroundColor3 = C.dockBg
     bar.BackgroundTransparency = 0.04
     bar.Active = true
-    bar.AutomaticSize = Enum.AutomaticSize.X
-    bar.Size = UDim2.new(0, 0, 0, L.barH)
+    if self._isMobile then
+        bar.AutomaticSize = Enum.AutomaticSize.X
+        bar.Size = UDim2.new(0, 0, 0, L.barH)
+    else
+        bar.AutomaticSize = Enum.AutomaticSize.None
+        bar.Size = UDim2.new(0, L.barW or L.panelW, 0, L.barH)
+    end
     bar.LayoutOrder = 2
     bar.Parent = stage
     corner(bar, L.barCorner)
@@ -761,23 +767,7 @@ function Dock.new(opts)
         end))
     end
 
-    -- tabs row: the only layout-managed child of the bar.
-    -- SortOrder=LayoutOrder keeps logo -> tabs -> avatar in fixed order.
-    local tabsRow = Instance.new("Frame")
-    tabsRow.Name = "TabsRow"
-    tabsRow.BackgroundTransparency = 1
-    tabsRow.AutomaticSize = Enum.AutomaticSize.XY
-    tabsRow.ZIndex = 1
-    tabsRow.Parent = bar
-    local tabsLayout = Instance.new("UIListLayout")
-    tabsLayout.FillDirection = Enum.FillDirection.Horizontal
-    tabsLayout.VerticalAlignment = Enum.VerticalAlignment.Center
-    tabsLayout.Padding = UDim.new(0, 4)
-    tabsLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    tabsLayout.Parent = tabsRow
-    self._tabsRow = tabsRow
-
-    -- sliding indicator: sibling of TabsRow, NOT in any layout, so the
+    -- sliding indicator: sibling of tab containers, NOT in any layout, so the
     -- layout engine never fights the tween. Absolutely positioned in bar space.
     local ind = Instance.new("Frame")
     ind.Name = "Indicator"
@@ -814,6 +804,20 @@ function Dock.new(opts)
             local barInst, indInst = self._bar, self._indicator
             if not btn.Parent or not barInst or not indInst or not indInst.Parent then return end
             if btn.AbsoluteSize.X <= 0 then return end
+
+            -- On PC, if active tab is in primary scroll, check viewport visibility
+            if not self._isMobile and self._activeTab ~= "settings" and self._primaryScroll then
+                local ps = self._primaryScroll
+                local bLeft = btn.AbsolutePosition.X
+                local bRight = bLeft + btn.AbsoluteSize.X
+                local psLeft = ps.AbsolutePosition.X
+                local psRight = psLeft + ps.AbsoluteSize.X
+                if bRight <= psLeft + 1 or bLeft >= psRight - 1 then
+                    indInst.Visible = false
+                    return
+                end
+            end
+
             -- NOTE: UIPadding offsets ALL children, even manually positioned
             -- ones, so measure the button relative to the bar's padding box.
             local padL = 0
@@ -837,66 +841,200 @@ function Dock.new(opts)
         pinIndicator(false)
     end))
 
-    -- N3Z logo at the start of the bar
-    local logo = Instance.new("TextLabel")
-    logo.Name = "Logo"
-    logo.BackgroundTransparency = 1
-    logo.RichText = true
-    logo.Text = '<font color="#DFE3EE"><b>N3Z</b></font><font color="#22D3EE"><b>·</b></font>'
-    logo.TextSize = 14
-    logo.Font = FONT_BOLD
-    logo.AutomaticSize = Enum.AutomaticSize.X
-    logo.Size = UDim2.new(0, 0, 0, L.tabH)
-    logo.LayoutOrder = -1
-    logo.Parent = tabsRow
-    self._logo = logo
+    if self._isMobile then
+        -- Mobile tabs row: unchanged flat row
+        local tabsRow = Instance.new("Frame")
+        tabsRow.Name = "TabsRow"
+        tabsRow.BackgroundTransparency = 1
+        tabsRow.AutomaticSize = Enum.AutomaticSize.XY
+        tabsRow.ZIndex = 1
+        tabsRow.Parent = bar
+        local tabsLayout = Instance.new("UIListLayout")
+        tabsLayout.FillDirection = Enum.FillDirection.Horizontal
+        tabsLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+        tabsLayout.Padding = UDim.new(0, 4)
+        tabsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        tabsLayout.Parent = tabsRow
+        self._tabsRow = tabsRow
 
-    -- fixed tabs
-    for _, id in ipairs(TAB_ORDER) do
-        self:AddTab(TAB_LABEL[id], id)
-    end
+        -- N3Z logo at the start of the mobile bar
+        local logo = Instance.new("TextLabel")
+        logo.Name = "Logo"
+        logo.BackgroundTransparency = 1
+        logo.RichText = true
+        logo.Text = '<font color="#DFE3EE"><b>N3Z</b></font><font color="#22D3EE"><b>·</b></font>'
+        logo.TextSize = 14
+        logo.Font = FONT_BOLD
+        logo.AutomaticSize = Enum.AutomaticSize.X
+        logo.Size = UDim2.new(0, 0, 0, L.tabH)
+        logo.LayoutOrder = -1
+        logo.Parent = tabsRow
+        self._logo = logo
 
-    if self._isMobile and self._applyMobileViewport then
-        self._applyMobileViewport()
-    end
+        for _, id in ipairs(TAB_ORDER) do
+            self:AddTab(TAB_LABEL[id], id)
+        end
 
-    -- spacer before avatar (mockup: 6px left margin)
-    if L.showAvatar then
-    local spacer = Instance.new("Frame")
-    spacer.Name = "AvatarGap"
-    spacer.BackgroundTransparency = 1
-    spacer.Size = UDim2.new(0, 2, 0, 1)
-    spacer.LayoutOrder = 999
-    spacer.Parent = tabsRow
+        if self._applyMobileViewport then
+            self._applyMobileViewport()
+        end
+    else
+        -- Desktop PC: 2-zone top bar
+        -- 1. Logo pinned to the left
+        local logo = Instance.new("TextLabel")
+        logo.Name = "Logo"
+        logo.BackgroundTransparency = 1
+        logo.RichText = true
+        logo.Text = '<font color="#DFE3EE"><b>N3Z</b></font><font color="#22D3EE"><b>·</b></font>'
+        logo.TextSize = 14
+        logo.Font = FONT_BOLD
+        logo.AutomaticSize = Enum.AutomaticSize.X
+        logo.Size = UDim2.new(0, 0, 0, L.tabH)
+        logo.AnchorPoint = Vector2.new(0, 0.5)
+        logo.Position = UDim2.new(0, 0, 0.5, 0)
+        logo.ZIndex = 1
+        logo.Parent = bar
+        self._logo = logo
 
-    -- avatar with gradient ring + glow (mockup .du)
-    local avWrap = Instance.new("Frame")
-    avWrap.Name = "Avatar"
-    avWrap.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    avWrap.BorderSizePixel = 0
-    avWrap.Size = UDim2.new(0, 38, 0, 38)
-    avWrap.LayoutOrder = 1000
-    avWrap.Parent = tabsRow
-    cornerRound(avWrap)
-    local grad = Instance.new("UIGradient")
-    grad.Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, C.accent),
-        ColorSequenceKeypoint.new(1, C.accent2),
-    })
-    grad.Rotation = 135
-    grad.Parent = avWrap
-    glow(avWrap, C.accent, 8, 0.85, true)
-    local av = Instance.new("ImageLabel")
-    av.Name = "AvatarImage"
-    av.BackgroundColor3 = C.panelBg
-    av.BorderSizePixel = 0
-    av.AnchorPoint = Vector2.new(0.5, 0.5)
-    av.Position = UDim2.new(0.5, 0, 0.5, 0)
-    av.Size = UDim2.new(0, 34, 0, 34)
-    av.Image = ""
-    av.Parent = avWrap
-    cornerRound(av)
-    self._avatar = av
+        -- 2. Utility Zone pinned to the right (SETTINGS + Avatar)
+        local utilityZone = Instance.new("Frame")
+        utilityZone.Name = "UtilityZone"
+        utilityZone.BackgroundTransparency = 1
+        utilityZone.AnchorPoint = Vector2.new(1, 0.5)
+        utilityZone.Position = UDim2.new(1, 0, 0.5, 0)
+        utilityZone.AutomaticSize = Enum.AutomaticSize.X
+        utilityZone.Size = UDim2.new(0, 0, 0, L.tabH)
+        utilityZone.ZIndex = 1
+        utilityZone.Parent = bar
+        local utilityLayout = Instance.new("UIListLayout")
+        utilityLayout.FillDirection = Enum.FillDirection.Horizontal
+        utilityLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+        utilityLayout.Padding = UDim.new(0, 4)
+        utilityLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        utilityLayout.Parent = utilityZone
+        self._utilityZone = utilityZone
+
+        -- 3. Primary Tabs scroll area (occupies space between Logo and Utility Zone)
+        local primaryScroll = Instance.new("ScrollingFrame")
+        primaryScroll.Name = "PrimaryScroll"
+        primaryScroll.BackgroundTransparency = 1
+        primaryScroll.BorderSizePixel = 0
+        primaryScroll.AnchorPoint = Vector2.new(0, 0.5)
+        primaryScroll.Position = UDim2.new(0, 42, 0.5, 0)
+        primaryScroll.Size = UDim2.new(1, -182, 0, L.tabH)
+        primaryScroll.ScrollingDirection = Enum.ScrollingDirection.X
+        primaryScroll.ScrollBarThickness = 0
+        primaryScroll.AutomaticCanvasSize = Enum.AutomaticSize.X
+        primaryScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+        primaryScroll.ClipsDescendants = true
+        primaryScroll.ZIndex = 1
+        primaryScroll.Parent = bar
+        self._primaryScroll = primaryScroll
+        self._tabsRow = primaryScroll
+
+        local primaryLayout = Instance.new("UIListLayout")
+        primaryLayout.FillDirection = Enum.FillDirection.Horizontal
+        primaryLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+        primaryLayout.Padding = UDim.new(0, 4)
+        primaryLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        primaryLayout.Parent = primaryScroll
+        self._primaryLayout = primaryLayout
+
+        local function updatePrimaryBounds()
+            if self._dead or not bar.Parent then return end
+            local logoW = logo.AbsoluteSize.X
+            if logoW <= 0 then logoW = 36 end
+            local utilW = utilityZone.AbsoluteSize.X
+            if utilW <= 0 then utilW = 134 end
+            local gap = 6
+            local startX = logoW + gap
+            primaryScroll.Position = UDim2.new(0, startX, 0.5, 0)
+            primaryScroll.Size = UDim2.new(1, -(startX + utilW + gap), 0, L.tabH)
+        end
+        conn(logo:GetPropertyChangedSignal("AbsoluteSize"):Connect(updatePrimaryBounds))
+        conn(utilityZone:GetPropertyChangedSignal("AbsoluteSize"):Connect(updatePrimaryBounds))
+        conn(bar:GetPropertyChangedSignal("AbsoluteSize"):Connect(updatePrimaryBounds))
+        task.defer(updatePrimaryBounds)
+
+        -- Mouse wheel horizontal scroll over primary tabs
+        conn(primaryScroll.InputChanged:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseWheel then
+                local delta = input.Position.Z
+                local step = 45
+                local maxScroll = math.max(0, primaryScroll.AbsoluteCanvasSize.X - primaryScroll.AbsoluteWindowSize.X)
+                if maxScroll > 0 then
+                    local targetX = math.clamp(primaryScroll.CanvasPosition.X - delta * step, 0, maxScroll)
+                    primaryScroll.CanvasPosition = Vector2.new(targetX, 0)
+                end
+            end
+        end))
+
+        -- Helper to ensure active tab is scrolled into visible bounds
+        local function ensureVisible(btn)
+            if not primaryScroll or not btn or not btn.Parent or btn.Parent ~= primaryScroll then return end
+            local pLeft = primaryScroll.AbsolutePosition.X
+            local pRight = pLeft + primaryScroll.AbsoluteSize.X
+            local bLeft = btn.AbsolutePosition.X
+            local bRight = bLeft + btn.AbsoluteSize.X
+            if bLeft < pLeft then
+                local diff = pLeft - bLeft + 4
+                primaryScroll.CanvasPosition = Vector2.new(math.max(0, primaryScroll.CanvasPosition.X - diff), 0)
+            elseif bRight > pRight then
+                local diff = bRight - pRight + 4
+                local maxScroll = math.max(0, primaryScroll.AbsoluteCanvasSize.X - primaryScroll.AbsoluteWindowSize.X)
+                primaryScroll.CanvasPosition = Vector2.new(math.min(maxScroll, primaryScroll.CanvasPosition.X + diff), 0)
+            end
+        end
+        self._ensureVisible = ensureVisible
+
+        conn(primaryScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+            if self._activeTab and self._activeTab ~= "settings" then
+                pinIndicator(false)
+            end
+        end))
+
+        -- fixed tabs: primary tabs added to primaryScroll, settings added to utilityZone
+        for _, id in ipairs(TAB_ORDER) do
+            self:AddTab(TAB_LABEL[id], id)
+        end
+
+        -- Avatar / Profile in UtilityZone (pinned right, after settings)
+        if L.showAvatar then
+            local spacer = Instance.new("Frame")
+            spacer.Name = "AvatarGap"
+            spacer.BackgroundTransparency = 1
+            spacer.Size = UDim2.new(0, 2, 0, 1)
+            spacer.LayoutOrder = 2
+            spacer.Parent = utilityZone
+
+            local avWrap = Instance.new("Frame")
+            avWrap.Name = "Avatar"
+            avWrap.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+            avWrap.BorderSizePixel = 0
+            avWrap.Size = UDim2.new(0, 38, 0, 38)
+            avWrap.LayoutOrder = 3
+            avWrap.Parent = utilityZone
+            cornerRound(avWrap)
+            local grad = Instance.new("UIGradient")
+            grad.Color = ColorSequence.new({
+                ColorSequenceKeypoint.new(0, C.accent),
+                ColorSequenceKeypoint.new(1, C.accent2),
+            })
+            grad.Rotation = 135
+            grad.Parent = avWrap
+            glow(avWrap, C.accent, 8, 0.85, true)
+            local av = Instance.new("ImageLabel")
+            av.Name = "AvatarImage"
+            av.BackgroundColor3 = C.panelBg
+            av.BorderSizePixel = 0
+            av.AnchorPoint = Vector2.new(0.5, 0.5)
+            av.Position = UDim2.new(0.5, 0, 0.5, 0)
+            av.Size = UDim2.new(0, 34, 0, 34)
+            av.Image = ""
+            av.Parent = avWrap
+            cornerRound(av)
+            self._avatar = av
+        end
     end
 
     -- menu key
@@ -926,9 +1064,19 @@ function Dock:AddTab(tabLabel, tabId)
     btn.Font = FONT_MED
     btn.AutomaticSize = Enum.AutomaticSize.X
     btn.Size = UDim2.new(0, 0, 0, L.tabH)
-    btn.ZIndex = 1
-    btn.LayoutOrder = #self._tabIds
-    btn.Parent = self._tabsRow
+    if self._isMobile then
+        btn.LayoutOrder = #self._tabIds
+        btn.Parent = self._tabsRow
+    else
+        if string.lower(tostring(tabId)) == "settings" then
+            btn.LayoutOrder = 1
+            btn.Parent = self._utilityZone
+        else
+            table.insert(self._primaryTabIds, tabId)
+            btn.LayoutOrder = #self._primaryTabIds
+            btn.Parent = self._primaryScroll
+        end
+    end
     local btnPad = Instance.new("UIPadding")
     btnPad.PaddingLeft = UDim.new(0, L.tabPad)
     btnPad.PaddingRight = UDim.new(0, L.tabPad)
@@ -1060,6 +1208,12 @@ function Dock:SetActiveTab(tabId)
         t.page.Visible = active
         t.btn.TextColor3 = active and C.dark or C.muted
         t.btn.Font = active and FONT_BOLD or FONT_MED
+    end
+    if not self._isMobile and tabId ~= "settings" and self._ensureVisible then
+        local t = self._tabs[tabId]
+        if t and t.btn then
+            self._ensureVisible(t.btn)
+        end
     end
     -- slide the indicator under the active button (robust pin: waits for layout)
     if self._pinIndicator then self._pinIndicator(true) end
