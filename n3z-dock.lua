@@ -430,7 +430,6 @@ function Dock.new(opts)
             local vy = cam and cam.ViewportSize.Y or 1080
             setFlipped(stage.AbsolutePosition.Y < vy * 0.4)
         end
-        end
         self._conn(bar.InputBegan:Connect(function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1
                 or input.UserInputType == Enum.UserInputType.Touch then
