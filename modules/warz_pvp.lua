@@ -47,7 +47,7 @@ return function(Window, ctx)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.4.8"
+    environment.RAVEN_WARZPVP_VER = "1.5.0"
 
     local running = true
     local connections = {}
