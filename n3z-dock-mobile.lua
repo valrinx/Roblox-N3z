@@ -1,20 +1,10 @@
 -- ============================================================
--- N3Z HUB · n3z-dock-mobile.lua
--- Mobile entry point (thin wrapper). Returns the Dock class with
--- the touch layout preselected: 46px tabs, 52x30 switches,
--- viewport-fitted panel, tap-to-collapse footer — matching the
--- landscape phone mockup (n3z-dock-mobile.html).
---
--- Loads the sibling n3z-dock.lua (local executor file first, then
--- GitHub), so there is exactly ONE implementation to maintain.
---
--- Usage:
---   local Dock = assert(loadstring(game:HttpGet(URL)))()
---   local dock = Dock.new()            -- mobile layout by default
---   local dock = Dock.new({layout="pc"}) -- explicit override still wins
+-- N3Z HUB - n3z-dock-mobile.lua
+-- Mobile entry point. Reuses n3z-dock.lua with the touch layout selected by
+-- default so desktop/mobile share one implementation.
 -- ============================================================
 
-local HUB_URL = "https://raw.githubusercontent.com/valrinx/Roblox--Library/main/N3z%20HUB/"
+local HUB_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/"
 
 local function fetchLocal(name)
     if type(readfile) == "function" and type(isfile) == "function" then
@@ -30,7 +20,7 @@ local function fetchLocal(name)
 end
 
 -- same-dir first (flat repos), then the N3z HUB subfolder layout
-local src = fetchLocal("n3z-dock.lua") or fetchLocal("N3z HUB/n3z-dock.lua")
+local src = fetchLocal("n3z-dock.lua") or fetchLocal("Roblox-N3z/n3z-dock.lua")
 if not src then
     src = game:HttpGet(HUB_URL .. "n3z-dock.lua")
 end

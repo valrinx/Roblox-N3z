@@ -190,19 +190,36 @@ function Dock.new(opts)
     self._inputActionName = "N3Z_MENU_INPUT_BLOCK"
     -- clear a stale blocker left by an interrupted/re-executed dock
     pcall(function() ContextActionService:UnbindAction(self._inputActionName) end)
-    -- layout: "pc" default, "mobile" for touch devices (mockup parity)
+    -- layout: "pc" default, "mobile" for touch devices.
     local layoutName = (opts.layout == "mobile") and "mobile" or "pc"
     local L = LAYOUTS[layoutName]
-    if layoutName == "mobile" then
-        -- fit the panel to the real viewport (landscape phones are short)
+
+    local function mobileViewportMetrics()
         local vx, vy = 844, 390
         pcall(function()
-            local vs = workspace.CurrentCamera.ViewportSize
-            vx, vy = vs.X, vs.Y
+            local cam = workspace.CurrentCamera
+            local vs = cam and cam.ViewportSize
+            if vs then
+                vx, vy = vs.X, vs.Y
+            end
         end)
+        local compactTabs = vx <= 520
+        local narrowTabs = vx <= 380
+        local tabPad = narrowTabs and 6 or (compactTabs and 9 or 15)
+        local tabFont = narrowTabs and 9 or (compactTabs and 10 or 11)
+        return math.min(560, math.max(300, vx - 24)),
+            math.clamp(vy - 190, 150, 420),
+            tabPad,
+            tabFont
+    end
+
+    if layoutName == "mobile" then
+        local panelW, contentH, tabPad, tabFont = mobileViewportMetrics()
         L = setmetatable({
-            panelW = math.min(560, math.max(320, vx - 32)),
-            contentH = math.clamp(vy - 190, 160, 330),
+            panelW = panelW,
+            contentH = contentH,
+            tabPad = tabPad,
+            tabFont = tabFont,
         }, { __index = L })
     end
     self._layout = L
@@ -215,6 +232,11 @@ function Dock.new(opts)
     local gui = Instance.new("ScreenGui")
     gui.Name = "N3zDock"
     gui.IgnoreGuiInset = true
+    if self._isMobile then
+        pcall(function()
+            gui.ScreenInsets = Enum.ScreenInsets.CoreUISafeInsets
+        end)
+    end
     gui.ResetOnSpawn = false
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     gui.DisplayOrder = 999
@@ -239,6 +261,30 @@ function Dock.new(opts)
     inputShield.Parent = gui
     self._inputShield = inputShield
 
+    if self._isMobile then
+        local mobileToggle = Instance.new("TextButton")
+        mobileToggle.Name = "MobileMenuToggle"
+        mobileToggle.AnchorPoint = Vector2.new(1, 0)
+        mobileToggle.Position = UDim2.new(1, -10, 0, 10)
+        mobileToggle.Size = UDim2.fromOffset(48, 48)
+        mobileToggle.BackgroundColor3 = C.dockBg
+        mobileToggle.BackgroundTransparency = 0.04
+        mobileToggle.BorderSizePixel = 0
+        mobileToggle.AutoButtonColor = false
+        mobileToggle.Text = "N3Z"
+        mobileToggle.TextSize = 12
+        mobileToggle.TextColor3 = C.accent
+        mobileToggle.Font = FONT_BOLD
+        mobileToggle.ZIndex = 50
+        mobileToggle.Parent = gui
+        corner(mobileToggle, 14)
+        stroke(mobileToggle, C.border, 0)
+        self._conn(mobileToggle.Activated:Connect(function()
+            if self._dead then return end
+            self:Toggle()
+        end))
+        self._mobileToggle = mobileToggle
+    end
     -- stage: bottom center column
     local stage = Instance.new("Frame")
     stage.Name = "Stage"
@@ -402,7 +448,7 @@ function Dock.new(opts)
         self._footKbd = kbdChip
     else
         -- mobile: no keyboard — hint label replaces the key chip (mockup footer)
-        local hint = label("⌄ tap tab to collapse", 11, C.accent, FONT)
+        local hint = label("Tap active tab to collapse", 11, C.accent, FONT)
         hint.AnchorPoint = Vector2.new(1, 0)
         hint.Position = UDim2.new(1, 0, 0, 5)
         hint.Size = UDim2.new(0, 180, 0, 16)
@@ -430,6 +476,76 @@ function Dock.new(opts)
     barPad.Parent = bar
     self._bar = bar
 
+    if self._isMobile then
+        local viewportConnection = nil
+
+        local function clampDockToViewport()
+            if self._dead or not bar.Parent then return end
+            local cam = workspace.CurrentCamera
+            local vs = cam and cam.ViewportSize
+            if not vs then return end
+
+            local bp = bar.AbsolutePosition
+            local bs = bar.AbsoluteSize
+            if bs.X <= 0 or bs.Y <= 0 then return end
+
+            local margin = 8
+            local desiredX = math.clamp(bp.X, margin, math.max(margin, vs.X - bs.X - margin))
+            local desiredY = math.clamp(bp.Y, margin, math.max(margin, vs.Y - bs.Y - margin))
+            local delta = Vector2.new(desiredX - bp.X, desiredY - bp.Y)
+            if delta.Magnitude > 0.5 then
+                local sp = stage.Position
+                stage.Position = UDim2.new(
+                    sp.X.Scale, sp.X.Offset + delta.X,
+                    sp.Y.Scale, sp.Y.Offset + delta.Y
+                )
+            end
+        end
+
+        local function applyMobileViewport()
+            if self._dead then return end
+            local panelW, contentH, tabPad, tabFont = mobileViewportMetrics()
+            L.panelW = panelW
+            L.contentH = contentH
+            L.tabPad = tabPad
+            L.tabFont = tabFont
+            panel.Size = UDim2.new(0, panelW, 0, 0)
+            content.Size = UDim2.new(1, 0, 0, contentH)
+
+            for _, tab in pairs(self._tabs) do
+                local button = tab.btn
+                if button then
+                    button.TextSize = tabFont
+                    local padding = button:FindFirstChildOfClass("UIPadding")
+                    if padding then
+                        padding.PaddingLeft = UDim.new(0, tabPad)
+                        padding.PaddingRight = UDim.new(0, tabPad)
+                    end
+                end
+            end
+            if self._logo then
+                self._logo.TextSize = panelW <= 380 and 12 or 14
+            end
+            task.defer(clampDockToViewport)
+        end
+
+        local function bindViewportCamera()
+            if viewportConnection then
+                pcall(function() viewportConnection:Disconnect() end)
+                viewportConnection = nil
+            end
+            local cam = workspace.CurrentCamera
+            if cam then
+                viewportConnection = cam:GetPropertyChangedSignal("ViewportSize"):Connect(applyMobileViewport)
+                table.insert(self._conns, viewportConnection)
+            end
+            applyMobileViewport()
+        end
+
+        self._conn(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(bindViewportCamera))
+        self._applyMobileViewport = applyMobileViewport
+        bindViewportCamera()
+    end
     -- Draggable dock. Listen at UserInputService level instead of only
     -- bar.InputBegan: most of the visible bar is covered by tab/avatar
     -- children, so child hit-testing otherwise prevents drag from starting.
@@ -660,17 +776,22 @@ function Dock.new(opts)
     logo.Name = "Logo"
     logo.BackgroundTransparency = 1
     logo.RichText = true
-    logo.Text = '<font color="#DFE3EE"><b>N3Z</b></font><font color="#22D3EE"><b>·</b></font>'
+    logo.Text = '<font color="#DFE3EE"><b>N3Z</b></font><font color="#22D3EE"><b> HUB</b></font>'
     logo.TextSize = 14
     logo.Font = FONT_BOLD
     logo.AutomaticSize = Enum.AutomaticSize.X
     logo.Size = UDim2.new(0, 0, 0, L.tabH)
     logo.LayoutOrder = -1
     logo.Parent = tabsRow
+    self._logo = logo
 
     -- fixed tabs
     for _, id in ipairs(TAB_ORDER) do
         self:AddTab(TAB_LABEL[id], id)
+    end
+
+    if self._isMobile and self._applyMobileViewport then
+        self._applyMobileViewport()
     end
 
     -- spacer before avatar (mockup: 6px left margin)
@@ -764,7 +885,7 @@ function Dock:AddTab(tabLabel, tabId)
 
     local id = tabId
     local this = self
-    self._conn(btn.MouseButton1Click:Connect(function()
+    self._conn(btn.Activated:Connect(function()
         if os.clock() < (this._dragSuppressUntil or 0) then return end
         this:SetActiveTab(id)
     end))
@@ -952,7 +1073,7 @@ function Dock:_refreshToggleCount()
         for _, h in ipairs(hs) do
             if h:Get() then on = on + 1 end
         end
-        self._countLabel.Text = string.upper(id) .. " — " .. on .. "/" .. #hs .. " ON"
+        self._countLabel.Text = string.upper(id) .. " - " .. on .. "/" .. #hs .. " ON"
     end
 end
 
@@ -1227,7 +1348,7 @@ function Dock:AddRow(tabId, def)
         pad(pill, 10, 5, 10, 5)
         if def.onPress then
             local lastFire = 0
-            self._conn(row.MouseButton1Click:Connect(function()
+            self._conn(row.Activated:Connect(function()
                 local now = os.clock()
                 if now - lastFire < 0.25 then return end
                 lastFire = now
@@ -1246,7 +1367,7 @@ function Dock:AddRow(tabId, def)
         if def.key then makeKbd(z, tostring(def.key)) end
         local h = makeToggle(z, def.value == true, def.onChange, self)
         -- clicking anywhere on the row flips the switch (mockup .frow)
-        self._conn(row.MouseButton1Click:Connect(function()
+        self._conn(row.Activated:Connect(function()
             h:Set(not h:Get())
         end))
         -- hover: knob grows slightly (mockup .tgl:hover::after)
@@ -1292,7 +1413,7 @@ function Dock:AddRow(tabId, def)
             end
             if def.onPress then task.spawn(pcall, def.onPress) end
         end
-        self._conn(row.MouseButton1Click:Connect(firePress))
+        self._conn(row.Activated:Connect(firePress))
         if def.buttonText then
             local b = Instance.new("TextButton")
             b.Name = "ActionButton"
@@ -1308,7 +1429,7 @@ function Dock:AddRow(tabId, def)
             corner(b, 8)
             pad(b, 12, 6, 12, 6)
             if def.danger then stroke(b, C.danger, 0.5).ApplyStrokeMode = Enum.ApplyStrokeMode.Border end
-            self._conn(b.MouseButton1Click:Connect(firePress))
+            self._conn(b.Activated:Connect(firePress))
         end
         return {}
     end
@@ -1329,7 +1450,7 @@ function Dock:AddRow(tabId, def)
         local handle = {}
         function handle:SetName(n) b.Text = tostring(n) end
         if def.onPress then
-            self._conn(b.MouseButton1Click:Connect(function()
+            self._conn(b.Activated:Connect(function()
                 task.spawn(pcall, def.onPress)
             end))
         end
@@ -1399,6 +1520,7 @@ function Dock:AddRow(tabId, def)
         function handle:Get() return value end
 
         local dragging = false
+        local dragInput = nil
         local function fromX(x)
             local p0 = track.AbsolutePosition.X
             local w = math.max(1, track.AbsoluteSize.X)
@@ -1406,24 +1528,32 @@ function Dock:AddRow(tabId, def)
             if def.onChange then task.spawn(pcall, def.onChange, value) end
         end
         self._conn(track.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1
-                or input.UserInputType == Enum.UserInputType.Touch then
+            local inputType = input.UserInputType
+            if inputType == Enum.UserInputType.MouseButton1
+                or inputType == Enum.UserInputType.Touch then
                 dragging = true
+                dragInput = (inputType == Enum.UserInputType.Touch) and input or nil
                 fromX(input.Position.X)
             end
         end))
         self._conn(UserInputService.InputChanged:Connect(function(input)
             if not dragging then return end
-            if input.UserInputType == Enum.UserInputType.MouseMovement
-                or input.UserInputType == Enum.UserInputType.Touch then
-                fromX(input.Position.X)
+            if dragInput then
+                if input ~= dragInput then return end
+            elseif input.UserInputType ~= Enum.UserInputType.MouseMovement then
+                return
             end
+            fromX(input.Position.X)
         end))
         self._conn(UserInputService.InputEnded:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1
-                or input.UserInputType == Enum.UserInputType.Touch then
-                dragging = false
+            if not dragging then return end
+            if dragInput then
+                if input ~= dragInput then return end
+            elseif input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+                return
             end
+            dragging = false
+            dragInput = nil
         end))
         render()
         return handle
@@ -1490,7 +1620,7 @@ function Dock:AddRow(tabId, def)
                 ol.Position = UDim2.new(0, 10, 0, 0)
                 ol.Size = UDim2.new(1, -20, 1, 0)
                 ol.Parent = ob
-                self._conn(ob.MouseButton1Click:Connect(function()
+                self._conn(ob.Activated:Connect(function()
                     value = opt
                     btnLabel.Text = tostring(opt)
                     opts.Visible = false
@@ -1509,7 +1639,7 @@ function Dock:AddRow(tabId, def)
             if value == nil then value = options[1] end
             rebuild()
         end
-        self._conn(btn.MouseButton1Click:Connect(function()
+        self._conn(btn.Activated:Connect(function()
             opts.Visible = not opts.Visible
         end))
         rebuild()
