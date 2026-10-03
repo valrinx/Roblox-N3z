@@ -1,19 +1,18 @@
 -- ============================================================
 -- N3Z Dance Avenue - Core Module
--- v1.2.0 - 100% Guaranteed Perfect + Native Human Autoplay
--- Directly hooks Audition.Config.Windows and Audition.Judge.grade
+-- v1.3.0 - Ultra-Lightweight Zero Lag + 100% Guaranteed Perfect
+-- Single GC cache (NO per-frame getgc scan), instant FPS recovery
 -- ============================================================
 
 return function(Window, ctx, adapter)
     local Players = game:GetService("Players")
-    local RunService = game:GetService("RunService")
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
     local Workspace = game:GetService("Workspace")
     local UserInputService = game:GetService("UserInputService")
 
     local localPlayer = Players.LocalPlayer
 
-    -- Cleanup previous instance
+    -- Clean up previous instance
     local env = (type(getgenv) == "function" and getgenv()) or _G
     if env.__N3Z_DANCE_AVENUE_CLEANUP then
         pcall(env.__N3Z_DANCE_AVENUE_CLEANUP)
@@ -33,7 +32,7 @@ return function(Window, ctx, adapter)
     }
 
     -- ----------------------------------------------------
-    -- 1. AUDITION HOOK (ALWAYS PERFECT)
+    -- 1. ZERO-LAG PERFECT HOOK (Static Module Hook)
     -- ----------------------------------------------------
     local audition = ReplicatedStorage:WaitForChild("Audition")
     local Config = require(audition:WaitForChild("Config"))
@@ -43,11 +42,9 @@ return function(Window, ctx, adapter)
     for k, v in pairs(Config.Windows) do
         origWindows[k] = v
     end
-
     local origGrade = Judge.grade
 
     local function applyPerfectHook()
-        -- ขยาย Window ให้กว้าง ไม่ว่าจะเคาะตรงไหนหรือตอนไหน = PERFECT เสมอ
         Config.Windows.PERFECT = 999.0
         Config.Windows.GREAT = 999.0
         Config.Windows.COOL = 999.0
@@ -68,39 +65,48 @@ return function(Window, ctx, adapter)
     applyPerfectHook()
     addCleanup(restorePerfectHook)
 
-    -- Persistent Game Finder
-    local function getGameInstance()
+    -- ----------------------------------------------------
+    -- 2. ZERO-LAG SINGLETON GAME FINDER (Run ONCE only!)
+    -- ----------------------------------------------------
+    local cachedGame = nil
+    local function findGameOnce()
+        if cachedGame then return cachedGame end
         for _, obj in ipairs(getgc(true)) do
             if type(obj) == "table" and rawget(obj, "offsetMs") ~= nil then
+                cachedGame = obj
                 return obj
             end
         end
         return nil
     end
 
-    -- Loop ensure autoplay & perfect
-    local loopConn = RunService.Heartbeat:Connect(function()
-        local g = getGameInstance()
-        if g then
-            if state.autoPlay then
-                if g.autoplay ~= "human" then
-                    g.autoplay = "human"
-                end
-            else
-                if g.autoplay == "human" then
-                    g.autoplay = nil
+    local g = findGameOnce()
+    if g then
+        g.autoplay = "human"
+    end
+
+    -- Run check only every 1.5 seconds (zero FPS drop)
+    local activeCheckRunning = true
+    task.spawn(function()
+        while activeCheckRunning do
+            local gameInst = findGameOnce()
+            if gameInst then
+                if state.autoPlay and gameInst.autoplay ~= "human" then
+                    gameInst.autoplay = "human"
+                elseif not state.autoPlay and gameInst.autoplay == "human" then
+                    gameInst.autoplay = nil
                 end
             end
+            task.wait(1.5)
         end
     end)
     addCleanup(function()
-        if loopConn then loopConn:Disconnect() end
-        local g = getGameInstance()
-        if g then g.autoplay = nil end
+        activeCheckRunning = false
+        if cachedGame then cachedGame.autoplay = nil end
     end)
 
     -- ----------------------------------------------------
-    -- 2. UI TABS
+    -- 3. UI TABS
     -- ----------------------------------------------------
     local MainTab = Window:CreateTab("Auto Play")
     local MovementTab = Window:CreateTab("Movement")
@@ -120,19 +126,19 @@ return function(Window, ctx, adapter)
     })
 
     MainTab:CreateToggle({
-        Name = "Full Auto Play (บอทกดลูกศร + เคาะ Spacebar ให้อัตโนมัติ)",
+        Name = "Full Auto Play (บอทกดลูกศร + เคาะ Spacebar อัตโนมัติ)",
         Default = true,
         Callback = function(v)
             state.autoPlay = v
-            local g = getGameInstance()
-            if g then
-                g.autoplay = v and "human" or nil
+            local gameInst = findGameOnce()
+            if gameInst then
+                gameInst.autoplay = v and "human" or nil
             end
         end,
     })
 
     -- ----------------------------------------------------
-    -- 3. MOVEMENT MODIFIERS
+    -- 4. MOVEMENT MODIFIERS (Event based, no RenderStepped spam)
     -- ----------------------------------------------------
     MovementTab:CreateToggle({
         Name = "Speed Hack",
@@ -162,17 +168,14 @@ return function(Window, ctx, adapter)
         end,
     })
 
-    local speedConn = RunService.Stepped:Connect(function()
+    local charConn = localPlayer.CharacterAdded:Connect(function(char)
         if state.speedEnabled then
-            local char = localPlayer.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if hum and hum.WalkSpeed ~= state.walkSpeed then
-                hum.WalkSpeed = state.walkSpeed
-            end
+            local hum = char:WaitForChild("Humanoid", 3)
+            if hum then hum.WalkSpeed = state.walkSpeed end
         end
     end)
     addCleanup(function()
-        if speedConn then speedConn:Disconnect() end
+        if charConn then charConn:Disconnect() end
         local char = localPlayer.Character
         local hum = char and char:FindFirstChildOfClass("Humanoid")
         if hum then hum.WalkSpeed = 26 end
@@ -200,7 +203,7 @@ return function(Window, ctx, adapter)
     end)
 
     -- ----------------------------------------------------
-    -- 4. MISC
+    -- 5. MISC
     -- ----------------------------------------------------
     MiscTab:CreateButton({
         Name = "Rejoin Server",
