@@ -1,7 +1,9 @@
 --[[
-    RAVEN HUB Module - Steal An Egg v1.2.0
+    RAVEN HUB Module - Steal An Egg v1.2.8
     Game: Steal An Egg (PlaceId: 107778070777162)
     Developer: and Collect Rare Pets
+
+    v1.2.8 - keep custom visual ScreenGui below the N3Z Dock
 
     v1.2.0 — NO hookmetamethod (Byfron-safe)
     - Removed all hookmetamethod calls (caused BAC-6336 kick)
@@ -602,7 +604,7 @@ return function(Window, runtimeInfo)
             speedLabel = Instance.new("ScreenGui")
             speedLabel.Name = "RavenSAESpeedDisplay"
             speedLabel.ResetOnSpawn = false
-            speedLabel.DisplayOrder = 999
+            speedLabel.DisplayOrder = 900
             local parent = gethui and gethui() or LP:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
             speedLabel.Parent = parent
 
@@ -852,7 +854,7 @@ return function(Window, runtimeInfo)
     end
 
     getgenv().__RAVEN_STEAL_AN_EGG = {
-        Version = "v1.2.0",
+        Version = "v1.2.8",
         Settings = State,
         State = State,
         BiomeData = BiomeData,

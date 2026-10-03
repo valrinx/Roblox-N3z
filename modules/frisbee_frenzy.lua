@@ -2,7 +2,7 @@
 --   RAVEN HUB  |  Frisbee Frenzy
 --   UniverseId: 10230942274  |  PlaceId: 106986181033085
 --   Player ESP + Combat State ESP + Auto-Block | 100% Drawing API (zero instances)
---   v1.1.0 — read-only visuals, no hooks, no remotes
+--   v1.1.1 - shared menu occlusion for Drawing visuals
 --   Auto-Block: triggers the game's own "Blocking" status effect via
 --   character state functions when an enemy M1 is detected nearby.
 -- ============================================================
@@ -21,7 +21,7 @@ return function(Window, scriptInfo)
         and type(environment.__RAVEN_FRISBEE_FRENZY.Destroy) == "function" then
         pcall(environment.__RAVEN_FRISBEE_FRENZY.Destroy)
     end
-    environment.RAVEN_FRISBEE_FRENZY_VER = "1.1.0"
+    environment.RAVEN_FRISBEE_FRENZY_VER = "1.1.1"
 
     local running = true
     local connections = {}
@@ -40,11 +40,36 @@ return function(Window, scriptInfo)
         reactWindow = 0.5,
     }
 
-    local hasDrawing = type(Drawing) == "table" and type(Drawing.new) == "function"
+    local rawDrawing = nil
+    pcall(function() rawDrawing = Drawing end)
+    local drawingApi = rawDrawing
+
+    if type(rawDrawing) == "table"
+        and type(rawDrawing.new) == "function"
+        and type(scriptInfo) == "table"
+        and type(scriptInfo.loadModuleFile) == "function" then
+        local okFactory, factory = pcall(
+            scriptInfo.loadModuleFile,
+            "modules/_shared/visual_occlusion.lua"
+        )
+        if okFactory and type(factory) == "function" then
+            local okWrap, wrapped = pcall(factory, rawDrawing, scriptInfo)
+            if okWrap and type(wrapped) == "table" then
+                drawingApi = wrapped
+                if type(scriptInfo.registerCleanup) == "function"
+                    and type(wrapped.destroy) == "function" then
+                    scriptInfo.registerCleanup(wrapped.destroy)
+                end
+            end
+        end
+    end
+
+    local hasDrawing = type(drawingApi) == "table"
+        and type(drawingApi.new) == "function"
 
     local function safeDrawing(drawingType)
         if not hasDrawing then return nil end
-        local ok, obj = pcall(Drawing.new, drawingType)
+        local ok, obj = pcall(drawingApi.new, drawingType)
         return (ok and obj) or nil
     end
 

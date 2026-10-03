@@ -240,13 +240,29 @@ return function(platformName, ctx)
     local realDrawing = nil
     pcall(function() realDrawing = Drawing end)
 
+    local baseDrawing
     if platformName == "pc"
         and type(realDrawing) == "table"
         and type(realDrawing.new) == "function" then
-        adapter.Drawing = realDrawing
+        baseDrawing = realDrawing
     else
-        adapter.Drawing = nativeDrawing
+        baseDrawing = nativeDrawing
     end
+
+    local visualDrawing = baseDrawing
+    if type(ctx) == "table" and type(ctx.loadModuleFile) == "function" then
+        local okFactory, factory = pcall(
+            ctx.loadModuleFile,
+            "modules/_shared/visual_occlusion.lua"
+        )
+        if okFactory and type(factory) == "function" then
+            local okWrap, wrapped = pcall(factory, baseDrawing, ctx)
+            if okWrap and type(wrapped) == "table" then
+                visualDrawing = wrapped
+            end
+        end
+    end
+    adapter.Drawing = visualDrawing
 
     local function cameraMouseMove(dx, dy)
         local camera = Workspace.CurrentCamera
@@ -348,6 +364,10 @@ return function(platformName, ctx)
         end
 
     function adapter.destroy()
+        if visualDrawing ~= baseDrawing
+            and type(visualDrawing.destroy) == "function" then
+            pcall(visualDrawing.destroy)
+        end
         local objects = {}
         for obj in pairs(nativeObjects) do
             objects[#objects + 1] = obj

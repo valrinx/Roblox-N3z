@@ -330,6 +330,83 @@ Before commit:
 - verify overflow cue logic
 - verify that unrelated game logic was not modified
 
+## Visual Occlusion Rules (PC and Mobile)
+
+These rules apply to every ESP, Drawing primitive, world marker, HUD overlay, FOV indicator, tracer, skeleton, BillboardGui, Highlight, adornment, and other module-owned visual.
+
+### 1. Visuals must never render through the N3Z Hub
+
+No module visual may remain visible on top of:
+- the compact Hub bar
+- an open Hub panel
+- visible Hub utility tooltips
+
+The Dock is the source of truth for these screen regions through GetOcclusionRects().
+
+### 2. Drawing visuals must use the shared occlusion layer
+
+Drawing-based visuals must be created through modules/_shared/visual_occlusion.lua or an equivalent platform adapter that uses it.
+
+Do not create raw Drawing objects in new modules and then rely only on ZIndex to stay below the Hub. Some executors render Drawing above ScreenGui regardless of the requested ZIndex.
+
+WarZ's menu-aware clipping behavior is the baseline contract.
+
+### 3. Occlude only the visual that intersects the menu
+
+Do not hide all ESP merely because the Hub is open.
+
+For Drawing primitives:
+- Text: hide when its screen bounds overlap a Hub rect
+- Square: hide when its rectangle overlaps a Hub rect
+- Line / tracer / skeleton segment: hide when the segment intersects a Hub rect
+- Circle / FOV: hide when its bounds overlap a Hub rect
+
+Visuals outside the menu should remain visible.
+
+### 4. Module ScreenGui overlays must stay below the Dock
+
+The N3Z Dock uses DisplayOrder 999.
+
+Module-owned visual ScreenGui instances must use a lower DisplayOrder. Prefer 900-998 only when a high overlay layer is genuinely required.
+
+Never use DisplayOrder 999 or higher for a module visual unless the object is itself part of the N3Z Hub.
+
+### 5. World-space visuals must not bypass the Hub
+
+Highlight, BillboardGui, SelectionBox, and HandleAdornment visuals may use AlwaysOnTop for the 3D world, but must remain in the normal world/UI render stack so the N3Z ScreenGui covers them.
+
+Do not move world visuals into a ScreenGui above the Dock to force visibility.
+
+### 6. PC and Mobile follow the same occlusion contract
+
+PC may use executor Drawing while Mobile may use NativeGui fallbacks. Both must consume the same Dock occlusion rectangles and produce the same visible result around the Hub.
+
+Do not validate Mobile by testing only PC, or PC by testing only Mobile.
+
+### 7. Occlusion wrappers own cleanup
+
+A shared visual wrapper must:
+- preserve the module's requested Visible state
+- temporarily suppress only the rendered visibility while occluded
+- restore rendering automatically when the visual leaves the menu region
+- disconnect RenderStepped/update connections during unload
+- remove or release wrapped visuals deterministically
+
+No stale visual or occlusion connection may survive Hub unload/reload.
+
+### 8. Visual validation is mandatory
+
+For any module with visuals, validate:
+- visual fully outside Hub remains visible
+- visual overlapping the bar is hidden
+- visual overlapping an open panel is hidden
+- visual becomes visible again after leaving the Hub region
+- requested Visible=false remains false
+- closing/hiding the Hub removes occlusion
+- unload removes visual/update resources
+- module ScreenGui DisplayOrder remains below the Dock
+- PC and Mobile are reported separately when runtime-tested
+
 ## Recommended adapter contract
 
 Adapters should expose a small explicit contract rather than reaching into core internals arbitrarily.

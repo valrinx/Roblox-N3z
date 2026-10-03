@@ -4,6 +4,7 @@
 --   Player ESP + ATM ESP + NPC/Vehicle ESP + Wanted HUD + Aimbot
 --   v1.1.0 — 100% Drawing API (zero instances), no hooks, no remotes
 --   Read-only visuals + mouse-driven aim.
+--   v1.2.10: shared menu occlusion for all Drawing visuals.
 --   v1.2.9: teleport 70m hops/0.8s (proven reliable, was 40m/0.25s flaky).
 --   v1.2.8: sell = E opens Ofy dialog then press 1 ([Sell Loot]).
 --   v1.2.7: PawnOfy part pos; teleport steps in 40m hops (long tp blocked).
@@ -68,7 +69,7 @@ return function(Window, ctx)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WANTED_VER = "1.2.9"
+    environment.RAVEN_WANTED_VER = "1.2.10"
 
     local running = true
     local connections = {}
@@ -151,11 +152,36 @@ return function(Window, ctx)
         uiSections = {}
     end
 
-    local hasDrawing = type(Drawing) == "table" and type(Drawing.new) == "function"
+    local rawDrawing = nil
+    pcall(function() rawDrawing = Drawing end)
+    local drawingApi = rawDrawing
+
+    if type(rawDrawing) == "table"
+        and type(rawDrawing.new) == "function"
+        and type(ctx) == "table"
+        and type(ctx.loadModuleFile) == "function" then
+        local okFactory, factory = pcall(
+            ctx.loadModuleFile,
+            "modules/_shared/visual_occlusion.lua"
+        )
+        if okFactory and type(factory) == "function" then
+            local okWrap, wrapped = pcall(factory, rawDrawing, ctx)
+            if okWrap and type(wrapped) == "table" then
+                drawingApi = wrapped
+                if type(ctx.registerCleanup) == "function"
+                    and type(wrapped.destroy) == "function" then
+                    ctx.registerCleanup(wrapped.destroy)
+                end
+            end
+        end
+    end
+
+    local hasDrawing = type(drawingApi) == "table"
+        and type(drawingApi.new) == "function"
 
     local function safeDrawing(drawingType)
         if not hasDrawing then return nil end
-        local ok, obj = pcall(Drawing.new, drawingType)
+        local ok, obj = pcall(drawingApi.new, drawingType)
         if ok and obj then
             -- v1.0.4: executor default ZIndex is 1, same as the menu chassis,
             -- so ESP used to render through the menu. Keep every module

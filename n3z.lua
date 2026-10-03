@@ -1,5 +1,5 @@
 -- ============================================================
--- N3Z HUB v2.4.2 - n3z.lua (entrypoint)
+-- N3Z HUB v2.4.3 - n3z.lua (entrypoint)
 -- Native-GUI dock hub. Run:
 --   loadstring(game:HttpGet(
 --     "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/n3z.lua"))()
@@ -44,10 +44,10 @@ local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/"
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
 local HUB_URL = REPO_URL
 
-local N3Z_VERSION = "v2.4.2"
+local N3Z_VERSION = "v2.4.3"
 
 -- ---------- module registry (mirror of the old project's registry) ----------
--- add a module: {id,name,version,game,placeIds?,gameIds?,file,envKey?,coreFile?,platformFiles?}
+-- add a module: {id,name,version,game,placeIds?,gameIds?,file,envKey?,coreFile?,platformFiles?,visualOcclusion?}
 local MODULES = {
     { id = "warzpvp", name = "WarZPVP", configName = "WarZ", version = "v1.7.0", game = "WarZPVP OPEN BETA",
       placeIds = { 135187059974536 }, file = "modules/warz_pvp.lua", envKey = "__RAVEN_WARZPVP",
@@ -56,16 +56,16 @@ local MODULES = {
           pc = "modules/warz_pvp/pc.lua",
           mobile = "modules/warz_pvp/mobile.lua",
       } },
-    { id = "stealanegg", name = "Steal An Egg", version = "v1.2.7", game = "Steal An Egg",
+    { id = "stealanegg", name = "Steal An Egg", version = "v1.2.8", game = "Steal An Egg",
       placeIds = { 107778070777162 }, file = "modules/steal_an_egg.lua" },
     { id = "illegalsoccer", name = "Illegal Soccer", version = "v1.4.4", game = "Illegal Soccer",
       placeIds = { 126987974021910 }, file = "modules/illegal_soccer.lua" },
-    { id = "wanted", name = "Wanted", version = "v1.2.9", game = "Wanted",
-      placeIds = { 14438406081 }, file = "modules/wanted.lua" },
-    { id = "wartycoon", name = "War Tycoon", version = "v1.1.0", game = "War Tycoon",
-      placeIds = { 4639625707 }, file = "modules/war_tycoon.lua" },
-    { id = "frisbeefrenzy", name = "Frisbee Frenzy", version = "v1.0.0", game = "Frisbee Frenzy",
-      placeIds = { 106986181033085 }, file = "modules/frisbee_frenzy.lua" },
+    { id = "wanted", name = "Wanted", version = "v1.2.10", game = "Wanted",
+      placeIds = { 14438406081 }, file = "modules/wanted.lua", visualOcclusion = true },
+    { id = "wartycoon", name = "War Tycoon", version = "v1.1.1", game = "War Tycoon",
+      placeIds = { 4639625707 }, file = "modules/war_tycoon.lua", visualOcclusion = true },
+    { id = "frisbeefrenzy", name = "Frisbee Frenzy", version = "v1.1.1", game = "Frisbee Frenzy",
+      placeIds = { 106986181033085 }, file = "modules/frisbee_frenzy.lua", visualOcclusion = true },
     { id = "danceavenue", name = "Dance Avenue", configName = "DanceAvenue", version = "v1.3.1", game = "Dance Avenue",
       placeIds = { 79341474117411 }, file = "modules/dance_avenue.lua", envKey = "__N3Z_DANCE_AVENUE",
       coreFile = "modules/dance_avenue/core.lua",
@@ -1029,6 +1029,9 @@ if activeMod then
     end
     if activeMod.legacyPlatform == true then
         loadModuleFile("modules/_shared/legacy_platform.lua")
+        loadModuleFile("modules/_shared/visual_occlusion.lua")
+    elseif activeMod.visualOcclusion == true then
+        loadModuleFile("modules/_shared/visual_occlusion.lua")
     end
     for _, dependencyFile in ipairs(activeMod.dependencyFiles or {}) do
         loadModuleFile(dependencyFile)

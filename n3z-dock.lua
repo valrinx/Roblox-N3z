@@ -2328,6 +2328,35 @@ function Dock:IsPanelOpen()
         and self._panel.Visible == true
 end
 
+function Dock:GetOcclusionRects()
+    local out = {}
+    if self._dead or self._visible ~= true then return out end
+
+    local function addRect(guiObject)
+        if not guiObject then return end
+        local ok, visible, pos, size = pcall(function()
+            return guiObject.Visible, guiObject.AbsolutePosition, guiObject.AbsoluteSize
+        end)
+        if ok and visible ~= false
+            and typeof(pos) == "Vector2"
+            and typeof(size) == "Vector2"
+            and size.X > 0 and size.Y > 0 then
+            out[#out + 1] = { x = pos.X, y = pos.Y, w = size.X, h = size.Y }
+        end
+    end
+
+    -- The compact bar is always part of the visible Hub. The panel only
+    -- occludes visuals while a tab is open.
+    addRect(self._bar)
+    if self:IsPanelOpen() then addRect(self._panel) end
+
+    -- Utility tooltips temporarily extend the menu outside the bar.
+    for _, tab in pairs(self._tabs or {}) do
+        if tab.tooltip then addRect(tab.tooltip) end
+    end
+    return out
+end
+
 function Dock:SetMenuKey(keyCode)
     if typeof(keyCode) == "EnumItem" and keyCode.EnumType == Enum.KeyCode then
         self._menuKey = keyCode
