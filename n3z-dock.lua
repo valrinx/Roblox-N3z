@@ -511,7 +511,7 @@ function Dock.new(opts)
         self._footKbd = kbdChip
     else
         -- mobile: no keyboard — hint label replaces the key chip (mockup footer)
-        local hint = label("Tap active tab to collapse", 11, C.accent, FONT)
+        local hint = label("⌄ tap tab to collapse", 11, C.accent, FONT)
         hint.AnchorPoint = Vector2.new(1, 0)
         hint.Position = UDim2.new(1, 0, 0, 5)
         hint.Size = UDim2.new(0, 180, 0, 16)
@@ -842,7 +842,7 @@ function Dock.new(opts)
     logo.Name = "Logo"
     logo.BackgroundTransparency = 1
     logo.RichText = true
-    logo.Text = '<font color="#DFE3EE"><b>N3Z</b></font><font color="#22D3EE"><b> HUB</b></font>'
+    logo.Text = '<font color="#DFE3EE"><b>N3Z</b></font><font color="#22D3EE"><b>·</b></font>'
     logo.TextSize = 14
     logo.Font = FONT_BOLD
     logo.AutomaticSize = Enum.AutomaticSize.X
@@ -951,7 +951,8 @@ function Dock:AddTab(tabLabel, tabId)
 
     local id = tabId
     local this = self
-    self._conn(btn.Activated:Connect(function()
+    local tabClick = self._isMobile and btn.Activated or btn.MouseButton1Click
+    self._conn(tabClick:Connect(function()
         if os.clock() < (this._dragSuppressUntil or 0) then return end
         this:SetActiveTab(id)
     end))
@@ -1139,7 +1140,7 @@ function Dock:_refreshToggleCount()
         for _, h in ipairs(hs) do
             if h:Get() then on = on + 1 end
         end
-        self._countLabel.Text = string.upper(id) .. " - " .. on .. "/" .. #hs .. " ON"
+        self._countLabel.Text = string.upper(id) .. " — " .. on .. "/" .. #hs .. " ON"
     end
 end
 
@@ -1414,7 +1415,8 @@ function Dock:AddRow(tabId, def)
         pad(pill, 10, 5, 10, 5)
         if def.onPress then
             local lastFire = 0
-            self._conn(row.Activated:Connect(function()
+            local actionClick = self._isMobile and row.Activated or row.MouseButton1Click
+            self._conn(actionClick:Connect(function()
                 local now = os.clock()
                 if now - lastFire < 0.25 then return end
                 lastFire = now
@@ -1433,7 +1435,8 @@ function Dock:AddRow(tabId, def)
         if def.key then makeKbd(z, tostring(def.key)) end
         local h = makeToggle(z, def.value == true, def.onChange, self)
         -- clicking anywhere on the row flips the switch (mockup .frow)
-        self._conn(row.Activated:Connect(function()
+        local toggleClick = self._isMobile and row.Activated or row.MouseButton1Click
+        self._conn(toggleClick:Connect(function()
             h:Set(not h:Get())
         end))
         -- hover: knob grows slightly (mockup .tgl:hover::after)
@@ -1479,7 +1482,8 @@ function Dock:AddRow(tabId, def)
             end
             if def.onPress then task.spawn(pcall, def.onPress) end
         end
-        self._conn(row.Activated:Connect(firePress))
+        local rowClick = self._isMobile and row.Activated or row.MouseButton1Click
+        self._conn(rowClick:Connect(firePress))
         if def.buttonText then
             local b = Instance.new("TextButton")
             b.Name = "ActionButton"
@@ -1495,7 +1499,8 @@ function Dock:AddRow(tabId, def)
             corner(b, 8)
             pad(b, 12, 6, 12, 6)
             if def.danger then stroke(b, C.danger, 0.5).ApplyStrokeMode = Enum.ApplyStrokeMode.Border end
-            self._conn(b.Activated:Connect(firePress))
+            local buttonClick = self._isMobile and b.Activated or b.MouseButton1Click
+            self._conn(buttonClick:Connect(firePress))
         end
         return {}
     end
@@ -1516,7 +1521,8 @@ function Dock:AddRow(tabId, def)
         local handle = {}
         function handle:SetName(n) b.Text = tostring(n) end
         if def.onPress then
-            self._conn(b.Activated:Connect(function()
+            local buttonClick = self._isMobile and b.Activated or b.MouseButton1Click
+            self._conn(buttonClick:Connect(function()
                 task.spawn(pcall, def.onPress)
             end))
         end
@@ -1594,32 +1600,60 @@ function Dock:AddRow(tabId, def)
             if def.onChange then task.spawn(pcall, def.onChange, value) end
         end
         self._conn(track.InputBegan:Connect(function(input)
-            local inputType = input.UserInputType
-            if inputType == Enum.UserInputType.MouseButton1
-                or inputType == Enum.UserInputType.Touch then
+            if self._isMobile then
+                local inputType = input.UserInputType
+                if inputType == Enum.UserInputType.MouseButton1
+                    or inputType == Enum.UserInputType.Touch then
+                    dragging = true
+                    dragInput = (inputType == Enum.UserInputType.Touch) and input or nil
+                    fromX(input.Position.X)
+                end
+                return
+            end
+
+            -- Desktop path intentionally matches the pre-mobile implementation.
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
                 dragging = true
-                dragInput = (inputType == Enum.UserInputType.Touch) and input or nil
                 fromX(input.Position.X)
             end
         end))
         self._conn(UserInputService.InputChanged:Connect(function(input)
             if not dragging then return end
-            if dragInput then
-                if input ~= dragInput then return end
-            elseif input.UserInputType ~= Enum.UserInputType.MouseMovement then
+            if self._isMobile then
+                if dragInput then
+                    if input ~= dragInput then return end
+                elseif input.UserInputType ~= Enum.UserInputType.MouseMovement then
+                    return
+                end
+                fromX(input.Position.X)
                 return
             end
-            fromX(input.Position.X)
+
+            -- Desktop path intentionally matches the pre-mobile implementation.
+            if input.UserInputType == Enum.UserInputType.MouseMovement
+                or input.UserInputType == Enum.UserInputType.Touch then
+                fromX(input.Position.X)
+            end
         end))
         self._conn(UserInputService.InputEnded:Connect(function(input)
-            if not dragging then return end
-            if dragInput then
-                if input ~= dragInput then return end
-            elseif input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+            if self._isMobile then
+                if not dragging then return end
+                if dragInput then
+                    if input ~= dragInput then return end
+                elseif input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+                    return
+                end
+                dragging = false
+                dragInput = nil
                 return
             end
-            dragging = false
-            dragInput = nil
+
+            -- Desktop path intentionally matches the pre-mobile implementation.
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = false
+            end
         end))
         render()
         return handle
@@ -1686,7 +1720,8 @@ function Dock:AddRow(tabId, def)
                 ol.Position = UDim2.new(0, 10, 0, 0)
                 ol.Size = UDim2.new(1, -20, 1, 0)
                 ol.Parent = ob
-                self._conn(ob.Activated:Connect(function()
+                local optionClick = self._isMobile and ob.Activated or ob.MouseButton1Click
+                self._conn(optionClick:Connect(function()
                     value = opt
                     btnLabel.Text = tostring(opt)
                     opts.Visible = false
@@ -1705,7 +1740,8 @@ function Dock:AddRow(tabId, def)
             if value == nil then value = options[1] end
             rebuild()
         end
-        self._conn(btn.Activated:Connect(function()
+        local dropdownClick = self._isMobile and btn.Activated or btn.MouseButton1Click
+        self._conn(dropdownClick:Connect(function()
             opts.Visible = not opts.Visible
         end))
         rebuild()

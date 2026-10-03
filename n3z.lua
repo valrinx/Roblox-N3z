@@ -1,5 +1,5 @@
 -- ============================================================
--- N3Z HUB v2.2.1 - n3z.lua (entrypoint)
+-- N3Z HUB v2.2.2 - n3z.lua (entrypoint)
 -- Native-GUI dock hub. Run:
 --   loadstring(game:HttpGet(
 --     "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/n3z.lua"))()
@@ -10,40 +10,14 @@ local localPlayer = Players.LocalPlayer
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 
--- Prefer a touch-first layout on phones/tablets even when a hardware keyboard
--- is attached. Touch laptops stay on the desktop layout unless the viewport is
--- compact or Roblox currently reports touch as the preferred input.
-local function detectMobileLayout()
-    if not UserInputService.TouchEnabled then return false end
-
-    local preferredTouch = false
-    pcall(function()
-        preferredTouch = UserInputService.PreferredInput == Enum.PreferredInput.Touch
-    end)
-
-    local compactViewport = false
-    pcall(function()
-        local camera = workspace.CurrentCamera
-        local size = camera and camera.ViewportSize
-        if size then
-            compactViewport = math.min(size.X, size.Y) <= 1100
-                and math.max(size.X, size.Y) <= 1700
-        end
-    end)
-
-    return preferredTouch
-        or not UserInputService.KeyboardEnabled
-        or not UserInputService.MouseEnabled
-        or compactViewport
-end
-
-local isMobile = detectMobileLayout()
+-- mobile: touch device without a keyboard -> mobile dock layout (mockup parity)
+local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 
 local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/"
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
 local HUB_URL = REPO_URL
 
-local N3Z_VERSION = "v2.2.1"
+local N3Z_VERSION = "v2.2.2"
 
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: one object {id, name, version, game, placeIds, file, envKey?}
@@ -421,8 +395,8 @@ dock:AddRow("settings", {
     kind = "action", name = "Unload Module", desc = "Clean teardown of module & dock",
     buttonText = "UNLOAD", danger = true, onPress = unloadAll,
 })
-dock:SetTabInfo("modules", #MODULES .. " modules - " .. (activeMod and "1 ACTIVE" or "none in this game"))
-dock:SetTabInfo("settings", "N3Z HUB " .. N3Z_VERSION)
+dock:SetTabInfo("modules", #MODULES .. " modules · " .. (activeMod and "1 ACTIVE" or "none in this game"))
+dock:SetTabInfo("settings", "settings")
 
 -- ---------- load the game module (unchanged old-project code) ----------
 if activeMod then
