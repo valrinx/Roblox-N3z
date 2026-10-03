@@ -4,6 +4,7 @@
 --   Player ESP (Box/Name/Distance/HP/Weapon) + Loot ESP + Boss ESP + Aimbot (mouse-driven)
 --   v1.4.0 — loot ESP (WarzLoot), boss ESP + spawn alert (WarzBoss), skeleton render fix
 --   v1.4.1 - R15 body bounds, validated head/LOS aim and bounded ESP updates.
+--   v1.5.1 - event-driven loot cache + 60 Hz cached label updates.
 --   Read-only visuals + mouse-driven aim.
 --   WarZ notes: FFA + Party/Clan relation colors, skip dead via WarzDead attribute,
 --   character = R15 (Head/HumanoidRootPart), WarzHitboxes folder present.
@@ -50,7 +51,7 @@ return function(Window, ctx)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.5.0"
+    environment.RAVEN_WARZPVP_VER = "1.5.1"
 
     local persistedAimKey = "MouseButton2"
     pcall(function()
@@ -738,9 +739,13 @@ return function(Window, ctx)
     -- [[ Loot ESP: read-only labels for drops under Workspace.WarzLoot ]]
     -- Loot models look like "Loot_ARMOR_Rebel_Heavy" / "Loot_HEADHELMET"
     -- with PrimaryPart = "LootMarker". No remotes, no hooks — Drawing only.
-    local lootCache = {} -- [model] = { text = drawing }
+    local lootCache = {} -- [model] = cached metadata + lazily-created Drawing text
     local lootCategories = { "All" }
+    local lootCategorySet = { All = true }
     local lootCategoryDropdown = nil
+    local lootFolder = nil
+    local lootAddedConnection = nil
+    local lootRemovedConnection = nil
 
     local function parseLootName(modelName)
         local rest = modelName
@@ -760,7 +765,6 @@ return function(Window, ctx)
     end
 
     local function lootAnchor(model)
-        -- PrimaryPart -> "LootMarker" child -> first BasePart fallback.
         local pp = model.PrimaryPart
         if pp then return pp end
         local marker = model:FindFirstChild("LootMarker")
@@ -782,80 +786,175 @@ return function(Window, ctx)
     end
 
     local function noteLootCategory(category)
-        for _, c in ipairs(lootCategories) do
-            if c == category then return end
-        end
+        if lootCategorySet[category] then return end
+        lootCategorySet[category] = true
         table.insert(lootCategories, category)
         if lootCategoryDropdown and type(lootCategoryDropdown.SetOptions) == "function" then
             pcall(function() lootCategoryDropdown:SetOptions(lootCategories) end)
         end
     end
 
+    local function ensureLootDrawing(entry)
+        if entry.text then return entry.text end
+        local t = safeDrawing("Text")
+        if t then
+            t.Size = 13
+            t.Center = true
+            t.Outline = true
+            t.Color = Color3.fromRGB(255, 255, 255)
+            t.Visible = false
+        end
+        entry.text = t
+        return t
+    end
+
+    local function registerLoot(model)
+        if not model or not model:IsA("Model") then return nil end
+        local entry = lootCache[model]
+        if entry then
+            if not entry.anchor or not entry.anchor.Parent then
+                entry.anchor = lootAnchor(model)
+            end
+            return entry
+        end
+
+        local category, itemName = parseLootName(model.Name)
+        noteLootCategory(category)
+        entry = {
+            text = nil,
+            anchor = lootAnchor(model),
+            category = category,
+            itemName = itemName,
+            labelPrefix = itemName .. " [" .. category .. "] ",
+            lastDistance = nil,
+        }
+        lootCache[model] = entry
+        return entry
+    end
+
+    local function destroyLootEntry(model)
+        local entry = lootCache[model]
+        if not entry then return end
+        if entry.text then
+            pcall(function() entry.text:Remove() end)
+        end
+        lootCache[model] = nil
+    end
+
+    local function clearLootCache()
+        local models = {}
+        for model in pairs(lootCache) do
+            table.insert(models, model)
+        end
+        for _, model in ipairs(models) do
+            destroyLootEntry(model)
+        end
+    end
+
+    local function disconnectLootFolder()
+        if lootAddedConnection then
+            pcall(function() lootAddedConnection:Disconnect() end)
+            lootAddedConnection = nil
+        end
+        if lootRemovedConnection then
+            pcall(function() lootRemovedConnection:Disconnect() end)
+            lootRemovedConnection = nil
+        end
+    end
+
+    local function bindLootFolder(folder)
+        if folder == lootFolder then return end
+        disconnectLootFolder()
+        clearLootCache()
+        lootFolder = folder
+        if not lootFolder then return end
+
+        for _, model in ipairs(lootFolder:GetChildren()) do
+            registerLoot(model)
+        end
+
+        lootAddedConnection = lootFolder.ChildAdded:Connect(function(model)
+            if running then
+                registerLoot(model)
+            end
+        end)
+        lootRemovedConnection = lootFolder.ChildRemoved:Connect(function(model)
+            destroyLootEntry(model)
+        end)
+    end
+
+    local function syncLootFolder()
+        local folder = Workspace:FindFirstChild("WarzLoot")
+        if folder ~= lootFolder then
+            bindLootFolder(folder)
+        end
+    end
+
+    local function hideLootEntry(entry)
+        if entry and entry.text then
+            entry.text.Visible = false
+        end
+    end
+
     local function updateLootEsp()
+        syncLootFolder()
+
         if not settings.lootEsp then
-            for _, e in pairs(lootCache) do
-                if e.text then pcall(function() e.text.Visible = false end) end
+            for _, entry in pairs(lootCache) do
+                hideLootEntry(entry)
             end
             return
         end
-        local folder = Workspace:FindFirstChild("WarzLoot")
+
+        local cam = camera
+        if not cam then return end
+
+        local camPos = cam.CFrame.Position
+        local maxDistance = settings.lootMaxDistance
+        local maxDistanceSq = maxDistance * maxDistance
         local menuRect = getMenuPanelRect()
-        local seen = {}
-        if folder then
-            for _, model in ipairs(folder:GetChildren()) do
-                if model:IsA("Model") then
-                    local anchor = lootAnchor(model)
-                    local apos = lootAnchorPos(anchor)
-                    if apos then
-                        local dist = (apos - camera.CFrame.Position).Magnitude
-                        if dist <= settings.lootMaxDistance then
-                            local category, itemName = parseLootName(model.Name)
-                            noteLootCategory(category)
-                            seen[model] = true
-                            local e = lootCache[model]
-                            if not e then
-                                local t = safeDrawing("Text")
-                                if t then
-                                    t.Size = 13
-                                    t.Center = true
-                                    t.Outline = true
-                                    t.Color = Color3.fromRGB(255, 255, 255)
+
+        for model, entry in pairs(lootCache) do
+            if model.Parent ~= lootFolder or not lootCategoryAllowed(entry.category) then
+                hideLootEntry(entry)
+            else
+                local anchor = entry.anchor
+                if not anchor or not anchor.Parent then
+                    anchor = lootAnchor(model)
+                    entry.anchor = anchor
+                end
+
+                local apos = lootAnchorPos(anchor)
+                if apos then
+                    local delta = apos - camPos
+                    local distanceSq = delta:Dot(delta)
+                    if distanceSq <= maxDistanceSq then
+                        local viewport, onScreen = cam:WorldToViewportPoint(apos)
+                        if onScreen and viewport.Z > 0 then
+                            local text = ensureLootDrawing(entry)
+                            if text then
+                                local roundedDistance = math.floor(math.sqrt(distanceSq) + 0.5)
+                                if entry.lastDistance ~= roundedDistance then
+                                    entry.lastDistance = roundedDistance
+                                    text.Text = entry.labelPrefix .. roundedDistance .. "m"
                                 end
-                                e = { text = t }
-                                lootCache[model] = e
-                            end
-                            if e.text then
-                                if lootCategoryAllowed(category) then
-                                    local v, on = camera:WorldToViewportPoint(apos)
-                                    if on and v.Z > 0 then
-                                        e.text.Position = Vector2.new(v.X, v.Y)
-                                        e.text.Text = string.format("%s [%s] %dm",
-                                            itemName, category, math.floor(dist + 0.5))
-                                        e.text.Visible = not textOverlapsMenu(e.text, menuRect)
-                                    else
-                                        e.text.Visible = false
-                                    end
-                                else
-                                    e.text.Visible = false
-                                end
+                                text.Position = Vector2.new(viewport.X, viewport.Y)
+                                text.Visible = not textOverlapsMenu(text, menuRect)
                             end
                         else
-                            local e = lootCache[model]
-                            if e and e.text then pcall(function() e.text.Visible = false end) end
+                            hideLootEntry(entry)
                         end
+                    else
+                        hideLootEntry(entry)
                     end
+                else
+                    hideLootEntry(entry)
                 end
-            end
-        end
-        -- Picked-up / recycled / reparented loot: remove its drawing.
-        for model, e in pairs(lootCache) do
-            if not seen[model] then
-                if e.text then pcall(function() e.text:Remove() end) end
-                lootCache[model] = nil
             end
         end
     end
 
+    syncLootFolder()
     -- [[ Boss ESP: read-only box + name/distance + HP bar, spawn alert ]]
     -- Boss lives under Workspace.WarzBoss (observed: "SuperZombie", 5000 HP).
     local bossDraw = nil
@@ -1604,7 +1703,7 @@ end
     end)
 
     -- [[ Connections ]]
-    -- Refresh aim/UI every frame, but bound the heavier ESP work to 30/8/12 Hz.
+    -- Refresh aim/UI every frame; cached loot labels update at 60 Hz so they track the camera smoothly.
     -- Do not hold a stale CurrentCamera across death or camera replacement.
     local espTime, lootTime, bossTime = 0, 0, 0
     table.insert(connections, RunService.RenderStepped:Connect(function(dt)
@@ -1621,8 +1720,8 @@ end
         -- clips itself against the panel rectangle, so visuals outside the menu
         -- remain visible instead of disappearing globally.
         pcall(updatePlayerEsp)
-        if lootTime >= 1 / 8 then
-            lootTime = 0
+        if lootTime >= 1 / 60 then
+            lootTime = math.max(0, lootTime - 1 / 60)
             pcall(updateLootEsp)
         end
         if bossTime >= 1 / 12 then
@@ -1683,10 +1782,9 @@ end
         for p in pairs(espCache) do table.insert(players, p) end
         for _, p in ipairs(players) do destroyEntry(p) end
         table.clear(espCache)
-        for model, e in pairs(lootCache) do
-            if e.text then pcall(function() e.text:Remove() end) end
-            lootCache[model] = nil
-        end
+        disconnectLootFolder()
+        clearLootCache()
+        lootFolder = nil
         if bossDraw then
             for _, d in pairs(bossDraw) do
                 if d then pcall(function() d:Remove() end) end
