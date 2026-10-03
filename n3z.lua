@@ -1,5 +1,5 @@
 -- ============================================================
--- N3Z HUB v2.3.1 - n3z.lua (entrypoint)
+-- N3Z HUB v2.3.2 - n3z.lua (entrypoint)
 -- Native-GUI dock hub. Run:
 --   loadstring(game:HttpGet(
 --     "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/n3z.lua"))()
@@ -37,7 +37,7 @@ local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/"
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
 local HUB_URL = REPO_URL
 
-local N3Z_VERSION = "v2.3.1"
+local N3Z_VERSION = "v2.3.2"
 
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: one object {id, name, version, game, placeIds, file, envKey?}
@@ -544,7 +544,19 @@ if activeMod then
         end)
     end
 else
-    dock:AddRow("visuals", { kind = "label", text = "No module for this game yet." })
+    if isMobile then
+        dock:AddRow("visuals", { kind = "label", text = "No module for this game yet." })
+    else
+        dock:AddRow("modules", { kind = "label", text = "No module for this game yet." })
+    end
+end
+
+-- Desktop: drop primary tabs the module never filled (e.g. COMBAT/VISUALS in
+-- a game that only registers its own tabs). Decided from real page content
+-- after module init; error rows above count as content and are kept.
+-- MODULES and SETTINGS always stay. Mobile tab bar is intentionally untouched.
+if not isMobile then
+    pcall(function() dock:PruneEmptyTabs({ "modules", "settings" }) end)
 end
 
 -- compat alias for old modules (set after load so the module's own

@@ -804,15 +804,24 @@ function Dock.new(opts)
             local barInst, indInst = self._bar, self._indicator
             if not btn.Parent or not barInst or not indInst or not indInst.Parent then return end
             if btn.AbsoluteSize.X <= 0 then return end
+            -- The active tab may have changed or been removed while we waited.
+            local cur = self._activeTab and self._tabs[self._activeTab]
+            if not cur or cur.btn ~= btn then
+                if not cur then indInst.Visible = false end
+                return
+            end
 
-            -- On PC, if active tab is in primary scroll, check viewport visibility
-            if not self._isMobile and self._activeTab ~= "settings" and self._primaryScroll then
+            local drawLeft = btn.AbsolutePosition.X
+            local drawRight = drawLeft + btn.AbsoluteSize.X
+            -- PC primary tabs: clip the indicator to the primary viewport so a
+            -- partially scrolled tab never paints under the Logo / SETTINGS.
+            if not self._isMobile and self._primaryScroll and btn.Parent == self._primaryScroll then
                 local ps = self._primaryScroll
-                local bLeft = btn.AbsolutePosition.X
-                local bRight = bLeft + btn.AbsoluteSize.X
                 local psLeft = ps.AbsolutePosition.X
                 local psRight = psLeft + ps.AbsoluteSize.X
-                if bRight <= psLeft + 1 or bLeft >= psRight - 1 then
+                drawLeft = math.max(drawLeft, psLeft)
+                drawRight = math.min(drawRight, psRight)
+                if drawRight - drawLeft <= 1 then
                     indInst.Visible = false
                     return
                 end
@@ -823,9 +832,9 @@ function Dock.new(opts)
             local padL = 0
             local padInst = barInst:FindFirstChildOfClass("UIPadding")
             if padInst then padL = padInst.PaddingLeft.Offset end
-            local bp = btn.AbsolutePosition - barInst.AbsolutePosition
-            local size = UDim2.new(0, btn.AbsoluteSize.X, 0, L.indH)
-            local pos = UDim2.new(0, bp.X - padL, 0.5, 0)
+            local relX = drawLeft - barInst.AbsolutePosition.X
+            local size = UDim2.new(0, drawRight - drawLeft, 0, L.indH)
+            local pos = UDim2.new(0, relX - padL, 0.5, 0)
             indInst.Visible = true
             if animate then
                 indInst:TweenSizeAndPosition(size, pos,
@@ -924,8 +933,11 @@ function Dock.new(opts)
         primaryScroll.Size = UDim2.new(1, -182, 0, L.tabH)
         primaryScroll.ScrollingDirection = Enum.ScrollingDirection.X
         primaryScroll.ScrollBarThickness = 0
-        primaryScroll.AutomaticCanvasSize = Enum.AutomaticSize.X
+        -- Canvas is sized explicitly from the layout's real content width
+        -- (see clampPrimaryScroll) so it never lags behind add/remove.
+        primaryScroll.AutomaticCanvasSize = Enum.AutomaticSize.None
         primaryScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+        primaryScroll.ScrollingEnabled = false
         primaryScroll.ClipsDescendants = true
         primaryScroll.ZIndex = 1
         primaryScroll.Parent = bar
@@ -940,6 +952,36 @@ function Dock.new(opts)
         primaryLayout.Parent = primaryScroll
         self._primaryLayout = primaryLayout
 
+        -- Overflow source of truth: real layout content width vs the actual
+        -- primary viewport width. Scrolling is enabled ONLY on true overflow;
+        -- otherwise the canvas is pinned at zero so no stale offset can clip
+        -- a label (e.g. "MODULES" -> "ULES") when everything already fits.
+        local function primaryMaxScroll()
+            local contentW = math.ceil(primaryLayout.AbsoluteContentSize.X)
+            local viewW = math.floor(primaryScroll.AbsoluteSize.X)
+            if viewW <= 0 then return 0, contentW end
+            return math.max(0, contentW - viewW), contentW
+        end
+
+        local function clampPrimaryScroll()
+            if self._dead or not primaryScroll.Parent then return end
+            local maxScroll, contentW = primaryMaxScroll()
+            primaryScroll.CanvasSize = UDim2.new(0, contentW, 0, 0)
+            if maxScroll <= 1 then
+                primaryScroll.ScrollingEnabled = false
+                if primaryScroll.CanvasPosition ~= Vector2.zero then
+                    primaryScroll.CanvasPosition = Vector2.zero
+                end
+            else
+                primaryScroll.ScrollingEnabled = true
+                local x = math.clamp(primaryScroll.CanvasPosition.X, 0, maxScroll)
+                if x ~= primaryScroll.CanvasPosition.X or primaryScroll.CanvasPosition.Y ~= 0 then
+                    primaryScroll.CanvasPosition = Vector2.new(x, 0)
+                end
+            end
+        end
+        self._clampPrimaryScroll = clampPrimaryScroll
+
         local function updatePrimaryBounds()
             if self._dead or not bar.Parent then return end
             local logoW = logo.AbsoluteSize.X
@@ -950,40 +992,41 @@ function Dock.new(opts)
             local startX = logoW + gap
             primaryScroll.Position = UDim2.new(0, startX, 0.5, 0)
             primaryScroll.Size = UDim2.new(1, -(startX + utilW + gap), 0, L.tabH)
+            clampPrimaryScroll()
         end
         conn(logo:GetPropertyChangedSignal("AbsoluteSize"):Connect(updatePrimaryBounds))
         conn(utilityZone:GetPropertyChangedSignal("AbsoluteSize"):Connect(updatePrimaryBounds))
         conn(bar:GetPropertyChangedSignal("AbsoluteSize"):Connect(updatePrimaryBounds))
+        conn(primaryScroll:GetPropertyChangedSignal("AbsoluteSize"):Connect(clampPrimaryScroll))
+        conn(primaryLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(clampPrimaryScroll))
         task.defer(updatePrimaryBounds)
 
-        -- Mouse wheel horizontal scroll over primary tabs
+        -- Mouse wheel horizontal scroll: only when the primary zone overflows.
         conn(primaryScroll.InputChanged:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseWheel then
-                local delta = input.Position.Z
-                local step = 45
-                local maxScroll = math.max(0, primaryScroll.AbsoluteCanvasSize.X - primaryScroll.AbsoluteWindowSize.X)
-                if maxScroll > 0 then
-                    local targetX = math.clamp(primaryScroll.CanvasPosition.X - delta * step, 0, maxScroll)
-                    primaryScroll.CanvasPosition = Vector2.new(targetX, 0)
-                end
-            end
+            if input.UserInputType ~= Enum.UserInputType.MouseWheel then return end
+            local maxScroll = primaryMaxScroll()
+            if maxScroll <= 1 then return end
+            local targetX = math.clamp(primaryScroll.CanvasPosition.X - input.Position.Z * 45, 0, maxScroll)
+            primaryScroll.CanvasPosition = Vector2.new(targetX, 0)
         end))
 
-        -- Helper to ensure active tab is scrolled into visible bounds
+        -- Scroll the given primary button fully into view (no-op without overflow).
         local function ensureVisible(btn)
-            if not primaryScroll or not btn or not btn.Parent or btn.Parent ~= primaryScroll then return end
+            if not btn or btn.Parent ~= primaryScroll then return end
+            clampPrimaryScroll()
+            local maxScroll = primaryMaxScroll()
+            if maxScroll <= 1 then return end
             local pLeft = primaryScroll.AbsolutePosition.X
             local pRight = pLeft + primaryScroll.AbsoluteSize.X
             local bLeft = btn.AbsolutePosition.X
             local bRight = bLeft + btn.AbsoluteSize.X
+            local x = primaryScroll.CanvasPosition.X
             if bLeft < pLeft then
-                local diff = pLeft - bLeft + 4
-                primaryScroll.CanvasPosition = Vector2.new(math.max(0, primaryScroll.CanvasPosition.X - diff), 0)
+                x = x - (pLeft - bLeft)
             elseif bRight > pRight then
-                local diff = bRight - pRight + 4
-                local maxScroll = math.max(0, primaryScroll.AbsoluteCanvasSize.X - primaryScroll.AbsoluteWindowSize.X)
-                primaryScroll.CanvasPosition = Vector2.new(math.min(maxScroll, primaryScroll.CanvasPosition.X + diff), 0)
+                x = x + (bRight - pRight)
             end
+            primaryScroll.CanvasPosition = Vector2.new(math.clamp(x, 0, maxScroll), 0)
         end
         self._ensureVisible = ensureVisible
 
@@ -1053,6 +1096,7 @@ function Dock:AddTab(tabLabel, tabId)
     local L = self._layout
     tabId = tabId or string.lower(tostring(tabLabel))
     if self._tabs[tabId] then return tabId end
+    if self._prunedTabs then self._prunedTabs[tabId] = nil end
 
     local btn = Instance.new("TextButton")
     btn.Name = "Tab_" .. tabId
@@ -1187,17 +1231,7 @@ function Dock:SetActiveTab(tabId)
     local oldBarPos = self._bar and self._bar.AbsolutePosition or nil
 
     if self._activeTab == tabId then
-        self._activeTab = nil
-        for id, t in pairs(self._tabs) do
-            t.page.Visible = false
-            t.btn.TextColor3 = C.muted
-            t.btn.Font = FONT_MED
-        end
-        self._panel.Visible = false
-        if self._indicator then self._indicator.Visible = false end
-        self:_updateFooter()
-        self:_syncInputBlock()
-        if oldBarPos then self:_repinBar(oldBarPos, 0.8) end
+        self:_collapsePanel(oldBarPos)
         return
     end
 
@@ -1327,6 +1361,144 @@ function Dock:ClearRows(tabId)
     end
 end
 
+-- ---------- tab lifecycle (Dock owns it) ----------
+-- Tabs that must never be removed by RemoveTab/PruneEmptyTabs.
+local PROTECTED_TABS = { settings = true }
+
+-- A tab has content when its page holds at least one real GuiObject
+-- (Row, label row, custom control). Section headers alone do not count:
+-- a header with nothing under it is still an empty tab.
+function Dock:HasTabContent(tabId)
+    local t = self._tabs[tabId]
+    if not t or not t.page then return false end
+    for _, child in ipairs(t.page:GetChildren()) do
+        if child:IsA("GuiObject") and child:GetAttribute("N3ZSection") ~= true then
+            return true
+        end
+    end
+    return false
+end
+
+function Dock:GetTabIds()
+    local out = {}
+    for i, id in ipairs(self._tabIds) do out[i] = id end
+    return out
+end
+
+-- Close the panel and clear every piece of active-tab state.
+function Dock:_collapsePanel(oldBarPos)
+    self._activeTab = nil
+    for _, t in pairs(self._tabs) do
+        t.page.Visible = false
+        t.btn.TextColor3 = C.muted
+        t.btn.Font = FONT_MED
+    end
+    if self._panel then self._panel.Visible = false end
+    if self._indicator then self._indicator.Visible = false end
+    self:_updateFooter()
+    self:_syncInputBlock()
+    if oldBarPos then self:_repinBar(oldBarPos, 0.8) end
+end
+
+-- Re-number LayoutOrder after a removal so ordering stays dense and stable.
+function Dock:_relayoutTabs()
+    if self._isMobile then
+        for i, id in ipairs(self._tabIds) do
+            local t = self._tabs[id]
+            if t then t.btn.LayoutOrder = i - 1; t.order = i end
+        end
+    else
+        for i, id in ipairs(self._primaryTabIds) do
+            local t = self._tabs[id]
+            if t then t.btn.LayoutOrder = i end
+        end
+        for i, id in ipairs(self._tabIds) do
+            local t = self._tabs[id]
+            if t then t.order = i end
+        end
+    end
+end
+
+local function removeValue(list, value)
+    for i = #list, 1, -1 do
+        if list[i] == value then table.remove(list, i) end
+    end
+end
+
+-- Fully remove a tab: button, page, bookkeeping, active state, indicator,
+-- scroll bounds. Returns true when something was removed.
+function Dock:RemoveTab(tabId)
+    if self._dead then return false end
+    local t = self._tabs[tabId]
+    if not t or PROTECTED_TABS[tabId] then return false end
+
+    local wasActive = (self._activeTab == tabId)
+    local oldBarPos = self._bar and self._bar.AbsolutePosition or nil
+
+    self._prunedTabs = self._prunedTabs or {}
+    self._prunedTabs[tabId] = t.btn.Text
+
+    self._tabs[tabId] = nil
+    removeValue(self._tabIds, tabId)
+    removeValue(self._primaryTabIds, tabId)
+    self._tabToggles[tabId] = nil
+    self._tabInfo[tabId] = nil
+
+    pcall(function() t.btn:Destroy() end)
+    pcall(function() t.page:Destroy() end)
+
+    self:_relayoutTabs()
+
+    if wasActive then
+        self:_collapsePanel(oldBarPos)
+    end
+    if self._clampPrimaryScroll then
+        self._clampPrimaryScroll()
+        -- Layout recomputes AbsoluteContentSize next frame; clamp again then.
+        task.defer(function()
+            if not self._dead and self._clampPrimaryScroll then self._clampPrimaryScroll() end
+        end)
+    end
+    if not wasActive and self._pinIndicator then
+        self._pinIndicator(false)
+    end
+    return true
+end
+
+-- Remove every tab without real content, except those in keepTabs
+-- (array or set of ids). SETTINGS is always kept. Returns removed ids.
+function Dock:PruneEmptyTabs(keepTabs)
+    local keep = { settings = true }
+    if type(keepTabs) == "table" then
+        for k, v in pairs(keepTabs) do
+            if type(k) == "number" and type(v) == "string" then
+                keep[v] = true
+            elseif type(k) == "string" and v then
+                keep[k] = true
+            end
+        end
+    end
+    local removed = {}
+    for _, id in ipairs(self:GetTabIds()) do
+        if not keep[id] and not self:HasTabContent(id) then
+            if self:RemoveTab(id) then removed[#removed + 1] = id end
+        end
+    end
+    return removed
+end
+
+-- Resolve a tab for AddRow. A tab that was pruned as empty is recreated
+-- transparently if a module adds content to it later; unknown ids still error.
+function Dock:_ensureTab(tabId)
+    local t = self._tabs[tabId]
+    if t then return t end
+    local label = self._prunedTabs and self._prunedTabs[tabId]
+    assert(label, "Dock:AddRow unknown tab " .. tostring(tabId))
+    self._prunedTabs[tabId] = nil
+    self:AddTab(label, tabId)
+    return self._tabs[tabId]
+end
+
 -- ---------- header ----------
 function Dock:SetHeader(gameName, placeLine, modLine)
     self._gameLabel.Text = gameName or "…"
@@ -1372,8 +1544,7 @@ end
 -- ---------- rows ----------
 local _rowOrder = 0
 function Dock:_baseRow(tabId, noHover)
-    local t = self._tabs[tabId]
-    assert(t, "Dock:AddRow unknown tab " .. tostring(tabId))
+    local t = self:_ensureTab(tabId)
     local L = self._layout
     _rowOrder = _rowOrder + 1
     -- The row is ONE button: clicking anywhere on it activates the control,
@@ -1516,11 +1687,12 @@ function Dock:AddRow(tabId, def)
     local kind = def.kind or "toggle"
 
     if kind == "section" then
-        local t = self._tabs[tabId]
+        local t = self:_ensureTab(tabId)
         _rowOrder = _rowOrder + 1
         local s = label(string.upper(tostring(def.text or "")), 10, C.soft, FONT_BOLD)
         s.Size = UDim2.new(1, 0, 0, 16)
         s.LayoutOrder = _rowOrder
+        s:SetAttribute("N3ZSection", true)
         s.Parent = t.page
         return {}
     end
