@@ -1,6 +1,7 @@
 -- ============================================================
 -- N3Z Dance Avenue - Core Module
--- v1.0.0 - Auto Rhythm (Perfect/Great), Speed, Teleport, Visuals
+-- v1.1.0 - Full Auto Play (Auto Arrows + Auto Perfect Hit)
+-- Direct Game Engine Hook + VIM Keyboard Emulation
 -- Compliant with AGENT.MD platform separation contract
 -- ============================================================
 
@@ -10,7 +11,6 @@ return function(Window, ctx, adapter)
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
     local Workspace = game:GetService("Workspace")
     local UserInputService = game:GetService("UserInputService")
-    local TweenService = game:GetService("TweenService")
 
     local localPlayer = Players.LocalPlayer
     local camera = Workspace.CurrentCamera
@@ -26,15 +26,15 @@ return function(Window, ctx, adapter)
         table.insert(cleanups, fn)
     end
 
-    -- Settings state
+    -- State
     local state = {
-        autoHit = false,
-        hitAccuracy = "PERFECT", -- PERFECT (0.80), GREAT (0.76)
-        hitChance = 100,
+        autoArrows = true,     -- ออโต้กดลูกศรทั้งหมด (ระดับ 1 ถึง 11)
+        autoHit = true,        -- ออโต้เคาะ Spacebar / Perfect
+        hitAccuracy = "PERFECT",
+        humanDelay = 0.04,     -- ดีเลย์ระหว่างกดลูกศร (ป้องกันค้าง/เนียน)
         walkSpeed = 26,
         speedEnabled = false,
         infJump = false,
-        roomAnnounce = false,
     }
 
     -- Actuator from adapter
@@ -49,80 +49,129 @@ return function(Window, ctx, adapter)
     -- UI Tabs
     local MainTab = Window:CreateTab("Auto Play")
     local MovementTab = Window:CreateTab("Movement")
-    local TeleportTab = Window:CreateTab("Teleport")
     local MiscTab = Window:CreateTab("Misc")
 
     -- ----------------------------------------------------
-    -- 1. AUTO RHYTHM LOGIC
+    -- 1. AUTO PLAY CONTROLS
     -- ----------------------------------------------------
     MainTab:CreateToggle({
-        Name = "Auto Spacebar (Perfect)",
-        Default = false,
+        Name = "Auto Arrows (กดลูกศรทั้งหมด)",
+        Default = true,
+        Callback = function(v)
+            state.autoArrows = v
+        end,
+    })
+
+    MainTab:CreateToggle({
+        Name = "Auto Spacebar (เคาะ Perfect)",
+        Default = true,
         Callback = function(v)
             state.autoHit = v
         end,
     })
 
-    MainTab:CreateDropdown({
-        Name = "Timing Accuracy",
-        Options = { "PERFECT (Exact)", "GREAT (Safe)" },
-        Default = "PERFECT (Exact)",
-        Callback = function(v)
-            if string.find(v, "PERFECT") then
-                state.hitAccuracy = "PERFECT"
-            else
-                state.hitAccuracy = "GREAT"
-            end
-        end,
-    })
-
     MainTab:CreateSlider({
-        Name = "Success Rate (%)",
-        Min = 50,
-        Max = 100,
-        Default = 100,
+        Name = "Arrow Press Delay (sec)",
+        Min = 0,
+        Max = 0.1,
+        Default = 0.04,
         Callback = function(v)
-            state.hitChance = v
+            state.humanDelay = v
         end,
     })
 
-    -- Game UI rhythm tracker
-    local hasHitThisBeat = false
-    local heartbeatConn = RunService.RenderStepped:Connect(function()
-        if not state.autoHit then return end
+    -- Game Cache Helper
+    local cachedGame = nil
+    local function getActiveGame()
+        if cachedGame and cachedGame.slots and cachedGame.state then
+            return cachedGame
+        end
+        for _, obj in ipairs(getgc(true)) do
+            if type(obj) == "table" and rawget(obj, "arrowPresses") ~= nil and rawget(obj, "slots") ~= nil then
+                cachedGame = obj
+                return obj
+            end
+        end
+        return nil
+    end
 
-        local playerGui = localPlayer:FindFirstChild("PlayerGui")
-        local auditionUI = playerGui and playerGui:FindFirstChild("AuditionUI")
-        if not auditionUI then return end
+    local Judge = nil
+    pcall(function()
+        Judge = require(ReplicatedStorage:WaitForChild("Audition"):WaitForChild("Judge"))
+    end)
 
-        local cluster = auditionUI:FindFirstChild("Cluster")
-        if not cluster or not cluster.Visible then
-            hasHitThisBeat = false
+    -- Engine Auto-Player Loop
+    local lastSolvedSlot = -1
+    local hasHitCurrentSlot = false
+
+    local autoLoop = RunService.Heartbeat:Connect(function()
+        local g = getActiveGame()
+        if not g or g.state ~= "playing" then
+            lastSolvedSlot = -1
+            hasHitCurrentSlot = false
             return
         end
 
-        local rhythmBar = cluster:FindFirstChild("RhythmBar")
-        local ball = rhythmBar and rhythmBar:FindFirstChild("Ball")
-        if not ball then return end
+        local curIdx = g.cur
+        if not curIdx or not g.slots then return end
 
-        local ballX = ball.Position.X.Scale
-        local targetMin = state.hitAccuracy == "PERFECT" and 0.79 or 0.74
-        local targetMax = state.hitAccuracy == "PERFECT" and 0.82 or 0.84
+        local slot = g.slots[curIdx]
+        if not slot then return end
 
-        if ballX >= targetMin and ballX <= targetMax then
-            if not hasHitThisBeat then
-                hasHitThisBeat = true
-                -- Roll chance
-                if math.random(1, 100) <= state.hitChance then
-                    actuator.triggerSpace()
+        -- 1. Auto Solve Arrow Keys for the current slot
+        if state.autoArrows and slot.dirs and #slot.dirs > 0 and lastSolvedSlot ~= curIdx then
+            local arrowCount = slot.arrowCount or #slot.dirs
+            local entered = slot.entered or 0
+
+            if entered < arrowCount then
+                for i = (entered + 1), arrowCount do
+                    local dir = slot.dirs[i]
+                    local isRed = slot.reds and slot.reds[i] == true
+                    local keyToPress = dir
+
+                    -- If note is RED (Chance mode), expectedKey is opposite!
+                    if isRed and Judge and Judge.expectedKey then
+                        keyToPress = Judge.expectedKey(dir, true)
+                    end
+
+                    -- Feed into game's onArrow
+                    if g.onArrow then
+                        pcall(g.onArrow, g, keyToPress)
+                    end
+
+                    if state.humanDelay > 0 then
+                        task.wait(state.humanDelay)
+                    end
                 end
             end
-        elseif ballX < 0.5 then
-            hasHitThisBeat = false
+            lastSolvedSlot = curIdx
+            hasHitCurrentSlot = false
+        end
+
+        -- 2. Auto Hit (Spacebar) on timing
+        if state.autoHit and not hasHitCurrentSlot then
+            local playerGui = localPlayer:FindFirstChild("PlayerGui")
+            local auditionUI = playerGui and playerGui:FindFirstChild("AuditionUI")
+            local cluster = auditionUI and auditionUI:FindFirstChild("Cluster")
+            local rhythmBar = cluster and cluster:FindFirstChild("RhythmBar")
+            local ball = rhythmBar and rhythmBar:FindFirstChild("Ball")
+
+            if ball and cluster.Visible then
+                local ballX = ball.Position.X.Scale
+                -- Perfect target zone: 0.795 - 0.825
+                if ballX >= 0.795 and ballX <= 0.825 then
+                    hasHitCurrentSlot = true
+                    if g.onHit then
+                        pcall(g.onHit, g)
+                    else
+                        actuator.triggerSpace()
+                    end
+                end
+            end
         end
     end)
     addCleanup(function()
-        if heartbeatConn then heartbeatConn:Disconnect() end
+        if autoLoop then autoLoop:Disconnect() end
     end)
 
     -- ----------------------------------------------------
@@ -156,7 +205,7 @@ return function(Window, ctx, adapter)
         end,
     })
 
-    local speedLoop = RunService.Stepped:Connect(function()
+    local speedConn = RunService.Stepped:Connect(function()
         if state.speedEnabled then
             local char = localPlayer.Character
             local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -166,7 +215,7 @@ return function(Window, ctx, adapter)
         end
     end)
     addCleanup(function()
-        if speedLoop then speedLoop:Disconnect() end
+        if speedConn then speedConn:Disconnect() end
         local char = localPlayer.Character
         local hum = char and char:FindFirstChildOfClass("Humanoid")
         if hum then hum.WalkSpeed = 26 end
@@ -194,40 +243,15 @@ return function(Window, ctx, adapter)
     end)
 
     -- ----------------------------------------------------
-    -- 3. TELEPORT & STAGES
-    -- ----------------------------------------------------
-    local knownLocations = {
-        ["Lobby Spawn"] = Vector3.new(30, 4, 41),
-        ["Stage 1 (Street)"] = Vector3.new(0, 5, 0),
-        ["Stage 2 (Club)"] = Vector3.new(100, 5, 100),
-        ["Leaderboard Area"] = Vector3.new(30, 4, 80),
-    }
-
-    for name, pos in pairs(knownLocations) do
-        TeleportTab:CreateButton({
-            Name = "Teleport to " .. name,
-            Callback = function()
-                local char = localPlayer.Character
-                local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                if hrp then
-                    hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
-                end
-            end,
-        })
-    end
-
-    -- ----------------------------------------------------
-    -- 4. MISC & LOGS
+    -- 3. MISC
     -- ----------------------------------------------------
     MiscTab:CreateButton({
-        Name = "Dump Songs Count",
+        Name = "Force Native Autoplay (Human Mode)",
         Callback = function()
-            local songsMod = ReplicatedStorage:FindFirstChild("Audition") and ReplicatedStorage.Audition:FindFirstChild("Songs")
-            if songsMod then
-                local songs = require(songsMod)
-                local count = 0
-                for _ in pairs(songs.All or songs) do count = count + 1 end
-                print("[N3Z Dance Avenue] Available tracks:", count)
+            local g = getActiveGame()
+            if g then
+                g.autoplay = "human"
+                print("[N3Z] Forced native autoplay = human")
             end
         end,
     })
