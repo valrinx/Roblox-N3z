@@ -135,7 +135,7 @@ for _, m in ipairs(MODULES) do
 end
 
 local gameName = activeMod and activeMod.game or tostring(game.Name)
-local modLine = (activeMod and activeMod.version or "no module") .. " • " .. N3Z_VERSION
+local modLine = (activeMod and activeMod.version or "no module")
 dock:SetHeader(gameName, "place " .. tostring(placeId) .. " · " .. localPlayer.Name, modLine)
 dock:SetMenuKeyName(isMobile and "TAP" or "K")
 
@@ -198,6 +198,13 @@ unloadAll = function()
     pcall(function() Window:Destroy() end)
     pcall(function() dock:Destroy() end)
     pcall(function() Dock.destroyAllGuis() end)
+    pcall(function()
+        local hui = nil
+        local ok, h = pcall(function() return gethui() end)
+        if ok and typeof(h) == "Instance" then hui = h end
+        if not hui then local ok2, cg = pcall(function() return game:GetService("CoreGui") end) if ok2 and cg then hui = cg end end
+        if hui then for _, c in ipairs(hui:GetChildren()) do if c.Name == "N3zDock" then pcall(function() c:Destroy() end) end end end
+    end)
     env.__N3Z_WINDOW = nil
     env.__RAVEN_WINDOW = nil
 end
