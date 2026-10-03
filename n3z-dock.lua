@@ -425,18 +425,11 @@ function Dock.new(opts)
                 stageLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
             end
         end
-        local function snap()
+        local function applyFlipByY()
             local cam = workspace.CurrentCamera
             local vy = cam and cam.ViewportSize.Y or 1080
-            if stage.AbsolutePosition.Y < vy * 0.4 then
-                setFlipped(true)
-                stage.AnchorPoint = Vector2.new(0.5, 0)
-                stage.Position = UDim2.new(0.5, 0, 0, 14)
-            else
-                setFlipped(false)
-                stage.AnchorPoint = Vector2.new(0.5, 1)
-                stage.Position = UDim2.new(0.5, 0, 1, -14)
-            end
+            setFlipped(stage.AbsolutePosition.Y < vy * 0.4)
+        end
         end
         self._conn(bar.InputBegan:Connect(function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1
@@ -467,7 +460,7 @@ function Dock.new(opts)
             local t = input.UserInputType
             if t ~= Enum.UserInputType.MouseButton1 and t ~= Enum.UserInputType.Touch then return end
             dragging = false
-            if dragMoved then snap() end
+            if dragMoved then applyFlipByY() end
         end))
     end
 
