@@ -1,5 +1,5 @@
 -- ============================================================
--- N3Z HUB v2.2.3 - n3z.lua (entrypoint)
+-- N3Z HUB v2.2.4 - n3z.lua (entrypoint)
 -- Native-GUI dock hub. Run:
 --   loadstring(game:HttpGet(
 --     "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/n3z.lua"))()
@@ -37,7 +37,7 @@ local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/"
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
 local HUB_URL = REPO_URL
 
-local N3Z_VERSION = "v2.2.3"
+local N3Z_VERSION = "v2.2.4"
 
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: one object {id, name, version, game, placeIds, file, envKey?}
@@ -63,13 +63,36 @@ local MODULES = {
 local bootEnv = (type(getgenv) == "function" and getgenv()) or _G
 local DEV_LOCAL = bootEnv.__N3Z_DEV_LOCAL == true
 
+local function looksLikeLuaSource(content)
+    if type(content) ~= "string" or #content <= 100 then
+        return false
+    end
+    local head = string.lower(content:sub(1, 512))
+    if string.find(head, "<!doctype", 1, true)
+        or string.find(head, "<html", 1, true)
+        or string.find(head, "<body", 1, true)
+        or string.find(head, "bad gateway", 1, true)
+        or string.find(head, "upstream connect error", 1, true)
+        or string.find(head, "rate limit", 1, true)
+        or string.find(head, "service unavailable", 1, true) then
+        return false
+    end
+    return true
+end
+
 local function fetchGitHub(urlPath)
     local sep = string.find(urlPath, "?", 1, true) and "&" or "?"
-    local ok, content = pcall(function()
-        return game:HttpGet(REPO_URL .. urlPath .. sep .. "_cb=" .. tostring(os.time()))
-    end)
-    if ok and type(content) == "string" and #content > 100 then
-        return content
+    for attempt = 1, 3 do
+        local cacheBust = tostring(os.time()) .. "-" .. tostring(attempt)
+        local ok, content = pcall(function()
+            return game:HttpGet(REPO_URL .. urlPath .. sep .. "_cb=" .. cacheBust)
+        end)
+        if ok and looksLikeLuaSource(content) then
+            return content
+        end
+        if attempt < 3 then
+            task.wait(0.18 * attempt)
+        end
     end
     return nil
 end
@@ -243,6 +266,45 @@ local function createConfigStore(folderName)
     return store
 end
 
+-- ---------- game detect + source preflight ----------
+local placeId = game.PlaceId
+local activeMod = nil
+for _, m in ipairs(MODULES) do
+    for _, pid in ipairs(m.placeIds) do
+        if pid == placeId then
+            activeMod = m
+            break
+        end
+    end
+    if activeMod then break end
+end
+
+-- Fetch and compile everything before tearing down a working instance. This
+-- prevents transient raw-GitHub failures from leaving only an empty dock.
+local dockSrc = fetchHub(isMobile and "n3z-dock-mobile.lua" or "n3z-dock.lua")
+local dockChunk, dockLoadErr = loadstring(dockSrc, "@n3z-dock")
+assert(dockChunk, "N3Z: failed to compile dock: " .. tostring(dockLoadErr))
+local Dock = dockChunk()
+assert(type(Dock) == "table", "N3Z: dock source did not return a table")
+
+local compatSrc = fetchHub("n3z-compat.lua")
+local compatChunk, compatLoadErr = loadstring(compatSrc, "@n3z-compat")
+assert(compatChunk, "N3Z: failed to compile compat: " .. tostring(compatLoadErr))
+local makeWindow = compatChunk()
+assert(type(makeWindow) == "function", "N3Z: compat source did not return a function")
+
+local activeModuleFn = nil
+if activeMod then
+    local moduleSrc = fetch(activeMod.file, activeMod.file)
+    local moduleChunk, moduleLoadErr = loadstring(moduleSrc, "@" .. activeMod.id)
+    assert(moduleChunk, "N3Z: failed to compile module " .. activeMod.id .. ": " .. tostring(moduleLoadErr))
+
+    local okFactory, factoryOrErr = pcall(moduleChunk)
+    assert(okFactory, "N3Z: failed to prepare module " .. activeMod.id .. ": " .. tostring(factoryOrErr))
+    assert(type(factoryOrErr) == "function", "N3Z: module did not return function(Window, ctx)")
+    activeModuleFn = factoryOrErr
+end
+
 -- ---------- env ----------
 local env = (type(getgenv) == "function" and getgenv()) or _G
 
@@ -252,11 +314,6 @@ if type(env.__N3Z_WINDOW) == "table" and type(env.__N3Z_WINDOW.Destroy) == "func
 end
 env.__N3Z_WINDOW = nil
 
--- ---------- load hub pieces ----------
-local dockSrc = fetchHub(isMobile and "n3z-dock-mobile.lua" or "n3z-dock.lua")
-local Dock = assert(loadstring(dockSrc, "@n3z-dock"))()
-local compatSrc = fetchHub("n3z-compat.lua")
-local makeWindow = assert(loadstring(compatSrc, "@n3z-compat"))()
 -- sweep orphan N3zDock guis (covers case where __N3Z_WINDOW was lost)
 pcall(function() Dock.destroyAllGuis() end)
 
@@ -267,16 +324,6 @@ env.__N3Z_WINDOW = Window
 -- NOTE: __RAVEN_WINDOW alias is set AFTER the module loads (see below).
 -- Old modules destroy getgenv().__RAVEN_WINDOW on load; setting it before
 -- loadstring would make the module kill the window we just built.
-
--- ---------- game detect ----------
-local placeId = game.PlaceId
-local activeMod = nil
-for _, m in ipairs(MODULES) do
-    for _, pid in ipairs(m.placeIds) do
-        if pid == placeId then activeMod = m break end
-    end
-    if activeMod then break end
-end
 
 local gameName = activeMod and activeMod.game or tostring(game.Name)
 local modLine = (activeMod and activeMod.version or "no module")
@@ -418,17 +465,36 @@ dock:AddRow("settings", {
 dock:SetTabInfo("modules", #MODULES .. " modules · " .. (activeMod and "1 ACTIVE" or "none in this game"))
 dock:SetTabInfo("settings", "settings")
 
--- ---------- load the game module (unchanged old-project code) ----------
+-- ---------- load the preflighted game module ----------
 if activeMod then
-    local src = fetch(activeMod.file, activeMod.file)
-    local chunk, loadErr = loadstring(src, "@" .. activeMod.id)
-    assert(chunk, "N3Z: failed to compile module " .. activeMod.id .. ": " .. tostring(loadErr))
-    local modFn = chunk() -- modules return function(Window, ctx)
-    assert(type(modFn) == "function", "N3Z: module did not return function(Window, ctx)")
     local ctx = { game = activeMod.game, placeId = placeId, module = activeMod, dock = dock }
-    local ok, runErr = pcall(modFn, Window, ctx)
+    local ok, runErr = pcall(activeModuleFn, Window, ctx)
     if not ok then
-        warn("[N3Z] module error: " .. tostring(runErr))
+        local message = tostring(runErr or "unknown module error")
+        warn("[N3Z] module error: " .. message)
+
+        -- Never leave a half-built/blank module page behind. Clear any rows
+        -- created before the exception and surface the failure in the dock.
+        pcall(function()
+            dock:ClearRows("combat")
+            dock:ClearRows("visuals")
+
+            local short = message:gsub("[%c]+", " ")
+            if #short > 300 then
+                short = short:sub(1, 300) .. "..."
+            end
+
+            dock:AddRow("combat", {
+                kind = "label",
+                text = "Module failed to start.\n" .. short,
+            })
+            dock:AddRow("visuals", {
+                kind = "label",
+                text = "Module failed to start. Check Combat for details.",
+            })
+            dock:SetTabInfo("combat", "module error")
+            dock:SetTabInfo("visuals", "module error")
+        end)
     end
 else
     dock:AddRow("visuals", { kind = "label", text = "No module for this game yet." })
