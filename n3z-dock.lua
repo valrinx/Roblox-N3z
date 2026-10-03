@@ -405,14 +405,14 @@ function Dock.new(opts)
     barPad.Parent = bar
     self._bar = bar
 
-    -- draggable bar: drag to move, snap top/bottom on release.
-    -- top snap flips panel to open downward.
+    -- draggable bar: free drag, flip panel when in top 40%.
+    -- 15px threshold so tab clicks don't nudge the menu.
     do
         local uis = game:GetService("UserInputService")
         local dragging = false
         local dragMoved = false
-        local dragStartPos = nil
-        local stageStartPos = nil
+        local grabOffset = nil
+        local grabPos = nil
         local function setFlipped(f)
             self._flipped = f
             if f then
@@ -435,23 +435,26 @@ function Dock.new(opts)
                 or input.UserInputType == Enum.UserInputType.Touch then
                 dragging = true
                 dragMoved = false
-                dragStartPos = input.Position
-                stageStartPos = stage.AbsolutePosition
+                grabPos = input.Position
+                grabOffset = input.Position - stage.AbsolutePosition
             end
         end))
         self._conn(uis.InputChanged:Connect(function(input)
             if not dragging then return end
             local t = input.UserInputType
             if t ~= Enum.UserInputType.MouseMovement and t ~= Enum.UserInputType.Touch then return end
-            local delta = input.Position - dragStartPos
-            if not dragMoved and delta.Magnitude < 6 then return end
-            dragMoved = true
+            if not dragMoved then
+                if (input.Position - grabPos).Magnitude < 15 then return end
+                dragMoved = true
+                local absPos = stage.AbsolutePosition
+                stage.AnchorPoint = Vector2.new(0, 0)
+                stage.Position = UDim2.fromOffset(absPos.X, absPos.Y)
+            end
             local cam = workspace.CurrentCamera
             local vx = cam and cam.ViewportSize.X or 1920
             local vy = cam and cam.ViewportSize.Y or 1080
-            local nx = math.clamp(stageStartPos.X + delta.X, 0, math.max(0, vx - stage.AbsoluteSize.X))
-            local ny = math.clamp(stageStartPos.Y + delta.Y, 0, math.max(0, vy - stage.AbsoluteSize.Y))
-            stage.AnchorPoint = Vector2.new(0, 0)
+            local nx = math.clamp(input.Position.X - grabOffset.X, 0, math.max(0, vx - stage.AbsoluteSize.X))
+            local ny = math.clamp(input.Position.Y - grabOffset.Y, 0, math.max(0, vy - stage.AbsoluteSize.Y))
             stage.Position = UDim2.fromOffset(nx, ny)
         end))
         self._conn(uis.InputEnded:Connect(function(input)
