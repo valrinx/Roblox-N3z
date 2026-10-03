@@ -932,7 +932,11 @@ function Dock.new(opts)
         primaryScroll.Position = UDim2.new(0, 42, 0.5, 0)
         primaryScroll.Size = UDim2.new(1, -182, 0, L.tabH)
         primaryScroll.ScrollingDirection = Enum.ScrollingDirection.X
+        -- Hidden when everything fits; clampPrimaryScroll exposes a thin
+        -- horizontal thumb only while more primary tabs exist off-screen.
         primaryScroll.ScrollBarThickness = 0
+        primaryScroll.ScrollBarImageColor3 = C.accent
+        primaryScroll.ScrollBarImageTransparency = 0.12
         -- Canvas is sized explicitly from the layout's real content width
         -- (see clampPrimaryScroll) so it never lags behind add/remove.
         primaryScroll.AutomaticCanvasSize = Enum.AutomaticSize.None
@@ -969,11 +973,13 @@ function Dock.new(opts)
             primaryScroll.CanvasSize = UDim2.new(0, contentW, 0, 0)
             if maxScroll <= 1 then
                 primaryScroll.ScrollingEnabled = false
+                primaryScroll.ScrollBarThickness = 0
                 if primaryScroll.CanvasPosition ~= Vector2.zero then
                     primaryScroll.CanvasPosition = Vector2.zero
                 end
             else
                 primaryScroll.ScrollingEnabled = true
+                primaryScroll.ScrollBarThickness = 3
                 local x = math.clamp(primaryScroll.CanvasPosition.X, 0, maxScroll)
                 if x ~= primaryScroll.CanvasPosition.X or primaryScroll.CanvasPosition.Y ~= 0 then
                     primaryScroll.CanvasPosition = Vector2.new(x, 0)
