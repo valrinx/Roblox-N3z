@@ -1,0 +1,320 @@
+-- Ported from Roblox--Library/modules/My_knife_farm
+-- Shared game logic; platform primitives are provided through runtimeInfo.platformAdapter.
+-- ============================================================
+--   MODULE: My Knife Farm  v0.4
+-- ============================================================
+
+return function(Window, scriptInfo)
+
+    local Players    = game:GetService("Players")
+    local RepStorage = game:GetService("ReplicatedStorage")
+
+    local player    = Players.LocalPlayer
+    local character = player.Character or player.CharacterAdded:Wait()
+    local rootPart  = character:WaitForChild("HumanoidRootPart")
+
+    -- รอให้ map โหลดก่อน
+    local Plots = workspace:WaitForChild("Plots", 30)
+    assert(Plots, "Plots ไม่โหลดใน 30 วิ")
+
+    -- ── Plot Detection ──────────────────────────────────────
+
+    local myPlot = nil
+
+    local function isUsablePlot(plotFolder)
+        return plotFolder
+            and plotFolder:IsA("Folder")
+            and plotFolder:FindFirstChild("Plot_Models")
+            and plotFolder.Plot_Models:FindFirstChild("BaseModel")
+    end
+
+    local function assignMyPlot()
+        local function clean(str) return str:gsub("%W", ""):lower() end
+        local myCleanName        = clean(player.Name)
+        local myCleanDisplayName = clean(player.DisplayName)
+        for _, plotFolder in ipairs(Plots:GetChildren()) do
+            if isUsablePlot(plotFolder) then
+                local baseModel = plotFolder.Plot_Models.BaseModel
+                local nameplate = baseModel:FindFirstChild("BillBoardC")
+                local textLabel = nameplate
+                    and nameplate:FindFirstChild("Nameplate")
+                    and nameplate.Nameplate:FindFirstChild("SurfaceGui")
+                    and nameplate.Nameplate.SurfaceGui:FindFirstChild("NameOf")
+                if textLabel and textLabel:IsA("TextLabel") then
+                    local cleanLabel = clean(textLabel.Text or "")
+                    if string.find(cleanLabel, myCleanName) or string.find(cleanLabel, myCleanDisplayName) then
+                        myPlot = plotFolder
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    assignMyPlot()
+    if not myPlot then
+        for _, plotFolder in ipairs(Plots:GetChildren()) do
+            if isUsablePlot(plotFolder) then
+                myPlot = plotFolder
+                warn("Plot detection failed. Using first available plot fallback: " .. plotFolder.Name)
+                break
+            end
+        end
+    end
+    assert(myPlot, "Plot detection failed: no usable plot found in Workspace.Plots")
+
+    -- ── References ──────────────────────────────────────────
+
+    local baseModel  = myPlot:WaitForChild("Plot_Models"):WaitForChild("BaseModel")
+    local conveyor   = baseModel:WaitForChild("PackConveyor")
+    local spawnClick = baseModel:WaitForChild("ButtonModel"):WaitForChild("PacketClick"):WaitForChild("ClickDetector")
+    local boxStand   = baseModel:WaitForChild("BoxStand")
+    local boxPrompt  = boxStand:WaitForChild("ProximityPrompt")
+    local sellButton = baseModel:WaitForChild("SellButton"):WaitForChild("SellP")
+
+    local BuyCaseRemote = RepStorage:WaitForChild("Events"):WaitForChild("Game"):WaitForChild("CaseTriggered")
+    local SellAllRemote = RepStorage:WaitForChild("Events"):WaitForChild("Game"):WaitForChild("SellAll")
+
+    local pickupCFrame     = boxStand.CFrame * CFrame.new(0, 3, 0)
+    local sellCFrame       = sellButton.CFrame * CFrame.new(0, 10, 0)
+
+    -- SellPart อาจโหลดช้า รอด้วย WaitForChild
+    local InteractableParts = workspace:WaitForChild("InteractableParts", 30)
+    local SellPart = InteractableParts and InteractableParts:WaitForChild("SellPart", 30)
+    local marketSellCFrame = SellPart and (SellPart.CFrame * CFrame.new(0, 5, 0))
+
+    -- ── State ────────────────────────────────────────────────
+
+    local selectedSwordRarity    = {}
+    local selectedMutationRarity = {}
+    local autoRollEnabled    = false
+    local autoBuyEnabled     = false
+    local autoSellEnabled    = false
+    local sellInterval       = 60
+    local autoSellAllEnabled = false
+    local sellAllInterval    = 60
+
+    -- ── Helpers ──────────────────────────────────────────────
+
+    local function isMatch(selectedTable, value)
+        if not selectedTable or next(selectedTable) == nil then return true end
+        if selectedTable[value] == true then return true end
+        for _, v in pairs(selectedTable) do if v == value then return true end end
+        for k, v in pairs(selectedTable) do
+            local key = tostring(type(k) == "string" and k or v)
+            if string.find(string.lower(value), string.lower(key)) then return true end
+        end
+        return false
+    end
+
+    -- ============================================================
+    --   MAIN TAB
+    -- ============================================================
+
+    local MainTab     = Window:CreateTab("Main", 4483362458)
+    local StatusLabel = MainTab:CreateLabel("Status: Idle")
+
+    task.spawn(function()
+        conveyor:WaitForChild("SpawnedCase").ChildAdded:Connect(function(child)
+            if not autoRollEnabled then return end
+            task.spawn(function()
+                task.wait(0.01)
+                local rLabel = child:FindFirstChild("Rarity", true)
+                local mLabel = child:FindFirstChild("EventRarity", true)
+                if rLabel and mLabel then
+                    local timeout = 0
+                    while (rLabel.Text == "" or rLabel.Text == "Label") and timeout < 100 do
+                        if not autoRollEnabled then return end
+                        task.wait(0.02)
+                        timeout += 1
+                    end
+                    local curR = rLabel.Text
+                    local curM = mLabel.Text
+                    if curM == "" or curM == "Label" then curM = "Normal" end
+                    if next(selectedSwordRarity) or next(selectedMutationRarity) then
+                        if isMatch(selectedSwordRarity, curR) and isMatch(selectedMutationRarity, curM) then
+                            if autoBuyEnabled then
+                                BuyCaseRemote:FireServer()
+                                StatusLabel:Set("Last Bought: " .. curM .. " " .. curR)
+                            else
+                                autoRollEnabled = false
+                                StatusLabel:Set("Found: " .. curM .. " " .. curR .. " — Auto Roll stopped")
+                            end
+                        end
+                    end
+                end
+            end)
+        end)
+    end)
+
+    MainTab:CreateToggle({
+        Name = "Auto Roll",
+        CurrentValue = false,
+        Flag = "caseRoll",
+        Callback = function(Value)
+            autoRollEnabled = Value
+            if Value then
+                StatusLabel:Set("Status: Rolling...")
+                task.spawn(function()
+                    while autoRollEnabled do
+                        fireclickdetector(spawnClick)
+                        task.wait(0.06)
+                    end
+                end)
+            else
+                StatusLabel:Set("Status: Idle")
+            end
+        end,
+    })
+
+    MainTab:CreateToggle({
+        Name = "Auto Buy Matched Cases",
+        CurrentValue = false,
+        Flag = "autoBuy",
+        Callback = function(Value) autoBuyEnabled = Value end,
+    })
+
+    MainTab:CreateDropdown({
+        Name = "Select Rarities to KEEP",
+        Options = {"Common","Rare","Epic","Elite","Legendary","Mythic","Secret","Limited","Exclusive","Timeless","Godly","Soul","Fruit","Ninja","Historical","Shadow","Frost","Demon","Arsenal"},
+        MultipleOptions = true,
+        Flag = "swordDD",
+        Callback = function(Options) selectedSwordRarity = Options end,
+    })
+
+    MainTab:CreateDropdown({
+        Name = "Select Mutations to KEEP",
+        Options = {"Rusty","Normal","Golden","Space","Blood","Dark","Candy","Rainbow","Emerald","Blue Gem"},
+        MultipleOptions = true,
+        Flag = "mutationDD",
+        Callback = function(Options) selectedMutationRarity = Options end,
+    })
+
+    -- ============================================================
+    --   SETTINGS TAB
+    -- ============================================================
+
+    local SettingsTab     = Window:CreateTab("Settings", 4483362458)
+    local SellTimerLabel  = SettingsTab:CreateLabel("Next Sell In: --:--")
+    local SellStatusLabel = SettingsTab:CreateLabel("Sell Status: --")
+
+    SettingsTab:CreateToggle({
+        Name = "Auto Sell (Knife)",
+        CurrentValue = false,
+        Flag = "autoSell",
+        Callback = function(Value)
+            autoSellEnabled = Value
+            if Value then
+                task.spawn(function()
+                    while autoSellEnabled do
+                        local returnPos = rootPart.CFrame
+                        rootPart.CFrame = pickupCFrame
+                        task.wait(0.3)
+                        local pickupTimeout = 0
+                        while autoSellEnabled and not character:FindFirstChild("OpenBox") and pickupTimeout < 50 do
+                            fireproximityprompt(boxPrompt)
+                            task.wait(0.1)
+                            pickupTimeout += 1
+                        end
+                        if character:FindFirstChild("OpenBox") then
+                            rootPart.CFrame = sellCFrame
+                            SellStatusLabel:Set("Selling...")
+                            local sellTimeout = 0
+                            while character:FindFirstChild("OpenBox") and sellTimeout < 50 do
+                                task.wait(0.1)
+                                sellTimeout += 1
+                            end
+                            task.wait(0.2)
+                            SellStatusLabel:Set("Sold!")
+                        else
+                            SellStatusLabel:Set("Nothing to pick up")
+                        end
+                        rootPart.CFrame = returnPos
+                        local timeLeft = sellInterval
+                        while timeLeft > 0 and autoSellEnabled do
+                            local m = math.floor(timeLeft / 60)
+                            local s = timeLeft % 60
+                            SellTimerLabel:Set(string.format("Next Sell In: %02d:%02d", m, s))
+                            task.wait(1)
+                            timeLeft -= 1
+                        end
+                    end
+                    SellTimerLabel:Set("Next Sell In: --:--")
+                    SellStatusLabel:Set("Sell Status: --")
+                end)
+            end
+        end,
+    })
+
+    SettingsTab:CreateDropdown({
+        Name = "Sell Interval (Minutes)",
+        Options = {"1","5","10","20"},
+        CurrentValue = "1",
+        Callback = function(Option)
+            local num = tonumber(type(Option) == "table" and Option[1] or Option)
+            if num then sellInterval = num * 60 end
+        end,
+    })
+
+    SettingsTab:CreateButton({
+        Name = "Spin Wheel",
+        Callback = function()
+            RepStorage:WaitForChild("Events"):WaitForChild("Rewards"):WaitForChild("SpinRewards"):FireServer()
+        end,
+    })
+
+    -- ============================================================
+    --   SELL ALL TAB
+    -- ============================================================
+
+    local SellAllTab         = Window:CreateTab("Sell All", 4483362458)
+    local SellAllStatusLabel = SellAllTab:CreateLabel("SellAll Status: Idle")
+    local SellAllTimerLabel  = SellAllTab:CreateLabel("Next SellAll In: --:--")
+
+    SellAllTab:CreateToggle({
+        Name = "Auto SellAll (Market)",
+        CurrentValue = false,
+        Flag = "autoSellAll",
+        Callback = function(Value)
+            autoSellAllEnabled = Value
+            if Value then
+                task.spawn(function()
+                    while autoSellAllEnabled do
+                        if not marketSellCFrame then
+                            SellAllStatusLabel:Set("SellPart ไม่เจอใน workspace")
+                            break
+                        end
+                        local returnPos = rootPart.CFrame
+                        rootPart.CFrame = marketSellCFrame
+                        task.wait(0.5)
+                        SellAllRemote:FireServer()
+                        SellAllStatusLabel:Set("Sold All!")
+                        task.wait(0.5)
+                        rootPart.CFrame = returnPos
+                        local timeLeft = sellAllInterval
+                        while timeLeft > 0 and autoSellAllEnabled do
+                            local m = math.floor(timeLeft / 60)
+                            local s = timeLeft % 60
+                            SellAllTimerLabel:Set(string.format("Next SellAll In: %02d:%02d", m, s))
+                            task.wait(1)
+                            timeLeft -= 1
+                        end
+                    end
+                    SellAllTimerLabel:Set("Next SellAll In: --:--")
+                    SellAllStatusLabel:Set("SellAll Status: Idle")
+                end)
+            end
+        end,
+    })
+
+    SellAllTab:CreateDropdown({
+        Name = "SellAll Interval (Minutes)",
+        Options = {"1","5","10","20"},
+        CurrentValue = "1",
+        Callback = function(Option)
+            local num = tonumber(type(Option) == "table" and Option[1] or Option)
+            if num then sellAllInterval = num * 60 end
+        end,
+    })
+
+end

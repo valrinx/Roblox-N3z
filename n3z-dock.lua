@@ -1710,7 +1710,27 @@ function Dock:AddRow(tabId, def)
         l.AutomaticSize = Enum.AutomaticSize.Y
         l.TextWrapped = true
         l.Parent = row
-        return {}
+
+        local handle = { label = l }
+        function handle:Set(value)
+            if type(value) == "table" then
+                local title = value.Title or value.Name
+                local content = value.Content or value.Text
+                if title ~= nil and content ~= nil then
+                    l.Text = tostring(title) .. "\n" .. tostring(content)
+                elseif content ~= nil then
+                    l.Text = tostring(content)
+                elseif title ~= nil then
+                    l.Text = tostring(title)
+                end
+            else
+                l.Text = tostring(value or "")
+            end
+        end
+        function handle:SetText(value) l.Text = tostring(value or "") end
+        function handle:SetName(value) l.Text = tostring(value or "") end
+        function handle:Get() return l.Text end
+        return handle
     end
 
     if kind == "modulecard" then
@@ -1861,6 +1881,49 @@ function Dock:AddRow(tabId, def)
         return handle
     end
 
+    if kind == "input" then
+        local box = Instance.new("TextBox")
+        box.Name = "Input"
+        box.BackgroundColor3 = C.track
+        box.BackgroundTransparency = 0.2
+        box.BorderSizePixel = 0
+        box.ClearTextOnFocus = false
+        box.Text = tostring(def.value or "")
+        box.PlaceholderText = tostring(def.placeholder or "")
+        box.PlaceholderColor3 = C.muted
+        box.TextColor3 = C.text
+        box.TextSize = 11
+        box.Font = FONT_MONO
+        box.TextXAlignment = Enum.TextXAlignment.Left
+        box.Size = UDim2.new(0, math.max(L.ddW, 150), 0, L.ddH)
+        box.Parent = z
+        corner(box, 8)
+        stroke(box, C.border, 0.4)
+        pad(box, 9, 5, 9, 5)
+
+        local handle = { box = box }
+        function handle:Set(value)
+            box.Text = tostring(value or "")
+        end
+        function handle:Get()
+            return box.Text
+        end
+        function handle:Focus()
+            pcall(function() box:CaptureFocus() end)
+        end
+
+        self._conn(box.FocusLost:Connect(function(_enterPressed)
+            local value = box.Text
+            if def.onChange then
+                task.spawn(pcall, def.onChange, value)
+            end
+            if def.clearAfter then
+                box.Text = ""
+            end
+        end))
+        return handle
+    end
+
     if kind == "slider" then
         local minV, maxV = def.min or 0, def.max or 100
         local step = def.step or 1
@@ -1993,8 +2056,27 @@ function Dock:AddRow(tabId, def)
 
     if kind == "dropdown" then
         local options = def.options or {}
+        local multiple = def.multiple == true
         local value = def.value
-        if value == nil then value = options[1] end
+
+        local function copyArray(input)
+            local out = {}
+            if type(input) == "table" then
+                for _, item in ipairs(input) do
+                    out[#out + 1] = item
+                end
+            elseif input ~= nil then
+                out[1] = input
+            end
+            return out
+        end
+
+        if multiple then
+            value = copyArray(value)
+        elseif type(value) == "table" then
+            value = value[1]
+        end
+        if not multiple and value == nil then value = options[1] end
 
         local btn = Instance.new("TextButton")
         btn.BackgroundColor3 = C.track
@@ -2006,41 +2088,76 @@ function Dock:AddRow(tabId, def)
         btn.Parent = z
         corner(btn, 8)
         stroke(btn, C.border, 0.4)
-        local btnLabel = label(tostring(value), 11, C.text, FONT_MED)
+
+        local btnLabel = label("", 11, C.text, FONT_MED)
         btnLabel.Position = UDim2.new(0, 10, 0, 0)
         btnLabel.Size = UDim2.new(1, -30, 1, 0)
         btnLabel.Parent = btn
-        local arrow = label("▾", 12, C.muted, FONT)
+
+        local arrow = label("v", 12, C.muted, FONT)
         arrow.AnchorPoint = Vector2.new(1, 0.5)
         arrow.Position = UDim2.new(1, -8, 0.5, 0)
         arrow.Size = UDim2.new(0, 16, 0, 16)
         arrow.TextXAlignment = Enum.TextXAlignment.Right
         arrow.Parent = btn
 
-        -- options expand inside the row (row auto-grows)
+        -- Options expand inside the row so both mouse and touch retain the
+        -- existing Dock interaction model.
         local opts = Instance.new("Frame")
         opts.BackgroundTransparency = 1
         opts.Size = UDim2.new(1, 0, 0, 0)
         opts.AutomaticSize = Enum.AutomaticSize.Y
         opts.Visible = false
         opts.Parent = row
+
         local optsLayout = Instance.new("UIListLayout")
         optsLayout.FillDirection = Enum.FillDirection.Vertical
         optsLayout.Padding = UDim.new(0, 4)
         optsLayout.SortOrder = Enum.SortOrder.LayoutOrder
         optsLayout.Parent = opts
+
         local optsPad = Instance.new("UIPadding")
         optsPad.PaddingTop = UDim.new(0, 8)
         optsPad.Parent = opts
 
+        local function selectedSet()
+            local set = {}
+            if multiple then
+                for _, item in ipairs(value) do set[item] = true end
+            elseif value ~= nil then
+                set[value] = true
+            end
+            return set
+        end
+
+        local function updateButtonText()
+            if multiple then
+                local count = #value
+                if count == 0 then
+                    btnLabel.Text = "None"
+                elseif count == 1 then
+                    btnLabel.Text = tostring(value[1])
+                else
+                    btnLabel.Text = tostring(count) .. " selected"
+                end
+            else
+                btnLabel.Text = tostring(value or "")
+            end
+        end
+
         local handle = {}
-        local function rebuild()
+        local rebuild
+
+        rebuild = function()
             for _, c in ipairs(opts:GetChildren()) do
                 if c:IsA("GuiObject") then c:Destroy() end
             end
+
+            local selected = selectedSet()
             for _, opt in ipairs(options) do
+                local isSelected = selected[opt] == true
                 local ob = Instance.new("TextButton")
-                ob.BackgroundColor3 = (opt == value) and C.track or C.panelBg
+                ob.BackgroundColor3 = isSelected and C.track or C.panelBg
                 ob.BackgroundTransparency = 0.1
                 ob.BorderSizePixel = 0
                 ob.AutoButtonColor = false
@@ -2048,34 +2165,83 @@ function Dock:AddRow(tabId, def)
                 ob.Size = UDim2.new(1, 0, 0, L.ddOptH)
                 ob.Parent = opts
                 corner(ob, 7)
-                local ol = label(tostring(opt), 11, (opt == value) and C.accent or C.text, FONT)
+
+                local ol = label(
+                    tostring(opt),
+                    11,
+                    isSelected and C.accent or C.text,
+                    FONT
+                )
                 ol.Position = UDim2.new(0, 10, 0, 0)
                 ol.Size = UDim2.new(1, -20, 1, 0)
                 ol.Parent = ob
+
                 local optionClick = self._isMobile and ob.Activated or ob.MouseButton1Click
                 self._conn(optionClick:Connect(function()
-                    value = opt
-                    btnLabel.Text = tostring(opt)
-                    opts.Visible = false
+                    if multiple then
+                        local nextValue = {}
+                        local removed = false
+                        for _, current in ipairs(value) do
+                            if current == opt then
+                                removed = true
+                            else
+                                nextValue[#nextValue + 1] = current
+                            end
+                        end
+                        if not removed then nextValue[#nextValue + 1] = opt end
+                        value = nextValue
+                    else
+                        value = opt
+                        opts.Visible = false
+                    end
+
+                    updateButtonText()
                     rebuild()
-                    if def.onChange then task.spawn(pcall, def.onChange, value) end
+                    if def.onChange then
+                        local emitted = multiple and copyArray(value) or value
+                        task.spawn(pcall, def.onChange, emitted)
+                    end
                 end))
             end
         end
+
         function handle:Set(v)
-            value = v
-            btnLabel.Text = tostring(v)
+            if multiple then
+                value = copyArray(v)
+            else
+                value = type(v) == "table" and v[1] or v
+            end
+            updateButtonText()
             rebuild()
         end
-        function handle:Refresh(newOptions)
+
+        function handle:Get()
+            return multiple and copyArray(value) or value
+        end
+
+        function handle:Refresh(newOptions, _keepSelection)
             options = newOptions or {}
-            if value == nil then value = options[1] end
+            if multiple then
+                local allowed = {}
+                for _, opt in ipairs(options) do allowed[opt] = true end
+                local nextValue = {}
+                for _, current in ipairs(value) do
+                    if allowed[current] then nextValue[#nextValue + 1] = current end
+                end
+                value = nextValue
+            elseif value == nil then
+                value = options[1]
+            end
+            updateButtonText()
             rebuild()
         end
+
         local dropdownClick = self._isMobile and btn.Activated or btn.MouseButton1Click
         self._conn(dropdownClick:Connect(function()
             opts.Visible = not opts.Visible
         end))
+
+        updateButtonText()
         rebuild()
         return handle
     end

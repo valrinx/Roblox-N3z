@@ -1,0 +1,4753 @@
+-- Ported directly from Roblox--Library/modules/Ultimate Mining Tycoon.
+return function(Window, scriptInfo)
+
+    if not scriptInfo or scriptInfo.hubRayfield == nil then
+        warn("[Ultimate Mining Tycoon] Missing scriptInfo.hubRayfield — load this module from RAVEN HUB only.")
+        return
+    end
+    local Rayfield = scriptInfo.hubRayfield
+    local rawRayfieldNotify = Rayfield and Rayfield.Notify
+    local function safeNotify(payload)
+        if safeUiHelper and type(safeUiHelper.wrapNotify) == "function" then
+            local wrapped = safeUiHelper.wrapNotify(rawRayfieldNotify)
+            if type(wrapped) == "function" then
+                wrapped(payload)
+                return
+            end
+        end
+        if type(rawRayfieldNotify) ~= "function" then return end
+        pcall(function()
+            rawRayfieldNotify(Rayfield, payload)
+        end)
+    end
+    if Rayfield and type(rawRayfieldNotify) == "function" then
+        Rayfield.Notify = function(_, payload)
+            safeNotify(payload)
+        end
+    end
+    local scriptRunning = true
+    local cleanupConnections = {}
+    local infiniteJumpConnection = nil
+    local HttpService = game:GetService("HttpService")
+    local Players = game:GetService("Players")
+    local RunService = game:GetService("RunService")
+    local TweenService = game:GetService("TweenService")
+    local SETTINGS_FILE = "RavenHub_UMT_AutoSettings.json"
+    local CURRENT_SETTINGS_VERSION = 2
+
+    -- ═══════════════════════════════════════════════════════════════
+    -- TP/TWEEN BYPASS MODULE - Anti-Detection Teleportation System
+    -- ═══════════════════════════════════════════════════════════════
+
+    local player = Players.LocalPlayer
+    local char = player.Character or player.CharacterAdded:Wait()
+    local root = char:WaitForChild("HumanoidRootPart")
+    local humanoid = char:WaitForChild("Humanoid")
+    -- ═══════════════════════════════════════════════════════════════
+    -- NO TP / NO TWEEN POLICY (Current Patch Compatible)
+    -- ═══════════════════════════════════════════════════════════════
+    _G.UMTBypass = nil
+    -- ═══════════════════════════════════════════════════════════════
+    local function loadUmtHelper(relativePath)
+        assert(type(scriptInfo) == "table"
+            and type(scriptInfo.loadModuleFile) == "function",
+            "Ultimate Mining Tycoon: loadModuleFile is required")
+        return scriptInfo.loadModuleFile(
+            "modules/ultimate_mining_tycoon/umt/" .. relativePath
+        )
+    end
+
+    local settingsHelper = nil
+    local espHelper = nil
+    local espRuntimeHelper = nil
+    local autoMineHelper = nil
+    local sellHelper = nil
+    local safeUiHelper = nil
+    local playerUtilHelper = nil
+    local oreResolverHelper = nil
+    local autoMineLoopHelper = nil
+    pcall(function()
+        settingsHelper = loadUmtHelper("core/settings.lua")
+    end)
+    pcall(function()
+        espHelper = loadUmtHelper("systems/esp.lua")
+    end)
+    pcall(function()
+        espRuntimeHelper = loadUmtHelper("systems/esp_runtime.lua")
+    end)
+    pcall(function()
+        autoMineHelper = loadUmtHelper("systems/auto_mine.lua")
+    end)
+    pcall(function()
+        sellHelper = loadUmtHelper("systems/sell.lua")
+    end)
+    pcall(function()
+        safeUiHelper = loadUmtHelper("core/safe_ui.lua")
+    end)
+    pcall(function()
+        playerUtilHelper = loadUmtHelper("systems/player_util.lua")
+    end)
+    pcall(function()
+        oreResolverHelper = loadUmtHelper("core/ore_resolver.lua")
+    end)
+    pcall(function()
+        autoMineLoopHelper = loadUmtHelper("systems/auto_mine_loop.lua")
+    end)
+
+    local function buildDefaultSettings()
+        if settingsHelper and type(settingsHelper.buildDefaults) == "function" then
+            return settingsHelper.buildDefaults(CURRENT_SETTINGS_VERSION)
+        end
+        return {
+            settingsVersion = CURRENT_SETTINGS_VERSION,
+            autoMineEnabled = false,
+            autoMineRange = 25,
+            autoMineDelay = 0,
+            instantMine = true,
+            onlyOres = true,
+            mineAnyOre = true,
+            forceMineDamage = 0,
+            forceMineMadCommId = 0,
+            safeProfileEnabled = false,
+            safeNearbyPauseEnabled = true,
+            safeNearbyRadius = 70,
+            safeSellCooldown = 6,
+            oreIgnoreList = {},
+            autoSellEnabled = false,
+            autoSellOreCount = 8,
+            autoSellMethod = "Remote",
+            walkSpeed = 16,
+            infiniteJumpEnabled = false,
+            sellOreKey = "",
+            oreEspEnabled = false,
+            oreEspDistance = 100,
+            oreEspFilter = "All",
+            autoTpToOre = false,
+            oreNameById = {},
+            oreNameByRuntime = {},
+            oreNameBySignature = {},
+            oreNameBySignatureCoarse = {},
+            oreNameByColorSignature = {},
+            sharedOreNameByColorSignature = {},
+        }
+    end
+
+    local autoSettingsLoaded = buildDefaultSettings()
+    local saveSettingsTaskId = 0
+    local saveAutoSettings
+    local canReadSettingsFile = type(isfile) == "function" and type(readfile) == "function"
+    local canWriteSettingsFile = type(writefile) == "function"
+    local settingsLoadOk = false
+    local settingsSaveOk = false
+    local settingsLastSaveError = nil
+
+    local function unwrapSettingsPayload(decoded)
+        if settingsHelper and type(settingsHelper.unwrapPayload) == "function" then
+            return settingsHelper.unwrapPayload(decoded)
+        end
+        if type(decoded) ~= "table" then return nil end
+        if decoded.kind == "UMTFullSettings" and type(decoded.data) == "table" then
+            return decoded.data
+        end
+        return decoded
+    end
+
+    local function isStringMap(tbl)
+        if settingsHelper and type(settingsHelper.isStringMap) == "function" then
+            return settingsHelper.isStringMap(tbl)
+        end
+        if type(tbl) ~= "table" then return false end
+        for k, v in pairs(tbl) do
+            if type(k) ~= "string" or type(v) ~= "string" then
+                return false
+            end
+        end
+        return true
+    end
+
+    local function sanitizeStringArray(tbl)
+        if settingsHelper and type(settingsHelper.sanitizeStringArray) == "function" then
+            return settingsHelper.sanitizeStringArray(tbl)
+        end
+        if type(tbl) ~= "table" then return {} end
+        local out = {}
+        for _, value in ipairs(tbl) do
+            if type(value) == "string" and value ~= "" then
+                table.insert(out, value)
+            end
+        end
+        return out
+    end
+
+    local function mergeStringMap(dst, src)
+        if settingsHelper and type(settingsHelper.mergeStringMap) == "function" then
+            settingsHelper.mergeStringMap(dst, src)
+            return
+        end
+        if type(dst) ~= "table" or type(src) ~= "table" then return end
+        for k, v in pairs(src) do
+            if type(k) == "string" and type(v) == "string" and k ~= "" and v ~= "" then
+                dst[k] = v
+            end
+        end
+    end
+
+    pcall(function()
+        if not canReadSettingsFile or not isfile(SETTINGS_FILE) then return end
+        local decoded = unwrapSettingsPayload(HttpService:JSONDecode(readfile(SETTINGS_FILE)))
+        if type(decoded) ~= "table" then return end
+        if settingsHelper and type(settingsHelper.applyDecoded) == "function" then
+            autoSettingsLoaded = settingsHelper.applyDecoded(autoSettingsLoaded, decoded, CURRENT_SETTINGS_VERSION)
+        else
+            local version = tonumber(decoded.settingsVersion) or 1
+            autoSettingsLoaded.settingsVersion = version
+            autoSettingsLoaded.autoMineEnabled = decoded.autoMineEnabled == true
+            autoSettingsLoaded.autoMineRange = tonumber(decoded.autoMineRange) or autoSettingsLoaded.autoMineRange
+            autoSettingsLoaded.autoMineDelay = tonumber(decoded.autoMineDelay) or autoSettingsLoaded.autoMineDelay
+            if decoded.instantMine ~= nil then
+                autoSettingsLoaded.instantMine = decoded.instantMine == true
+            end
+            if decoded.onlyOres ~= nil then
+                autoSettingsLoaded.onlyOres = decoded.onlyOres == true
+            end
+            if decoded.mineAnyOre ~= nil then
+                autoSettingsLoaded.mineAnyOre = decoded.mineAnyOre == true
+            end
+            autoSettingsLoaded.forceMineDamage = tonumber(decoded.forceMineDamage) or autoSettingsLoaded.forceMineDamage
+            autoSettingsLoaded.forceMineMadCommId = tonumber(decoded.forceMineMadCommId) or autoSettingsLoaded.forceMineMadCommId
+            if decoded.safeProfileEnabled ~= nil then
+                autoSettingsLoaded.safeProfileEnabled = decoded.safeProfileEnabled == true
+            end
+            if decoded.safeNearbyPauseEnabled ~= nil then
+                autoSettingsLoaded.safeNearbyPauseEnabled = decoded.safeNearbyPauseEnabled == true
+            end
+            autoSettingsLoaded.safeNearbyRadius = tonumber(decoded.safeNearbyRadius) or autoSettingsLoaded.safeNearbyRadius
+            autoSettingsLoaded.safeSellCooldown = tonumber(decoded.safeSellCooldown) or autoSettingsLoaded.safeSellCooldown
+            autoSettingsLoaded.oreIgnoreList = sanitizeStringArray(decoded.oreIgnoreList)
+            autoSettingsLoaded.autoSellEnabled = decoded.autoSellEnabled == true
+            autoSettingsLoaded.autoSellOreCount = tonumber(decoded.autoSellOreCount) or autoSettingsLoaded.autoSellOreCount
+            autoSettingsLoaded.autoSellMethod = "Remote"
+            autoSettingsLoaded.walkSpeed = tonumber(decoded.walkSpeed) or autoSettingsLoaded.walkSpeed
+            autoSettingsLoaded.infiniteJumpEnabled = decoded.infiniteJumpEnabled == true
+            if type(decoded.sellOreKey) == "string" then
+                autoSettingsLoaded.sellOreKey = decoded.sellOreKey
+            end
+            autoSettingsLoaded.oreEspEnabled = decoded.oreEspEnabled == true
+            autoSettingsLoaded.oreEspDistance = tonumber(decoded.oreEspDistance) or autoSettingsLoaded.oreEspDistance
+            if type(decoded.oreEspFilter) == "string" and decoded.oreEspFilter ~= "" then
+                autoSettingsLoaded.oreEspFilter = decoded.oreEspFilter
+            end
+            if isStringMap(decoded.oreNameById) then
+                mergeStringMap(autoSettingsLoaded.oreNameById, decoded.oreNameById)
+            end
+            if isStringMap(decoded.oreNameByRuntime) then
+                mergeStringMap(autoSettingsLoaded.oreNameByRuntime, decoded.oreNameByRuntime)
+            end
+            if isStringMap(decoded.oreNameBySignature) then
+                mergeStringMap(autoSettingsLoaded.oreNameBySignature, decoded.oreNameBySignature)
+            end
+            if isStringMap(decoded.oreNameBySignatureCoarse) then
+                mergeStringMap(autoSettingsLoaded.oreNameBySignatureCoarse, decoded.oreNameBySignatureCoarse)
+            end
+            if isStringMap(decoded.oreNameByColorSignature) then
+                mergeStringMap(autoSettingsLoaded.oreNameByColorSignature, decoded.oreNameByColorSignature)
+            end
+            if isStringMap(decoded.sharedOreNameByColorSignature) then
+                mergeStringMap(autoSettingsLoaded.sharedOreNameByColorSignature, decoded.sharedOreNameByColorSignature)
+            end
+            if version < CURRENT_SETTINGS_VERSION then
+                autoSettingsLoaded.settingsVersion = CURRENT_SETTINGS_VERSION
+            end
+        end
+        settingsLoadOk = true
+    end)
+
+    local function trackConnection(connection)
+        if connection then
+            table.insert(cleanupConnections, connection)
+        end
+        return connection
+    end
+
+    local drainedRegisterRemotes = setmetatable({}, { __mode = "k" })
+    local function attachRemoteDrain(remote)
+        if not remote or not remote:IsA("RemoteEvent") then return end
+        if drainedRegisterRemotes[remote] then return end
+        drainedRegisterRemotes[remote] = true
+        local conn = remote.OnClientEvent:Connect(function()
+            -- Intentionally drain noisy server->client event queue.
+        end)
+        trackConnection(conn)
+    end
+
+    task.spawn(function()
+        pcall(function()
+            local replicatedStorage = game:GetService("ReplicatedStorage")
+            for _, desc in ipairs(replicatedStorage:GetDescendants()) do
+                if desc:IsA("RemoteEvent") and string.find(string.lower(desc.Name), "registerinstancechanges", 1, true) then
+                    attachRemoteDrain(desc)
+                end
+            end
+            trackConnection(replicatedStorage.DescendantAdded:Connect(function(desc)
+                if desc:IsA("RemoteEvent") and string.find(string.lower(desc.Name), "registerinstancechanges", 1, true) then
+                    attachRemoteDrain(desc)
+                end
+            end))
+        end)
+    end)
+
+    task.spawn(function()
+        pcall(function()
+            local madComm = game:GetService("ReplicatedStorage"):WaitForChild("MadCommEvents", 10)
+            local ev = madComm and madComm:WaitForChild("6", 10)
+            if ev then ev:Destroy() end
+        end)
+    end)
+
+    task.spawn(function()
+        pcall(function()
+            local gui = game:GetService("CoreGui"):WaitForChild("RobloxGui", 10)
+            if gui then
+                local function checkDesc(desc)
+                    if desc.Name == "ScriptEditor" then
+                        desc:Destroy()
+                    end
+                end
+
+                for _, desc in ipairs(gui:GetDescendants()) do
+                    checkDesc(desc)
+                end
+
+                trackConnection(gui.DescendantAdded:Connect(checkDesc))
+            end
+        end)
+    end)
+
+        local Farm = Window:CreateTab("Farm", "pickaxe")
+        local OreESP = Window:CreateTab("Ore ESP", "eye")
+
+        -- Mobile tab
+        local MobileSupport = Window:CreateTab("Mobile", "smartphone")
+        local MobileSection = MobileSupport:CreateSection("📱 Mobile Compatibility")
+        MobileSupport:CreateParagraph({
+            Title = "• Mobile Supported",
+            Content = "\nWe have updated the script to support mobile devices. If you encounter any issues on mobile, please report them to the Utility Hub Discord Server."
+        })
+        local MobileDivider = MobileSupport:CreateDivider()
+
+        MobileSupport:CreateParagraph({
+            Title = "Teleport Removed",
+            Content = "TP/Tween features were removed from this module."
+        })
+
+        local Misc = Window:CreateTab("Misc", "boxes")
+        local Section = Misc:CreateSection("Misc Area")
+
+        -- Sell Ore Button for Mobile
+        local SellOreSection = MobileSupport:CreateSection("⚙️ Sell Ore")
+        local autoSellMethod = "Remote"
+        local function countCarriedOres(player)
+            if sellHelper and type(sellHelper.countCarriedOres) == "function" then
+                return sellHelper.countCarriedOres(player)
+            end
+            local count = 0
+            local playerWorkspace = workspace:FindFirstChild(player and player.Name or "")
+            if playerWorkspace then
+                local orePackCargo = playerWorkspace:FindFirstChild("OrePackCargo")
+                if orePackCargo then
+                    for _, child in pairs(orePackCargo:GetChildren()) do
+                        if not child:IsA("Weld") and not child:IsA("Motor6D") and not child:IsA("Attachment") then
+                            count = count + 1
+                        end
+                    end
+                end
+            end
+            return count
+        end
+
+        local function findSellTargets()
+            if sellHelper and type(sellHelper.findSellTargets) == "function" then
+                return sellHelper.findSellTargets()
+            end
+            local factoryGridItemsServer = workspace:FindFirstChild("FactoryGridItemsServer")
+            if not factoryGridItemsServer then
+                return nil, nil, "FactoryGridItemsServer not found!"
+            end
+            local factoryGridItemsClient = workspace:FindFirstChild("FactoryGridItemsClient")
+
+            for _, folder in pairs(factoryGridItemsServer:GetChildren()) do
+                if folder:IsA("Folder") then
+                    local cargoVolume = folder:FindFirstChild("CargoVolume") or folder:FindFirstChild("Unloader")
+                    if not cargoVolume then
+                        cargoVolume = folder:FindFirstChild("CargoVolume", true)
+                    end
+
+                    if cargoVolume then
+                        local foundPrompt = cargoVolume:FindFirstChild("CargoPrompt") or cargoVolume:FindFirstChildOfClass("ProximityPrompt") or cargoVolume:FindFirstChild("CargoPrompt", true)
+                        if not foundPrompt then
+                            for _, desc in pairs(cargoVolume:GetDescendants()) do
+                                if desc:IsA("ProximityPrompt") then
+                                    foundPrompt = desc
+                                    break
+                                end
+                            end
+                        end
+                        if foundPrompt then
+                            local positionCargoVolume = nil
+                            if factoryGridItemsClient then
+                                local clientFolder = factoryGridItemsClient:FindFirstChild(folder.Name)
+                                if clientFolder then
+                                    local clientSubFolder = clientFolder:FindFirstChild(folder.Name)
+                                    if clientSubFolder then
+                                        positionCargoVolume = clientSubFolder:FindFirstChild("Unloader1") and clientSubFolder.Unloader1:FindFirstChild("CargoVolume") or clientSubFolder:FindFirstChild("CargoVolume", true)
+                                    end
+                                end
+                            end
+                            return foundPrompt, positionCargoVolume, nil
+                        end
+                    end
+                end
+            end
+
+            return nil, nil, "No working CargoVolume with ProximityPrompt found! Make sure someone has built an unloader."
+        end
+
+        local function sellOreFromAnywhere()
+            if sellHelper and type(sellHelper.sellFromAnywhere) == "function" then
+                return sellHelper.sellFromAnywhere()
+            end
+            local player = game.Players.LocalPlayer
+            local cargoPrompt, positionCargoVolume, err = findSellTargets()
+            if not cargoPrompt then
+                return false, err or "No working CargoVolume found!", 0
+            end
+
+            local oreCountBefore = countCarriedOres(player)
+
+            local oldHold = cargoPrompt.HoldDuration
+            local oldDistance = cargoPrompt.MaxActivationDistance
+            local oldLos = cargoPrompt.RequiresLineOfSight
+
+            pcall(function()
+                cargoPrompt.HoldDuration = 0
+                cargoPrompt.MaxActivationDistance = math.max(1024, tonumber(oldDistance) or 0)
+                cargoPrompt.RequiresLineOfSight = false
+            end)
+
+            local okFire, fireErr = pcall(function()
+                fireproximityprompt(cargoPrompt)
+            end)
+
+            pcall(function()
+                cargoPrompt.HoldDuration = oldHold
+                cargoPrompt.MaxActivationDistance = oldDistance
+                cargoPrompt.RequiresLineOfSight = oldLos
+            end)
+
+            if not okFire then
+                return false, "Prompt activation failed: " .. tostring(fireErr), oreCountBefore
+            end
+
+            task.wait(0.4)
+            local oreCountAfter = countCarriedOres(player)
+            local soldCount = math.max(0, oreCountBefore - oreCountAfter)
+
+            if oreCountBefore > 0 and soldCount <= 0 then
+                return false, "Sell failed - no ores removed", oreCountBefore
+            end
+
+            return true, nil, soldCount > 0 and soldCount or oreCountBefore
+        end
+
+        local function sellOreBySelectedMethod()
+            if sellHelper and type(sellHelper.sellByMethod) == "function" then
+                return sellHelper.sellByMethod(autoSellMethod)
+            end
+            return sellOreFromAnywhere()
+        end
+
+        MobileSupport:CreateDropdown({
+            Name = "Sell Method",
+            Options = {"Remote (No TP / No Tween)"},
+            CurrentOption = {"Remote (No TP / No Tween)"},
+            MultipleOptions = false,
+            Flag = "SellMethodMobile",
+            Callback = function()
+                autoSellMethod = "Remote"
+                if saveAutoSettings then
+                    saveAutoSettings()
+                end
+            end,
+        })
+
+        local SellOreButton = MobileSupport:CreateButton({
+            Name = "Sell Ore",
+            Callback = function()
+                local okSell, sellErr, oreCount = sellOreBySelectedMethod()
+                if okSell then
+                    Rayfield:Notify({
+                        Title = "Ore Sold",
+                        Content = "Successfully sold " .. tostring(oreCount) .. " ores.",
+                        Duration = 3,
+                    })
+                else
+                    Rayfield:Notify({
+                        Title = "Error",
+                        Content = tostring(sellErr),
+                        Duration = 3,
+                    })
+                end
+            end,
+        })
+
+        MobileSupport:CreateParagraph({
+            Title = "Waypoint Removed",
+            Content = "Waypoint teleport was removed with TP/Tween features."
+        })
+
+        local Credits = Window:CreateTab("Credits", "info")
+        local CreatorSection = Credits:CreateSection("💤 Script Creator")
+        Credits:CreateParagraph({
+            Title = "Made by Diverse",
+            Content = "Ultimate Mining Tycoon Script"
+        })
+        local DividerCredits = Credits:CreateDivider()
+        local VersionSection = Credits:CreateSection("📜 Changelog")
+        Credits:CreateParagraph({
+            Title = "Updated 3/29/2026",
+            Content = "• Added Anti-Cheat Bypass"
+        })
+
+        local Button = Misc:CreateButton({
+            Name = "🛒 Buy Vehicle / Spawn",
+            Callback = function()
+                local player = game.Players.LocalPlayer
+                local plotsFolder = workspace:WaitForChild("Plots")
+                local PlayerSlot = nil
+                local function isOwned(buildPlot)
+                    return #buildPlot:GetChildren() > 0
+                end
+                for _, plotModel in ipairs(plotsFolder:GetChildren()) do
+                    if plotModel:IsA("Model") then
+                        local buildPlot = plotModel:FindFirstChild("BuildPlot")
+                        if buildPlot and isOwned(buildPlot) then
+                            PlayerSlot = plotModel.Name
+                            break
+                        end
+                    end
+                end
+                if PlayerSlot then
+                    local factoryGridItemsClient = game:GetService("Workspace"):FindFirstChild("FactoryGridItemsClient")
+                    if factoryGridItemsClient then
+                        local vehicleSpawner = nil
+                        local proximityPrompt = nil
+
+                        for _, folder in pairs(factoryGridItemsClient:GetChildren()) do
+                            if folder:IsA("Folder") then
+                                local subFolder = folder:FindFirstChild(folder.Name)
+                                if subFolder then
+                                    local spawner = subFolder:FindFirstChild("VehicleSpawner")
+                                    if spawner then
+                                        local screenPart = spawner:FindFirstChild("ScreenPart")
+                                        if screenPart then
+                                            local prompt = screenPart:FindFirstChild("ProximityPrompt")
+                                            if prompt then
+                                                vehicleSpawner = spawner
+                                                proximityPrompt = prompt
+                                                break
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+
+                        if vehicleSpawner and proximityPrompt then
+                            local playerRoot = game.Workspace[player.Name] and game.Workspace[player.Name]:FindFirstChild("HumanoidRootPart")
+                            if not playerRoot then
+                                Rayfield:Notify({
+                                    Title = "Error",
+                                    Content = "Character not found. Try again.",
+                                    Duration = 3,
+                                                                    })
+                                return
+                            end
+                            local oldHold = proximityPrompt.HoldDuration
+                            local oldDistance = proximityPrompt.MaxActivationDistance
+                            local oldLos = proximityPrompt.RequiresLineOfSight
+                            pcall(function()
+                                proximityPrompt.HoldDuration = 0
+                                proximityPrompt.MaxActivationDistance = math.max(1024, tonumber(oldDistance) or 0)
+                                proximityPrompt.RequiresLineOfSight = false
+                            end)
+                            fireproximityprompt(proximityPrompt)
+                            pcall(function()
+                                proximityPrompt.HoldDuration = oldHold
+                                proximityPrompt.MaxActivationDistance = oldDistance
+                                proximityPrompt.RequiresLineOfSight = oldLos
+                            end)
+                            Rayfield:Notify({
+                                Title = "Vehicle Purchase",
+                                Content = "Triggered vehicle spawner remotely.",
+                                Duration = 3,
+                                Image = 4483362458,
+                            })
+                        else
+                            Rayfield:Notify({
+                                Title = "Error",
+                                Content = "Vehicle spawner not found in FactoryGridItemsClient!",
+                                Duration = 3,
+                                                            })
+                        end
+                    else
+                        Rayfield:Notify({
+                            Title = "Error",
+                            Content = "FactoryGridItemsClient not found!",
+                            Duration = 3,
+                                                    })
+                    end
+                else
+                    Rayfield:Notify({
+                        Title = "Error",
+                        Content = "Your plot was not found! Make sure you have a tycoon slot.",
+                        Duration = 3,
+                    })
+                end
+            end,
+        })
+
+        local ShopDropdown = Misc:CreateDropdown({
+            Name = "🛒 Buy / Equip Shop Items",
+            Options = {"Select Shop", "⛏️ Pickaxe Shop", "🎒 Backpack Shop", "💣 C4 Shop", "💰 Upgrade Shop"},
+            CurrentOption = {"Select Shop"},
+            MultipleOptions = false,
+            Flag = "",
+            Callback = function(Option)
+                local function handleShopTeleport(selectedOption)
+                    if selectedOption == "Select Shop" then
+                        return
+                    end
+                    local player = game.Players.LocalPlayer
+                    local character = player.Character or player.CharacterAdded:Wait()
+                    local hrp = character:FindFirstChild("HumanoidRootPart")
+                    if not hrp then
+                        Rayfield:Notify({
+                            Title = "Error",
+                            Content = "Character not found. Try again.",
+                            Duration = 3,
+                        })
+                        return
+                    end
+                    local shopObject, shopName
+                    if selectedOption == "⛏️ Pickaxe Shop" then
+                        shopObject = game:GetService("Workspace"):FindFirstChild("Pickaxe Store")
+                        shopName = "Pickaxe Shop"
+                    elseif selectedOption == "🎒 Backpack Shop" then
+                        shopObject = game:GetService("Workspace"):FindFirstChild("Backpack Store")
+                        shopName = "Backpack Shop"
+                    elseif selectedOption == "💣 C4 Shop" then
+                        shopObject = game:GetService("Workspace"):FindFirstChild("Explosives Store")
+                        shopName = "C4 Shop"
+                    elseif selectedOption == "💰 Upgrade Shop" then
+                        shopObject = game:GetService("Workspace"):FindFirstChild("Prestige Store")
+                        shopName = "Upgrade Shop"
+                    end
+                    if not shopObject then
+                        Rayfield:Notify({
+                            Title = "Error",
+                            Content = shopName .. " not found in workspace",
+                            Duration = 3,
+                                                    })
+                        return
+                    end
+
+                    local activationPoint = shopObject:FindFirstChild("ActivationPoint") or
+                                          shopObject:FindFirstChild("PickaxeLocation") or
+                                          shopObject:FindFirstChild("BackpackLocation") or
+                                          shopObject:FindFirstChild("ExplosivesLocation") or
+                                          shopObject:FindFirstChild("PrestigeLocation")
+
+                    if not activationPoint or not activationPoint:IsA("BasePart") then
+                        Rayfield:Notify({
+                            Title = "Error",
+                            Content = shopName .. " activation point not found",
+                            Duration = 3,
+                                                    })
+                        return
+                    end
+
+                    local proximityPrompt = activationPoint:FindFirstChild("ProximityPrompt")
+                    if not proximityPrompt then
+                        for _, child in pairs(activationPoint:GetDescendants()) do
+                            if child:IsA("ProximityPrompt") then
+                                proximityPrompt = child
+                                break
+                            end
+                        end
+                    end
+
+                    if not proximityPrompt then
+                        Rayfield:Notify({
+                            Title = "Error",
+                            Content = shopName .. " proximity prompt not found",
+                            Duration = 3,
+                                                    })
+                        return
+                    end
+                    local oldHold = proximityPrompt.HoldDuration
+                    local oldDistance = proximityPrompt.MaxActivationDistance
+                    local oldLos = proximityPrompt.RequiresLineOfSight
+                    pcall(function()
+                        proximityPrompt.HoldDuration = 0
+                        proximityPrompt.MaxActivationDistance = math.max(1024, tonumber(oldDistance) or 0)
+                        proximityPrompt.RequiresLineOfSight = false
+                    end)
+                    fireproximityprompt(proximityPrompt)
+                    pcall(function()
+                        proximityPrompt.HoldDuration = oldHold
+                        proximityPrompt.MaxActivationDistance = oldDistance
+                        proximityPrompt.RequiresLineOfSight = oldLos
+                    end)
+                    Rayfield:Notify({
+                        Title = shopName,
+                        Content = "Opened " .. shopName .. " prompt remotely.",
+                        Duration = 3,
+                        Image = 4483362458,
+                    })
+                end
+                local selectedOption = Option[1]
+                handleShopTeleport(selectedOption)
+                if selectedOption ~= "Select Shop" then
+                    task.spawn(function()
+                        task.wait(0.5)
+                        ShopDropdown:Set({"Select Shop"})
+                    end)
+                end
+            end,
+        })
+
+        local walkSpeedValue = math.clamp(tonumber(autoSettingsLoaded.walkSpeed) or 16, 16, 500)
+        local infiniteJumpEnabled = autoSettingsLoaded.infiniteJumpEnabled == true
+
+        local Slider = Misc:CreateSlider({
+            Name = "⚡ WalkSpeed Input",
+            Range = {16, 500},
+            Increment = 10,
+            Suffix = "Speed",
+            CurrentValue = walkSpeedValue,
+            Flag = "Slider1",
+            Callback = function(Value)
+                walkSpeedValue = Value
+                if playerUtilHelper and type(playerUtilHelper.setWalkSpeed) == "function" then
+                    playerUtilHelper.setWalkSpeed(game.Players.LocalPlayer, Value)
+                else
+                    local player = game.Players.LocalPlayer
+                    local character = player.Character or player.CharacterAdded:Wait()
+                    local humanoid = character:FindFirstChildOfClass("Humanoid")
+                    if humanoid then
+                        humanoid.WalkSpeed = Value
+                    end
+                end
+                if saveAutoSettings then
+                    saveAutoSettings()
+                end
+            end,
+        })
+        task.defer(function()
+            if playerUtilHelper and type(playerUtilHelper.setWalkSpeed) == "function" then
+                playerUtilHelper.setWalkSpeed(game.Players.LocalPlayer, walkSpeedValue)
+            else
+                local player = game.Players.LocalPlayer
+                local character = player and (player.Character or player.CharacterAdded:Wait())
+                local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+                if humanoid then
+                    humanoid.WalkSpeed = walkSpeedValue
+                end
+            end
+        end)
+
+        local Toggle = Misc:CreateToggle({
+            Name = "💥 Infinite Jump",
+            CurrentValue = infiniteJumpEnabled,
+            Flag = "Toggle1",
+            Callback = function(Value)
+               infiniteJumpEnabled = Value
+               if Value then
+                  if infiniteJumpConnection then
+                     infiniteJumpConnection:Disconnect()
+                     infiniteJumpConnection = nil
+                  end
+                  if playerUtilHelper and type(playerUtilHelper.startInfiniteJump) == "function" then
+                     infiniteJumpConnection = playerUtilHelper.startInfiniteJump()
+                  else
+                     infiniteJumpConnection = game:GetService("UserInputService").JumpRequest:Connect(function()
+                        local player = game.Players.LocalPlayer
+                        local character = player.Character or player.CharacterAdded:Wait()
+                        local humanoid = character:FindFirstChildOfClass("Humanoid")
+                        if humanoid then
+                           humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+                        end
+                     end)
+                  end
+               else
+                  if infiniteJumpConnection then
+                     infiniteJumpConnection:Disconnect()
+                     infiniteJumpConnection = nil
+                  end
+               end
+               if saveAutoSettings then
+                  saveAutoSettings()
+               end
+            end,
+        })
+        if infiniteJumpEnabled then
+            task.defer(function()
+                pcall(function()
+                    Toggle:Set(true)
+                end)
+            end)
+        end
+
+        -- ============================================================
+        -- ESP SYSTEM
+        -- ============================================================
+        local espConfig = nil
+        if espHelper and type(espHelper.createConfig) == "function" then
+            espConfig = espHelper.createConfig(autoSettingsLoaded)
+        end
+
+        local ESP = (espConfig and espConfig.ESP) or {
+            enabled       = autoSettingsLoaded.oreEspEnabled == true,
+            maxDistance   = math.clamp(tonumber(autoSettingsLoaded.oreEspDistance) or 100, 0, 500),
+            filterOre     = autoSettingsLoaded.oreEspFilter or "All",
+            activeVisuals = {},
+            activeRenderParts = {},
+            connections   = {},
+            useAdornment  = true, -- use Box ESP per user preference
+            updateInterval = 1 / 20, -- throttle visual updates to reduce frame cost
+            metaRefreshInterval = 0.22, -- expensive name/color resolve cadence
+            lastUpdateAt = 0,
+            applyDistancePadding = 70, -- skip creating visuals that are far beyond current render distance
+            discoveryInterval = 1.0, -- periodic auto-discovery so user doesn't need manual refresh
+            lastDiscoveryAt = 0,
+        }
+        local function countActiveVisuals()
+            if espHelper and type(espHelper.countActiveVisuals) == "function" then
+                return espHelper.countActiveVisuals(ESP)
+            end
+            local n = 0
+            for _ in pairs(ESP.activeVisuals) do
+                n = n + 1
+            end
+            return n
+        end
+
+        local oreColors = (espConfig and espConfig.oreColors) or {
+            ["Tin"]          = Color3.fromRGB(123, 133, 133),
+            ["Iron"]         = Color3.fromRGB(189, 125, 84),
+            ["Lead"]         = Color3.fromRGB(54, 56, 73),
+            ["Cobalt"]       = Color3.fromRGB(64, 116, 199),
+            ["Aluminium"]    = Color3.fromRGB(107, 108, 107),
+            ["Silver"]       = Color3.fromRGB(133, 171, 185),
+            ["Uranium"]      = Color3.fromRGB(87, 175, 87),
+            ["Vanadium"]     = Color3.fromRGB(166, 64, 46),
+            ["Tungsten"]     = Color3.fromRGB(65, 83, 76),
+            ["Gold"]         = Color3.fromRGB(241, 213, 121),
+            ["Titanium"]     = Color3.fromRGB(74, 77, 122),
+            ["Molybdenum"]   = Color3.fromRGB(138, 159, 153),
+            ["Palladium"]    = Color3.fromRGB(209, 160, 34),
+            ["Plutonium"]    = Color3.fromRGB(41, 137, 211),
+            ["Mithril"]      = Color3.fromRGB(83, 165, 134),
+            ["Thorium"]      = Color3.fromRGB(97, 130, 109),
+            ["Iridium"]      = Color3.fromRGB(171, 221, 41),
+            ["Adamantium"]   = Color3.fromRGB(80, 159, 116),
+            ["Rhodium"]      = Color3.fromRGB(170, 85, 0),
+            ["Unobtanium"]   = Color3.fromRGB(189, 80, 211),
+            ["Topaz"]        = Color3.fromRGB(154, 143, 56),
+            ["Emerald"]      = Color3.fromRGB(0, 143, 0),
+            ["Sapphire"]     = Color3.fromRGB(11, 36, 179),
+            ["Ruby"]         = Color3.fromRGB(193, 11, 11),
+            ["Diamond"]      = Color3.fromRGB(103, 182, 188),
+            ["Poudretteite"] = Color3.fromRGB(202, 67, 200),
+            ["Zultanite"]    = Color3.fromRGB(202, 134, 117),
+            ["Grandidierite"]= Color3.fromRGB(67, 202, 130),
+            ["Musgravite"]   = Color3.fromRGB(92, 97, 97),
+            ["Painite"]      = Color3.fromRGB(154, 68, 68),
+            ["EXPLOSIVES"]   = Color3.fromRGB(15, 12, 20),
+        }
+
+        local oreCategoryColors = (espConfig and espConfig.oreCategoryColors) or {
+            ["Common Metal"]     = Color3.fromRGB(200, 200, 200),
+            ["Rare Metal"]       = Color3.fromRGB(120, 170, 255),
+            ["Radioactive"]      = Color3.fromRGB(80, 255, 120),
+            ["Precious"]         = Color3.fromRGB(255, 210, 90),
+            ["Gemstone"]         = Color3.fromRGB(255, 120, 220),
+            ["Mythic"]           = Color3.fromRGB(255, 110, 110),
+            ["Unknown"]          = Color3.fromRGB(255, 145, 70),
+        }
+
+        local oreCategoryByName = (espConfig and espConfig.oreCategoryByName) or {
+            ["Tin"] = "Common Metal", ["Iron"] = "Common Metal", ["Lead"] = "Common Metal", ["Aluminium"] = "Common Metal",
+            ["Silver"] = "Rare Metal", ["Unknown"] = "Rare Metal", ["Cobalt"] = "Rare Metal", ["Tungsten"] = "Rare Metal", ["Titanium"] = "Rare Metal",
+            ["Vanadium"] = "Rare Metal", ["Rhodium"] = "Rare Metal", ["Iridium"] = "Rare Metal", ["Palladium"] = "Rare Metal", ["Molybdenum"] = "Rare Metal",
+            ["Uranium"] = "Radioactive", ["Plutonium"] = "Radioactive", ["Thorium"] = "Radioactive",
+            ["Gold"] = "Precious",
+            ["Topaz"] = "Gemstone", ["Emerald"] = "Gemstone", ["Sapphire"] = "Gemstone", ["Ruby"] = "Gemstone", ["Diamond"] = "Gemstone",
+            ["Mithril"] = "Mythic", ["Adamantium"] = "Mythic", ["Unobtanium"] = "Mythic", ["Poudretteite"] = "Mythic",
+            ["Zultanite"] = "Mythic", ["Grandidierite"] = "Mythic", ["Musgravite"] = "Mythic", ["Painite"] = "Mythic",
+            ["EXPLOSIVES"] = "Unknown",
+            -- Runtime mesh names seen in this game
+            ["OreMesh"] = "Rare Metal",
+            ["CubicBlockMetal"] = "Common Metal",
+            ["ShaleMetalBlock"] = "Rare Metal",
+            ["GemBlockMesh"] = "Gemstone",
+        }
+        local oreNameCache = setmetatable({}, { __mode = "k" })
+        local oreNameById = autoSettingsLoaded.oreNameById
+        local oreNameByRuntime = autoSettingsLoaded.oreNameByRuntime
+        local oreNameBySignature = autoSettingsLoaded.oreNameBySignature
+        local oreNameBySignatureCoarse = autoSettingsLoaded.oreNameBySignatureCoarse
+        -- local learned mappings (per-user)
+        local oreNameByColorSignature = autoSettingsLoaded.oreNameByColorSignature
+        -- shared mappings (ship with script or import/export)
+        local sharedOreNameByColorSignature = autoSettingsLoaded.sharedOreNameByColorSignature
+        local oreInferenceStats = { learned = 0 }
+        local useStrictColorRules = true
+        local useDirectColorClassifier = true
+        local getOreRenderPart
+        local getOreIdentifierDeep
+        local knownOreNames = {
+            "Tin", "Iron", "Lead", "Cobalt", "Aluminium", "Silver", "Unknown", "Uranium", "Vanadium",
+            "Tungsten", "Gold", "Titanium", "Molybdenum", "Palladium", "Plutonium", "Mithril", "Thorium",
+            "Iridium", "Adamantium", "Rhodium", "Unobtanium", "EXPLOSIVES", "Blue Chalk", "Green Chalk", "Red Chalk",
+            "Topaz", "Emerald", "Sapphire",
+            "Ruby", "Diamond", "Poudretteite", "Zultanite", "Grandidierite", "Musgravite", "Painite",
+        }
+        local knownOreCanonical = {
+            ["tin"] = "Tin", ["iron"] = "Iron", ["lead"] = "Lead", ["cobalt"] = "Cobalt", ["aluminium"] = "Aluminium",
+            ["silver"] = "Silver", ["unknown"] = "Unknown", ["uranium"] = "Uranium", ["vanadium"] = "Vanadium",
+            ["tungsten"] = "Tungsten", ["gold"] = "Gold", ["titanium"] = "Titanium", ["molybdenum"] = "Molybdenum",
+            ["palladium"] = "Palladium", ["plutonium"] = "Plutonium", ["mithril"] = "Mithril", ["thorium"] = "Thorium",
+            ["iridium"] = "Iridium",
+            ["adamantium"] = "Adamantium", ["rhodium"] = "Rhodium", ["unobtanium"] = "Unobtanium",
+            ["explosives"] = "EXPLOSIVES",
+            ["blue chalk"] = "Blue Chalk", ["green chalk"] = "Green Chalk", ["red chalk"] = "Red Chalk",
+            ["topaz"] = "Topaz", ["emerald"] = "Emerald", ["sapphire"] = "Sapphire", ["ruby"] = "Ruby", ["diamond"] = "Diamond",
+            ["poudretteite"] = "Poudretteite", ["zultanite"] = "Zultanite", ["grandidierite"] = "Grandidierite",
+            ["musgravite"] = "Musgravite", ["painite"] = "Painite",
+        }
+        -- Price + RequiredStrength synced with repo `Ore list` (Auto Mine uses only this table; no live read from ore instances).
+        local oreReferenceFromList = {
+            Tin = { price = 10, required = 6 },
+            Iron = { price = 20, required = 6 },
+            Lead = { price = 30, required = 7 },
+            Cobalt = { price = 50, required = 12 },
+            Aluminium = { price = 65, required = 18 },
+            Silver = { price = 150, required = 18 },
+            Uranium = { price = 180, required = 18 },
+            Vanadium = { price = 240, required = 22 },
+            Tungsten = { price = 300, required = 45 },
+            Gold = { price = 350, required = 22 },
+            Titanium = { price = 400, required = 24 },
+            Molybdenum = { price = 600, required = 75 },
+            Plutonium = { price = 1000, required = 99 },
+            Palladium = { price = 1200, required = 120 },
+            Mithril = { price = 2000, required = 200 },
+            Thorium = { price = 3200, required = 270 },
+            Iridium = { price = 3700, required = 180 },
+            Adamantium = { price = 4500, required = 300 },
+            Rhodium = { price = 15000, required = 300 },
+            Unobtanium = { price = 30000, required = 340 },
+            Topaz = { price = 75, required = 6 },
+            Emerald = { price = 200, required = 14 },
+            Sapphire = { price = 250, required = 14 },
+            Ruby = { price = 300, required = 18 },
+            Diamond = { price = 1500, required = 22 },
+            Poudretteite = { price = 1700, required = 75 },
+            Zultanite = { price = 2300, required = 110 },
+            Grandidierite = { price = 4500, required = 120 },
+            Musgravite = { price = 5800, required = 150 },
+            Painite = { price = 12000, required = 200 },
+            ["Blue Chalk"] = { price = 20, required = nil },
+            ["Green Chalk"] = { price = 30, required = nil },
+            ["Red Chalk"] = { price = 40, required = nil },
+        }
+        local genericOreNames = {
+            ["Part"] = true,
+            ["MeshPart"] = true,
+            ["Model"] = true,
+            ["Unknown"] = true,
+            ["SurfaceAppearance"] = true,
+            ["OreMesh"] = true,
+            ["CrystallineMetalOre"] = true,
+            ["CubicBlockMetal"] = true,
+            ["ShaleMetalBlock"] = true,
+            ["GemBlockMesh"] = true,
+        }
+
+        local function normalizeOreToken(value)
+            if oreResolverHelper and type(oreResolverHelper.normalizeOreToken) == "function" then
+                return oreResolverHelper.normalizeOreToken(value)
+            end
+            if value == nil then return nil end
+            local text = tostring(value)
+            text = text:gsub("^%s+", ""):gsub("%s+$", "")
+            if text == "" then return nil end
+            return text
+        end
+
+        local function isMeaningfulOreName(name)
+            if oreResolverHelper and type(oreResolverHelper.isMeaningfulOreName) == "function" then
+                return oreResolverHelper.isMeaningfulOreName(name, genericOreNames)
+            end
+            local n = normalizeOreToken(name)
+            return n and not genericOreNames[n]
+        end
+
+        local function getStringAttribute(instance, key)
+            if oreResolverHelper and type(oreResolverHelper.getStringAttribute) == "function" then
+                return oreResolverHelper.getStringAttribute(instance, key)
+            end
+            if not instance then return nil end
+            local ok, value = pcall(function()
+                return instance:GetAttribute(key)
+            end)
+            if not ok then return nil end
+            return normalizeOreToken(value)
+        end
+
+        local function normalizeNameForMatch(name)
+            if oreResolverHelper and type(oreResolverHelper.normalizeNameForMatch) == "function" then
+                return oreResolverHelper.normalizeNameForMatch(name)
+            end
+            local text = normalizeOreToken(name)
+            if not text then return nil end
+            text = text:gsub("([a-z])([A-Z])", "%1 %2")
+            text = text:gsub("[_%-%./]", " ")
+            text = text:gsub("%d+", " ")
+            text = text:gsub("%s+", " ")
+            return string.lower(text)
+        end
+
+        local function pickKnownOreFromText(name)
+            if oreResolverHelper and type(oreResolverHelper.pickKnownOreFromText) == "function" then
+                return oreResolverHelper.pickKnownOreFromText(name, knownOreNames)
+            end
+            local normalized = normalizeNameForMatch(name)
+            if not normalized then return nil end
+            for _, ore in ipairs(knownOreNames) do
+                local token = string.lower(ore)
+                if normalized == token or normalized:find("%f[%a]" .. token .. "%f[^%a]") then
+                    return ore
+                end
+            end
+            return nil
+        end
+
+        local function canonicalizeOreName(name)
+            if oreResolverHelper and type(oreResolverHelper.canonicalizeOreName) == "function" then
+                return oreResolverHelper.canonicalizeOreName(name, knownOreCanonical)
+            end
+            local normalized = normalizeNameForMatch(name)
+            if not normalized then return nil end
+            return knownOreCanonical[normalized]
+        end
+
+        local function colorToShortString(color)
+            if oreResolverHelper and type(oreResolverHelper.colorToShortString) == "function" then
+                return oreResolverHelper.colorToShortString(color)
+            end
+            if typeof(color) ~= "Color3" then
+                return "0,0,0"
+            end
+            return string.format(
+                "%d,%d,%d",
+                math.floor(color.R * 255 + 0.5),
+                math.floor(color.G * 255 + 0.5),
+                math.floor(color.B * 255 + 0.5)
+            )
+        end
+
+        local function colorDistanceSq(a, b)
+            if oreResolverHelper and type(oreResolverHelper.colorDistanceSq) == "function" then
+                return oreResolverHelper.colorDistanceSq(a, b)
+            end
+            if typeof(a) ~= "Color3" or typeof(b) ~= "Color3" then
+                return math.huge
+            end
+            local ar, ag, ab = a.R * 255, a.G * 255, a.B * 255
+            local br, bg, bb = b.R * 255, b.G * 255, b.B * 255
+            local dr, dg, db = ar - br, ag - bg, ab - bb
+            return (dr * dr) + (dg * dg) + (db * db)
+        end
+
+        local function numberToShortString(n)
+            if oreResolverHelper and type(oreResolverHelper.numberToShortString) == "function" then
+                return oreResolverHelper.numberToShortString(n)
+            end
+            if type(n) ~= "number" then return "0" end
+            return string.format("%.2f", n)
+        end
+
+        local function isInstance(value)
+            if oreResolverHelper and type(oreResolverHelper.isInstance) == "function" then
+                return oreResolverHelper.isInstance(value)
+            end
+            return typeof(value) == "Instance"
+        end
+
+        local function makeOreSignature(target, renderPart)
+            if oreResolverHelper and type(oreResolverHelper.makeOreSignature) == "function" then
+                return oreResolverHelper.makeOreSignature(target, renderPart)
+            end
+            local ok, signature = pcall(function()
+                local part = isInstance(renderPart) and renderPart or nil
+                if not part and type(getOreRenderPart) == "function" then
+                    local okRender, resolvedPart = pcall(getOreRenderPart, target)
+                    if okRender and isInstance(resolvedPart) then
+                        part = resolvedPart
+                    end
+                end
+                if not isInstance(part) then
+                    return nil
+                end
+
+                local className = part.ClassName or "Part"
+                local nodeName = normalizeOreToken(part.Name) or "Unknown"
+                local material = tostring(part.Material or "Plastic")
+                local color = colorToShortString(part.Color)
+                local size = part.Size
+                local sizeText = "0,0,0"
+                if typeof(size) == "Vector3" then
+                    sizeText = table.concat({
+                        numberToShortString(size.X),
+                        numberToShortString(size.Y),
+                        numberToShortString(size.Z),
+                    }, ",")
+                end
+
+                local meshId = ""
+                local textureId = ""
+                if part:IsA("MeshPart") then
+                    meshId = normalizeOreToken(part.MeshId) or ""
+                    textureId = normalizeOreToken(part.TextureID) or ""
+                end
+
+                return table.concat({
+                    className,
+                    nodeName,
+                    material,
+                    color,
+                    sizeText,
+                    meshId,
+                    textureId,
+                }, "|")
+            end)
+
+            if not ok then
+                return nil
+            end
+            return signature
+        end
+
+        local function makeOreSignatureCoarse(target, renderPart)
+            if oreResolverHelper and type(oreResolverHelper.makeOreSignatureCoarse) == "function" then
+                return oreResolverHelper.makeOreSignatureCoarse(target, renderPart)
+            end
+            local signature = makeOreSignature(target, renderPart)
+            if not signature then
+                return nil
+            end
+            local parts = {}
+            for part in string.gmatch(signature, "([^|]+)") do
+                table.insert(parts, part)
+            end
+            if #parts < 7 then
+                return signature
+            end
+            -- Coarse signature ignores volatile fields (part name/size).
+            return table.concat({
+                parts[1] or "",
+                parts[3] or "",
+                parts[4] or "",
+                parts[6] or "",
+                parts[7] or "",
+            }, "|")
+        end
+
+        local function makeOreColorSignature(target, renderPart)
+            if oreResolverHelper and type(oreResolverHelper.makeOreColorSignature) == "function" then
+                return oreResolverHelper.makeOreColorSignature(target, renderPart)
+            end
+            local part = renderPart
+            if not isInstance(part) and type(getOreRenderPart) == "function" then
+                part = getOreRenderPart(target)
+            end
+            if not isInstance(part) then
+                return nil
+            end
+
+            local className = part.ClassName or "Part"
+            local material = tostring(part.Material or "Plastic")
+            local color = colorToShortString(part.Color)
+            local meshId = ""
+            if part:IsA("MeshPart") then
+                meshId = normalizeOreToken(part.MeshId) or ""
+            end
+            return table.concat({ className, material, color, meshId }, "|")
+        end
+
+        local function classifyOreByDirectColor(target, renderPart)
+            if oreResolverHelper and type(oreResolverHelper.classifyOreByDirectColor) == "function" then
+                return oreResolverHelper.classifyOreByDirectColor(target, renderPart, oreNameByColorSignature, useDirectColorClassifier)
+            end
+            -- IMPORTANT: do NOT guess ore name from hardcoded palette.
+            -- Only classify using verified mappings (color-signature table).
+            if not useDirectColorClassifier then
+                return nil
+            end
+            if type(oreNameByColorSignature) ~= "table" then
+                return nil
+            end
+
+            local part = renderPart
+            if not isInstance(part) and type(getOreRenderPart) == "function" then
+                part = getOreRenderPart(target)
+            end
+            if not isInstance(part) then
+                return nil
+            end
+
+            local bestName, bestDist = nil, math.huge
+            local secondDist = math.huge
+
+            for sig, mappedName in pairs(oreNameByColorSignature) do
+                if type(sig) == "string" and type(mappedName) == "string" then
+                    -- sig format: Class|Material|R,G,B|MeshId
+                    local r, g, b = string.match(sig, "|(%d+),(%d+),(%d+)|")
+                    if r and g and b then
+                        local sampleColor = Color3.fromRGB(tonumber(r), tonumber(g), tonumber(b))
+                        local d = colorDistanceSq(part.Color, sampleColor)
+                        if d < bestDist then
+                            secondDist = bestDist
+                            bestDist = d
+                            bestName = mappedName
+                        elseif d < secondDist then
+                            secondDist = d
+                        end
+                    end
+                end
+            end
+
+            if not bestName then
+                return nil
+            end
+
+            -- Strict thresholds: if it's not very close, return nil (avoid Aluminium -> Vanadium type mistakes).
+            if bestDist > 2200 then
+                return nil
+            end
+            if (secondDist - bestDist) < 280 then
+                return nil
+            end
+
+            return bestName
+        end
+
+        -- Verified static color signatures (from user-provided UMT profile export).
+        local oreNameByStaticColorSignature = {
+            ["MeshPart|Enum.Material.Plastic|74,77,122|rbxassetid://18890509556"] = "Titanium",
+            ["MeshPart|Enum.Material.SmoothPlastic|92,97,97|rbxassetid://18948235836"] = "Musgravite",
+            ["MeshPart|Enum.Material.Plastic|209,160,34|rbxassetid://107025224910125"] = "Palladium",
+            ["MeshPart|Enum.Material.Plastic|171,221,41|rbxassetid://109851935916635"] = "Iridium",
+            ["MeshPart|Enum.Material.SmoothPlastic|193,11,11|rbxassetid://18948235836"] = "Ruby",
+            ["MeshPart|Enum.Material.Plastic|138,159,153|rbxassetid://109851935916635"] = "Molybdenum",
+            ["MeshPart|Enum.Material.Plastic|97,130,109|rbxassetid://18890509556"] = "Thorium",
+            ["MeshPart|Enum.Material.SmoothPlastic|154,143,56|rbxassetid://18948235836"] = "Topaz",
+            ["MeshPart|Enum.Material.Plastic|123,133,133|rbxassetid://18890509556"] = "Tin",
+            ["MeshPart|Enum.Material.Plastic|107,108,107|rbxassetid://107025224910125"] = "Aluminium",
+            ["MeshPart|Enum.Material.Plastic|241,213,121|rbxassetid://18890509556"] = "Gold",
+            ["MeshPart|Enum.Material.Plastic|189,125,84|rbxassetid://18890509556"] = "Iron",
+            ["MeshPart|Enum.Material.SmoothPlastic|103,182,188|rbxassetid://18948235836"] = "Diamond",
+            ["MeshPart|Enum.Material.Neon|87,175,87|rbxassetid://18890509556"] = "Uranium",
+            ["MeshPart|Enum.Material.Plastic|83,165,134|rbxassetid://107025224910125"] = "Mithril",
+            ["MeshPart|Enum.Material.Neon|41,137,211|rbxassetid://18890509556"] = "Plutonium",
+            ["MeshPart|Enum.Material.SmoothPlastic|0,143,0|rbxassetid://18948235836"] = "Emerald",
+            ["MeshPart|Enum.Material.SmoothPlastic|11,36,179|rbxassetid://18948235836"] = "Sapphire",
+            ["MeshPart|Enum.Material.SmoothPlastic|202,134,117|rbxassetid://18948235836"] = "Zultanite",
+            ["MeshPart|Enum.Material.Plastic|54,56,73|rbxassetid://85019587575686"] = "Lead",
+            ["MeshPart|Enum.Material.Glacier|15,12,20|rbxassetid://93787691661882"] = "EXPLOSIVES",
+            ["MeshPart|Enum.Material.Plastic|64,116,199|rbxassetid://109851935916635"] = "Cobalt",
+            ["MeshPart|Enum.Material.SmoothPlastic|202,67,200|rbxassetid://18948235836"] = "Poudretteite",
+            ["MeshPart|Enum.Material.Plastic|133,171,185|rbxassetid://18890509556"] = "Silver",
+            ["MeshPart|Enum.Material.Brick|170,85,0|rbxassetid://18890509556"] = "Rhodium",
+            ["MeshPart|Enum.Material.SmoothPlastic|67,202,130|rbxassetid://18948235836"] = "Grandidierite",
+            ["MeshPart|Enum.Material.Plastic|166,64,46|rbxassetid://107025224910125"] = "Vanadium",
+            ["MeshPart|Enum.Material.Plastic|65,83,76|rbxassetid://85019587575686"] = "Tungsten",
+            ["MeshPart|Enum.Material.Plastic|80,159,116|rbxassetid://109851935916635"] = "Adamantium",
+            ["MeshPart|Enum.Material.Neon|189,80,211|rbxassetid://18890509556"] = "Unobtanium",
+        }
+
+        -- Allow hub to pass preloaded mappings into this module.
+        if scriptInfo and type(scriptInfo.preloadedOreColorMap) == "table" then
+            mergeStringMap(sharedOreNameByColorSignature, scriptInfo.preloadedOreColorMap)
+        end
+
+        local function scoreOreCandidate(bucket, candidate, score)
+            if oreResolverHelper and type(oreResolverHelper.scoreOreCandidate) == "function" then
+                oreResolverHelper.scoreOreCandidate(bucket, candidate, score)
+                return
+            end
+            if not candidate or not score then return end
+            bucket[candidate] = (bucket[candidate] or 0) + score
+        end
+
+        local function collectOreCandidatesFromInstance(instance, bucket, baseScore, scanDescendants)
+            if oreResolverHelper and type(oreResolverHelper.collectOreCandidatesFromInstance) == "function" then
+                oreResolverHelper.collectOreCandidatesFromInstance(instance, bucket, baseScore, scanDescendants, knownOreNames, knownOreCanonical)
+                return
+            end
+            if not isInstance(instance) then return end
+            local function hasOreKeyHint(text)
+                local n = string.lower(tostring(text or ""))
+                return n:find("ore", 1, true)
+                    or n:find("mine", 1, true)
+                    or n:find("resource", 1, true)
+                    or n:find("metal", 1, true)
+                    or n:find("gem", 1, true)
+                    or n:find("id", 1, true)
+                    or n:find("type", 1, true)
+            end
+
+            local attrKeys = { "OreName", "MineId", "OreId", "ResourceName", "DisplayName", "ItemName" }
+            for _, key in ipairs(attrKeys) do
+                local value = getStringAttribute(instance, key)
+                local fromAttr = canonicalizeOreName(value) or pickKnownOreFromText(value)
+                if fromAttr then
+                    scoreOreCandidate(bucket, fromAttr, baseScore + 12)
+                end
+            end
+
+            local function scanOne(desc)
+                if not isInstance(desc) then return end
+                if desc.Name == "UH_ESP_Billboard" or desc.Name == "UH_ESP_Highlight" then
+                    return
+                end
+                if desc:IsA("BillboardGui") or desc:IsA("TextLabel") or desc:IsA("TextButton") then
+                    return
+                end
+
+                if desc:IsA("StringValue") then
+                    if not hasOreKeyHint(desc.Name) then
+                        return
+                    end
+                    local fromValueName = canonicalizeOreName(desc.Name) or pickKnownOreFromText(desc.Name)
+                    local fromValueText = canonicalizeOreName(desc.Value) or pickKnownOreFromText(desc.Value)
+                    if fromValueName then scoreOreCandidate(bucket, fromValueName, baseScore + 6) end
+                    if fromValueText then scoreOreCandidate(bucket, fromValueText, baseScore + 9) end
+                elseif desc:IsA("IntValue") or desc:IsA("NumberValue") then
+                    if not hasOreKeyHint(desc.Name) then
+                        return
+                    end
+                    local fromNumericName = canonicalizeOreName(desc.Name) or pickKnownOreFromText(desc.Name)
+                    if fromNumericName then
+                        scoreOreCandidate(bucket, fromNumericName, baseScore + 4)
+                    end
+                end
+            end
+
+            if scanDescendants and instance.GetDescendants then
+                local ok, descendants = pcall(function()
+                    return instance:GetDescendants()
+                end)
+                if ok and type(descendants) == "table" then
+                    local limit = math.min(#descendants, 180)
+                    for i = 1, limit do
+                        local desc = descendants[i]
+                        if isInstance(desc) then
+                            scanOne(desc)
+                        end
+                    end
+                end
+            end
+        end
+
+        local function inferOreNameFromTarget(target, renderPart)
+            if oreResolverHelper and type(oreResolverHelper.inferOreNameFromTarget) == "function" then
+                return oreResolverHelper.inferOreNameFromTarget(target, renderPart, knownOreNames, knownOreCanonical)
+            end
+            local bucket = {}
+            collectOreCandidatesFromInstance(target, bucket, 12, true)
+            collectOreCandidatesFromInstance(renderPart, bucket, 10, true)
+            if isInstance(target) and isInstance(target.Parent) then
+                collectOreCandidatesFromInstance(target.Parent, bucket, 6, false)
+            end
+
+            local bestName, bestScore = nil, -math.huge
+            local secondBest = -math.huge
+            for name, score in pairs(bucket) do
+                if score > bestScore then
+                    secondBest = bestScore
+                    bestScore = score
+                    bestName = name
+                elseif score > secondBest then
+                    secondBest = score
+                end
+            end
+
+            if not bestName then
+                return nil, 0
+            end
+            if bestScore < 18 then
+                return nil, bestScore
+            end
+            if bestScore - secondBest < 5 then
+                return nil, bestScore
+            end
+            return bestName, bestScore
+        end
+
+        local function autoLearnOreMapping(target, renderPart)
+            if useStrictColorRules then
+                return
+            end
+            local inferredName, inferredScore = inferOreNameFromTarget(target, renderPart)
+            if not inferredName then return end
+            local changed = false
+            local signature = makeOreSignature(target, renderPart)
+            local coarseSignature = makeOreSignatureCoarse(target, renderPart)
+            local colorSignature = makeOreColorSignature(target, renderPart)
+            local oreId = nil
+            if type(getOreIdentifierDeep) == "function" then
+                oreId = getOreIdentifierDeep(target, renderPart)
+            end
+            -- Prevent poisoning memory when there is no reliable ID source.
+            if not oreId then
+                return
+            end
+            if signature and not oreNameBySignature[signature] then
+                oreNameBySignature[signature] = inferredName
+                oreInferenceStats.learned = oreInferenceStats.learned + 1
+                changed = true
+            end
+            if coarseSignature and not oreNameBySignatureCoarse[coarseSignature] then
+                oreNameBySignatureCoarse[coarseSignature] = inferredName
+                changed = true
+            end
+            if colorSignature and not oreNameByColorSignature[colorSignature] then
+                oreNameByColorSignature[colorSignature] = inferredName
+                changed = true
+            end
+            if oreId and not oreNameById[oreId] and inferredScore >= 18 then
+                oreNameById[oreId] = inferredName
+                changed = true
+            end
+            if changed and saveAutoSettings then
+                saveAutoSettings()
+            end
+        end
+
+        local function getMappedOreNameOnly(target, renderPart)
+            if oreResolverHelper and type(oreResolverHelper.getMappedOreNameOnly) == "function" then
+                return oreResolverHelper.getMappedOreNameOnly(target, renderPart, {
+                    oreNameById = oreNameById,
+                    oreNameByStaticColorSignature = oreNameByStaticColorSignature,
+                    sharedOreNameByColorSignature = sharedOreNameByColorSignature,
+                    oreNameByColorSignature = oreNameByColorSignature,
+                    oreNameBySignature = oreNameBySignature,
+                    oreNameBySignatureCoarse = oreNameBySignatureCoarse,
+                    oreNameByRuntime = oreNameByRuntime,
+                }, useStrictColorRules)
+            end
+            local ok, mapped, source = pcall(function()
+                local oreId = nil
+                if type(getOreIdentifierDeep) == "function" then
+                    oreId = getOreIdentifierDeep(target, renderPart)
+                end
+                if oreId and oreNameById[oreId] then
+                    return oreNameById[oreId], "id"
+                end
+                local colorSignature = makeOreColorSignature(target, renderPart)
+                if colorSignature and oreNameByStaticColorSignature[colorSignature] then
+                    return oreNameByStaticColorSignature[colorSignature], "static-color"
+                end
+                if colorSignature and sharedOreNameByColorSignature[colorSignature] then
+                    return sharedOreNameByColorSignature[colorSignature], "shared-color"
+                end
+                if useStrictColorRules then
+                    if colorSignature and oreNameByColorSignature[colorSignature] then
+                        return oreNameByColorSignature[colorSignature], "color"
+                    end
+                    return nil, nil
+                end
+                local signature = nil
+                if type(makeOreSignature) == "function" then
+                    signature = makeOreSignature(target, renderPart)
+                end
+                if signature and oreNameBySignature[signature] then
+                    return oreNameBySignature[signature], "signature"
+                end
+                local coarseSignature = nil
+                if type(makeOreSignatureCoarse) == "function" then
+                    coarseSignature = makeOreSignatureCoarse(target, renderPart)
+                end
+                if coarseSignature and oreNameBySignatureCoarse[coarseSignature] then
+                    return oreNameBySignatureCoarse[coarseSignature], "coarse"
+                end
+                if colorSignature and oreNameByColorSignature[colorSignature] then
+                    return oreNameByColorSignature[colorSignature], "color"
+                end
+                local runtimeName = normalizeOreToken(isInstance(target) and target.Name or nil)
+                local genericRuntime = runtimeName == "OreMesh" or runtimeName == "CrystallineMetalOre" or runtimeName == "CubicBlockMetal" or runtimeName == "ShaleMetalBlock" or runtimeName == "GemBlockMesh"
+                if runtimeName and not genericRuntime and oreNameByRuntime[runtimeName] then
+                    return oreNameByRuntime[runtimeName], "runtime"
+                end
+                return nil, nil
+            end)
+            if not ok then
+                return nil, nil
+            end
+            return mapped, source
+        end
+
+        local function getNeighborConsensusName(target, renderPart)
+            if oreResolverHelper and type(oreResolverHelper.getNeighborConsensusName) == "function" then
+                return oreResolverHelper.getNeighborConsensusName(target, renderPart, {
+                    oreNameById = oreNameById,
+                    oreNameByStaticColorSignature = oreNameByStaticColorSignature,
+                    sharedOreNameByColorSignature = sharedOreNameByColorSignature,
+                    oreNameByColorSignature = oreNameByColorSignature,
+                    oreNameBySignature = oreNameBySignature,
+                    oreNameBySignatureCoarse = oreNameBySignatureCoarse,
+                    oreNameByRuntime = oreNameByRuntime,
+                }, useStrictColorRules)
+            end
+            if useStrictColorRules then
+                return nil
+            end
+            if not isInstance(target) or not isInstance(renderPart) then
+                return nil
+            end
+            local parent = target.Parent
+            if not isInstance(parent) then
+                return nil
+            end
+
+            local votes = {}
+            local total = 0
+            for _, neighbor in ipairs(parent:GetChildren()) do
+                if neighbor ~= target and (neighbor:IsA("BasePart") or neighbor:IsA("Model")) then
+                    local neighborRender = getOreRenderPart(neighbor)
+                    if isInstance(neighborRender) and neighborRender.Position and renderPart and renderPart.Position then
+                        local dist = (neighborRender.Position - renderPart.Position).Magnitude
+                        if dist <= 14 then
+                            local name, source = getMappedOreNameOnly(neighbor, neighborRender)
+                            if name and source ~= "runtime" then
+                                votes[name] = (votes[name] or 0) + 1
+                                total = total + 1
+                            end
+                        end
+                    end
+                end
+            end
+
+            if total < 3 then
+                return nil
+            end
+
+            local bestName, bestCount = nil, 0
+            for name, count in pairs(votes) do
+                if count > bestCount then
+                    bestName = name
+                    bestCount = count
+                end
+            end
+
+            if bestName and (bestCount / total) >= 0.7 then
+                return bestName
+            end
+            return nil
+        end
+
+        local function getNameFromAttributes(instance)
+            if oreResolverHelper and type(oreResolverHelper.getNameFromAttributes) == "function" then
+                return oreResolverHelper.getNameFromAttributes(instance, genericOreNames)
+            end
+            if not instance then return nil end
+            local keys = { "OreName", "MineId", "OreId", "ResourceName", "DisplayName", "ItemName", "Name" }
+            for _, key in ipairs(keys) do
+                local value = getStringAttribute(instance, key)
+                if isMeaningfulOreName(value) then
+                    return value
+                end
+            end
+            for _, key in ipairs(keys) do
+                local value = getStringAttribute(instance, key)
+                if value then
+                    return value
+                end
+            end
+            return nil
+        end
+
+        local function getOreIdentifier(instance)
+            if oreResolverHelper and type(oreResolverHelper.getOreIdentifier) == "function" then
+                return oreResolverHelper.getOreIdentifier(instance)
+            end
+            if not isInstance(instance) then return nil end
+            local keys = { "MineId", "OreId", "ResourceId", "BlockId", "Id" }
+            for _, key in ipairs(keys) do
+                local value = getStringAttribute(instance, key)
+                if value then
+                    return value
+                end
+            end
+            return nil
+        end
+
+        getOreIdentifierDeep = function(target, renderPart)
+            if oreResolverHelper and type(oreResolverHelper.getOreIdentifierDeep) == "function" then
+                return oreResolverHelper.getOreIdentifierDeep(target, renderPart)
+            end
+            local direct = getOreIdentifier(target) or getOreIdentifier(renderPart)
+            if direct then return direct end
+
+            local function scanDescendants(instance)
+                if not instance or not instance.GetDescendants then return nil end
+                for _, desc in ipairs(instance:GetDescendants()) do
+                    local found = getOreIdentifier(desc)
+                    if found then
+                        return found
+                    end
+                end
+                return nil
+            end
+
+            return scanDescendants(target) or scanDescendants(renderPart)
+        end
+
+        local function getNameFromValueObjects(instance)
+            if oreResolverHelper and type(oreResolverHelper.getNameFromValueObjects) == "function" then
+                return oreResolverHelper.getNameFromValueObjects(instance, genericOreNames)
+            end
+            if not instance then return nil end
+            local preferred = { "OreName", "MineId", "OreId", "ResourceName", "DisplayName", "ItemName" }
+            for _, key in ipairs(preferred) do
+                local valueObj = instance:FindFirstChild(key, true)
+                if valueObj and valueObj:IsA("StringValue") then
+                    local value = normalizeOreToken(valueObj.Value)
+                    if isMeaningfulOreName(value) then
+                        return value
+                    end
+                end
+            end
+            return nil
+        end
+
+        local function getNameFromDescendantHints(instance)
+            if oreResolverHelper and type(oreResolverHelper.getNameFromDescendantHints) == "function" then
+                return oreResolverHelper.getNameFromDescendantHints(instance, knownOreNames)
+            end
+            if not isInstance(instance) or not instance.GetDescendants then
+                return nil
+            end
+
+            for _, desc in ipairs(instance:GetDescendants()) do
+                if desc:IsA("StringValue") then
+                    local n = string.lower(desc.Name or "")
+                    local nameLooksRelevant = n:find("ore", 1, true) or n:find("mine", 1, true) or n:find("resource", 1, true) or n:find("id", 1, true)
+                    if nameLooksRelevant then
+                        local fromValueName = pickKnownOreFromText(desc.Name)
+                        if fromValueName then
+                            return fromValueName
+                        end
+                    end
+                    local fromStringValue = pickKnownOreFromText(desc.Value)
+                    if fromStringValue then
+                        return fromStringValue
+                    end
+                end
+            end
+
+            return nil
+        end
+
+        local function resolveOreName(target)
+            local renderPart = nil
+            if type(getOreRenderPart) == "function" then
+                renderPart = getOreRenderPart(target)
+            elseif isInstance(target) then
+                -- Safe fallback in case render helper is not initialized yet
+                if target:IsA("BasePart") then
+                    renderPart = target
+                elseif target:IsA("Model") then
+                    renderPart = target.PrimaryPart or target:FindFirstChildWhichIsA("BasePart", true)
+                elseif target.FindFirstChildWhichIsA then
+                    renderPart = target:FindFirstChildWhichIsA("BasePart", true)
+                end
+            end
+            local mappedName, mappedSource = getMappedOreNameOnly(target, renderPart)
+            if mappedName then
+                if (not useStrictColorRules) and mappedSource ~= "id" then
+                    local consensus = getNeighborConsensusName(target, renderPart)
+                    if consensus and consensus ~= mappedName then
+                        local signature = makeOreSignature(target, renderPart)
+                        local coarseSignature = makeOreSignatureCoarse(target, renderPart)
+                        if signature then oreNameBySignature[signature] = consensus end
+                        if coarseSignature then oreNameBySignatureCoarse[coarseSignature] = consensus end
+                        mappedName = consensus
+                    end
+                end
+                return mappedName
+            end
+
+            if useStrictColorRules then
+                return "Unknown"
+            end
+
+            local directColorName = classifyOreByDirectColor(target, renderPart)
+            if directColorName then
+                return directColorName
+            end
+
+            local signature = nil
+            if type(makeOreSignature) == "function" then
+                signature = makeOreSignature(target, renderPart)
+            end
+            local coarseSignature = nil
+            if type(makeOreSignatureCoarse) == "function" then
+                coarseSignature = makeOreSignatureCoarse(target, renderPart)
+            end
+            local colorSignature = makeOreColorSignature(target, renderPart)
+            if colorSignature and oreNameByStaticColorSignature[colorSignature] then
+                return oreNameByStaticColorSignature[colorSignature]
+            end
+            autoLearnOreMapping(target, renderPart)
+            if signature and oreNameBySignature[signature] then
+                return oreNameBySignature[signature]
+            end
+            if coarseSignature and oreNameBySignatureCoarse[coarseSignature] then
+                return oreNameBySignatureCoarse[coarseSignature]
+            end
+            if colorSignature and oreNameByColorSignature[colorSignature] then
+                return oreNameByColorSignature[colorSignature]
+            end
+            local runtimeName = normalizeOreToken(isInstance(target) and target.Name or nil)
+            local genericRuntime = runtimeName == "OreMesh" or runtimeName == "CrystallineMetalOre" or runtimeName == "CubicBlockMetal" or runtimeName == "ShaleMetalBlock" or runtimeName == "GemBlockMesh"
+            if runtimeName and not genericRuntime and oreNameByRuntime[runtimeName] then
+                return oreNameByRuntime[runtimeName]
+            end
+            local candidates = {
+                getNameFromAttributes(target),
+                getNameFromAttributes(renderPart),
+                getNameFromValueObjects(target),
+                getNameFromValueObjects(renderPart),
+                getNameFromDescendantHints(target),
+                getNameFromDescendantHints(renderPart),
+            }
+
+            local inferredName = inferOreNameFromTarget(target, renderPart)
+            if inferredName then
+                table.insert(candidates, 1, inferredName)
+            end
+
+            local hasReliableId = type(getOreIdentifierDeep) == "function" and getOreIdentifierDeep(target, renderPart) ~= nil
+            if hasReliableId then
+                for _, name in ipairs(candidates) do
+                    if isMeaningfulOreName(name) then
+                        return name
+                    end
+                end
+            end
+
+            local targetName = normalizeOreToken(isInstance(target) and target.Name or nil)
+            local renderPartName = normalizeOreToken(renderPart and renderPart.Name)
+            if isMeaningfulOreName(targetName) then
+                return targetName
+            end
+            if isMeaningfulOreName(renderPartName) then
+                return renderPartName
+            end
+
+            if hasReliableId then
+                for _, name in ipairs(candidates) do
+                    if name then
+                        return name
+                    end
+                end
+            end
+
+            if targetName then
+                return targetName
+            end
+            if renderPartName then
+                return renderPartName
+            end
+
+            return "OreMesh"
+        end
+
+        local function registerOreIdName(target, forcedName)
+            if not target then
+                return false, "No target ore"
+            end
+            local renderPart = getOreRenderPart(target)
+            local oreId = nil
+            if type(getOreIdentifierDeep) == "function" then
+                oreId = getOreIdentifierDeep(target, renderPart)
+            end
+            local signature = nil
+            if type(makeOreSignature) == "function" then
+                signature = makeOreSignature(target, renderPart)
+            end
+            local coarseSignature = nil
+            if type(makeOreSignatureCoarse) == "function" then
+                coarseSignature = makeOreSignatureCoarse(target, renderPart)
+            end
+            local colorSignature = makeOreColorSignature(target, renderPart)
+
+            local resolvedName = normalizeOreToken(forcedName)
+            if not resolvedName or resolvedName == "" then
+                resolvedName = resolveOreName(target)
+            end
+            if not isMeaningfulOreName(resolvedName) then
+                return false, "Name is generic (" .. tostring(resolvedName) .. ")"
+            end
+
+            if oreId then
+                oreNameById[oreId] = resolvedName
+                if colorSignature then
+                    oreNameByColorSignature[colorSignature] = resolvedName
+                end
+                if not useStrictColorRules then
+                    if signature then
+                        oreNameBySignature[signature] = resolvedName
+                    end
+                    if coarseSignature then
+                        oreNameBySignatureCoarse[coarseSignature] = resolvedName
+                    end
+                end
+            else
+                if colorSignature then
+                    oreNameByColorSignature[colorSignature] = resolvedName
+                elseif signature and not useStrictColorRules then
+                    oreNameBySignature[signature] = resolvedName
+                    if coarseSignature then
+                        oreNameBySignatureCoarse[coarseSignature] = resolvedName
+                    end
+                else
+                    local runtimeName = normalizeOreToken(isInstance(target) and target.Name or nil)
+                    if not runtimeName then
+                        runtimeName = normalizeOreToken(renderPart and renderPart.Name)
+                    end
+                    if not runtimeName then
+                        return false, "No MineId/OreId and no runtime/signature"
+                    end
+                    oreNameByRuntime[runtimeName] = resolvedName
+                end
+            end
+            oreNameCache[target] = resolvedName
+            if saveAutoSettings then
+                saveAutoSettings()
+            end
+            if oreId then
+                return true, string.format("Mapped %s -> %s", tostring(oreId), resolvedName)
+            end
+            if signature then
+                return true, "Mapped signature -> " .. tostring(resolvedName)
+            end
+            local runtimeName = normalizeOreToken(isInstance(target) and target.Name or nil) or "runtime-name"
+            return true, string.format("Mapped runtime %s -> %s", runtimeName, resolvedName)
+        end
+
+        local function findOreTargetFromInstance(instance)
+            if oreResolverHelper and type(oreResolverHelper.findOreTargetFromInstance) == "function" then
+                return oreResolverHelper.findOreTargetFromInstance(instance)
+            end
+            local node = instance
+            local placedOre = workspace:FindFirstChild("PlacedOre")
+            local spawnedBlocks = workspace:FindFirstChild("SpawnedBlocks")
+            local lastRenderable = nil
+            while node and node.Parent do
+                if node:IsA("BasePart") or node:IsA("Model") then
+                    lastRenderable = node
+                end
+                if (placedOre and node.Parent == placedOre) or (spawnedBlocks and node.Parent == spawnedBlocks) then
+                    if lastRenderable and lastRenderable ~= placedOre and lastRenderable ~= spawnedBlocks then
+                        return lastRenderable
+                    end
+                    return node
+                end
+                node = node.Parent
+            end
+            return nil
+        end
+
+        local function getLookedOreTarget()
+            if oreResolverHelper and type(oreResolverHelper.getLookedOreTarget) == "function" then
+                return oreResolverHelper.getLookedOreTarget()
+            end
+            local players = game:GetService("Players")
+            local localPlayer = players.LocalPlayer
+            local camera = workspace.CurrentCamera
+            if not localPlayer or not camera then return nil end
+
+            local viewport = camera.ViewportSize
+            local ray = camera:ViewportPointToRay(viewport.X * 0.5, viewport.Y * 0.5)
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Blacklist
+            params.FilterDescendantsInstances = { localPlayer.Character }
+
+            local hit = workspace:Raycast(ray.Origin, ray.Direction * 700, params)
+            if hit and hit.Instance then
+                return findOreTargetFromInstance(hit.Instance)
+            end
+
+            local mouse = localPlayer:GetMouse()
+            if mouse and mouse.Target then
+                return findOreTargetFromInstance(mouse.Target)
+            end
+            return nil
+        end
+        local function getTargetGridPosition(target, renderPart)
+            if oreResolverHelper and type(oreResolverHelper.getTargetGridPosition) == "function" then
+                return oreResolverHelper.getTargetGridPosition(target, renderPart)
+            end
+            local gridPos = target:GetAttribute("ChunkPosition") or target:GetAttribute("GridPosition")
+            if not gridPos and renderPart then
+                gridPos = renderPart:GetAttribute("ChunkPosition") or renderPart:GetAttribute("GridPosition")
+            end
+            return gridPos
+        end
+
+        local function isMineableTarget(target, renderPart)
+            if oreResolverHelper and type(oreResolverHelper.isMineableTarget) == "function" then
+                return oreResolverHelper.isMineableTarget(target, renderPart)
+            end
+            if not target then return false end
+            if target:GetAttribute("MineId") or target:GetAttribute("OreId") then
+                return true
+            end
+            if renderPart and (renderPart:GetAttribute("MineId") or renderPart:GetAttribute("OreId")) then
+                return true
+            end
+            return getTargetGridPosition(target, renderPart) ~= nil
+        end
+
+
+        getOreRenderPart = function(target)
+            if oreResolverHelper and type(oreResolverHelper.getOreRenderPart) == "function" then
+                return oreResolverHelper.getOreRenderPart(target)
+            end
+            if not isInstance(target) then return nil end
+            if target:IsA("BasePart") then return target end
+            if target:IsA("Model") then
+                if target.PrimaryPart and target.PrimaryPart:IsA("BasePart") then
+                    return target.PrimaryPart
+                end
+                -- Prefer visible MeshPart if present (color/appearance matches what player sees).
+                local mesh = target:FindFirstChildWhichIsA("MeshPart", true)
+                if mesh then
+                    return mesh
+                end
+                -- Fallback: pick largest BasePart (often the visible shell).
+                local bestPart = nil
+                local bestSize = -1
+                for _, desc in ipairs(target:GetDescendants()) do
+                    if desc:IsA("BasePart") then
+                        local s = desc.Size
+                        local score = (s.X * s.Y * s.Z)
+                        if score > bestSize then
+                            bestSize = score
+                            bestPart = desc
+                        end
+                    end
+                end
+                if bestPart then
+                    return bestPart
+                end
+                return target:FindFirstChildWhichIsA("BasePart", true)
+            end
+            if target.FindFirstChildWhichIsA then
+                return target:FindFirstChildWhichIsA("BasePart", true)
+            end
+            return nil
+        end
+
+        local function getOreNameForEsp(target, renderPart)
+            local name = nil
+            if useStrictColorRules then
+                name = (select(1, getMappedOreNameOnly(target, renderPart)))
+                return name or "Unknown"
+            end
+            return getOreName(target)
+        end
+
+        local function getOreName(target)
+            if not target then
+                return "OreMesh"
+            end
+            local cached = oreNameCache[target]
+            if cached and cached ~= "" then
+                return cached
+            end
+            local resolved = resolveOreName(target)
+            oreNameCache[target] = resolved
+            return resolved
+        end
+
+        local function getOreCategory(oreName)
+            if oreResolverHelper and type(oreResolverHelper.getOreCategory) == "function" then
+                return oreResolverHelper.getOreCategory(oreName, oreCategoryByName)
+            end
+            return oreCategoryByName[oreName] or "Unknown"
+        end
+
+        local function getOreColor(target, oreName, renderPart)
+            if oreResolverHelper and type(oreResolverHelper.getOreColor) == "function" then
+                return oreResolverHelper.getOreColor(target, oreName, renderPart, oreColors, oreCategoryColors, oreCategoryByName)
+            end
+            local part = renderPart
+            if not isInstance(part) then
+                part = getOreRenderPart(target)
+            end
+            if isInstance(part) and typeof(part.Color) == "Color3" then
+                -- Use the ore part's actual in-game color directly.
+                return part.Color
+            end
+            local category = getOreCategory(oreName)
+            return oreCategoryColors[category] or oreColors[oreName] or Color3.fromRGB(255, 255, 255)
+        end
+
+        local function getTargetPosition(target)
+            if oreResolverHelper and type(oreResolverHelper.getTargetPosition) == "function" then
+                return oreResolverHelper.getTargetPosition(target)
+            end
+            local renderPart = getOreRenderPart(target)
+            if renderPart then
+                return renderPart.Position
+            end
+            if target:IsA("Model") then
+                return target:GetPivot().Position
+            end
+            return nil
+        end
+
+        local function espApply(target)
+            if not ESP.enabled then return end
+            if ESP.activeVisuals[target] then return end
+            local renderPart = getOreRenderPart(target)
+            if not renderPart then return end
+            if ESP.activeRenderParts[renderPart] then return end
+            local char = Players.LocalPlayer and Players.LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp and hrp.Position and renderPart and renderPart.Position then
+                local dist = (hrp.Position - renderPart.Position).Magnitude
+                if dist > (ESP.maxDistance + ESP.applyDistancePadding) then
+                    return
+                end
+            end
+
+            local oreName = getOreNameForEsp(target, renderPart)
+            if ESP.filterOre ~= "All" and oreName ~= ESP.filterOre then return end
+
+            local color = getOreColor(target, oreName, renderPart)
+
+            local canonicalForPrice = canonicalizeOreName(oreName) or pickKnownOreFromText(oreName) or oreName
+            local orePrice = nil
+            if oreReferenceFromList[canonicalForPrice] and type(oreReferenceFromList[canonicalForPrice]) == "table" then
+                orePrice = tonumber(oreReferenceFromList[canonicalForPrice].price)
+            end
+
+            local visuals = nil
+            if espRuntimeHelper and type(espRuntimeHelper.createOreVisuals) == "function" then
+                visuals = espRuntimeHelper.createOreVisuals(renderPart, target, color, oreName, ESP.useAdornment, orePrice)
+            else
+                local visual = nil
+                if ESP.useAdornment then
+                    local box = Instance.new("BoxHandleAdornment")
+                    box.Name = "UH_ESP_Box"
+                    box.Adornee = renderPart
+                    box.AlwaysOnTop = true
+                    box.ZIndex = 10
+                    box.Color3 = color
+                    box.Transparency = 0.72
+                    box.Size = renderPart.Size + Vector3.new(0.05, 0.05, 0.05)
+                    box.Parent = renderPart
+                    visual = box
+                else
+                    local hl = Instance.new("Highlight")
+                    hl.Name                = "UH_ESP_Highlight"
+                    hl.FillColor           = color
+                    hl.OutlineColor        = color
+                    hl.FillTransparency    = 0.78
+                    hl.OutlineTransparency = 0.05
+                    hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+                    hl.Adornee             = target
+                    hl.Parent              = target
+                    visual = hl
+                end
+
+                local bb = Instance.new("BillboardGui")
+                bb.Name        = "UH_ESP_Billboard"
+                bb.Size        = UDim2.new(0, 120, 0, orePrice and 44 or 36)
+                bb.StudsOffset = Vector3.new(0, 3.8, 0)
+                bb.AlwaysOnTop = true
+                bb.Adornee     = renderPart
+                bb.Parent      = target
+
+                local lbl = Instance.new("TextLabel")
+                lbl.Size                   = UDim2.new(1, 0, 1, 0)
+                lbl.BackgroundTransparency = 1
+                lbl.TextColor3             = color
+                lbl.TextStrokeColor3       = Color3.new(0, 0, 0)
+                lbl.TextStrokeTransparency = 0
+                lbl.Font                   = Enum.Font.GothamBold
+                lbl.TextSize               = 13
+                lbl.TextScaled             = false
+                lbl.Text                   = orePrice and (oreName .. "\n$" .. tostring(orePrice)) or oreName
+                lbl.Parent                 = bb
+
+                visuals = { visual = visual, billboard = bb, label = lbl }
+            end
+
+            ESP.activeVisuals[target] = {
+                visual = visuals.visual,
+                billboard = visuals.billboard,
+                label = visuals.label,
+                renderPart = renderPart,
+                oreName = oreName,
+                orePrice = orePrice,
+                color = color,
+                lastDistanceInt = -1,
+                nextMetaRefreshAt = 0,
+            }
+            ESP.activeRenderParts[renderPart] = target
+
+            local conn = target.AncestryChanged:Connect(function()
+                if not target.Parent then
+                    if visuals.visual and visuals.visual.Parent then visuals.visual:Destroy() end
+                    if visuals.billboard and visuals.billboard.Parent then visuals.billboard:Destroy() end
+                    ESP.activeVisuals[target] = nil
+                    if ESP.activeRenderParts[renderPart] == target then
+                        ESP.activeRenderParts[renderPart] = nil
+                    end
+                    oreNameCache[target] = nil
+                end
+            end)
+            table.insert(ESP.connections, conn)
+        end
+
+        local function espClearAll()
+            if espRuntimeHelper and type(espRuntimeHelper.clearAll) == "function" then
+                espRuntimeHelper.clearAll(ESP)
+                return
+            end
+            for _, v in pairs(ESP.activeVisuals) do
+                if v.visual and v.visual.Parent then v.visual:Destroy() end
+                if v.billboard and v.billboard.Parent then v.billboard:Destroy() end
+            end
+            ESP.activeVisuals = {}
+            ESP.activeRenderParts = {}
+            for _, c in ipairs(ESP.connections) do c:Disconnect() end
+            ESP.connections = {}
+        end
+
+        local function espScanAll()
+            if espRuntimeHelper and type(espRuntimeHelper.scanAll) == "function" then
+                espRuntimeHelper.scanAll(workspace, espApply, findOreTargetFromInstance)
+                return
+            end
+            local folders = {
+                workspace:FindFirstChild("PlacedOre"),
+                workspace:FindFirstChild("SpawnedBlocks"),
+            }
+            local seen = {}
+            local function tryApplyTarget(target)
+                if not target or seen[target] then return end
+                if target:IsA("BasePart") or target:IsA("Model") then
+                    seen[target] = true
+                    espApply(target)
+                end
+            end
+            for _, folder in ipairs(folders) do
+                if folder then
+                    for _, child in ipairs(folder:GetChildren()) do
+                        if child:IsA("BasePart") or child:IsA("Model") then
+                            tryApplyTarget(child)
+                        else
+                            for _, desc in ipairs(child:GetDescendants()) do
+                                if desc:IsA("BasePart") then
+                                    local candidate = findOreTargetFromInstance(desc) or desc
+                                    tryApplyTarget(candidate)
+                                elseif desc:IsA("Model") then
+                                    tryApplyTarget(desc)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        local function espRescanIfEnabled()
+            if ESP.enabled then
+                espClearAll()
+                espScanAll()
+            end
+        end
+
+        local function espSyncAfterMappingUpdate()
+            if ESP.enabled then
+                espClearAll()
+                espScanAll()
+            else
+                espClearAll()
+            end
+        end
+
+        local function getOreTypes()
+            local types = {"All"}
+            local seen = {}
+            local placedOre = workspace:FindFirstChild("PlacedOre")
+            if placedOre then
+                for _, ore in ipairs(placedOre:GetChildren()) do
+                    local n = getOreName(ore)
+                    if not seen[n] then
+                        table.insert(types, n)
+                        seen[n] = true
+                    end
+                end
+            end
+            return types
+        end
+
+        local function getOreIgnoreOptions()
+            local options = {}
+            local seen = {}
+            local function pushName(name)
+                if type(name) ~= "string" then return end
+                local canonical = canonicalizeOreName(name) or normalizeOreToken(name)
+                if not canonical or canonical == "All" then return end
+                if genericOreNames[canonical] and canonical ~= "OreMesh" then
+                    return
+                end
+                if not seen[canonical] then
+                    seen[canonical] = true
+                    table.insert(options, canonical)
+                end
+            end
+
+            -- Always include the full known ore catalog first.
+            for _, oreName in ipairs(knownOreNames) do
+                pushName(oreName)
+            end
+            pushName("OreMesh")
+
+            -- Include user-learned mappings so ignored list can cover inferred names too.
+            for _, mappedName in pairs(oreNameById or {}) do pushName(mappedName) end
+            for _, mappedName in pairs(oreNameByRuntime or {}) do pushName(mappedName) end
+            for _, mappedName in pairs(oreNameBySignature or {}) do pushName(mappedName) end
+            for _, mappedName in pairs(oreNameBySignatureCoarse or {}) do pushName(mappedName) end
+            for _, mappedName in pairs(oreNameByColorSignature or {}) do pushName(mappedName) end
+
+            -- Keep currently spawned ore names for compatibility with dynamic maps.
+            for _, oreName in ipairs(getOreTypes()) do
+                if oreName ~= "All" then
+                    pushName(oreName)
+                end
+            end
+
+            table.sort(options, function(a, b)
+                return string.lower(a) < string.lower(b)
+            end)
+
+            if #options == 0 then
+                options = {
+                    "Adamantium", "Aluminium", "Cobalt", "Diamond", "Emerald", "Gold", "Grandidierite",
+                    "Iron", "Iridium", "Lead", "Mithril", "Musgravite", "OreMesh", "Palladium", "Painite",
+                    "Plutonium", "Poudretteite", "Rhodium", "Ruby", "Sapphire", "Silver", "Unknown", "Thorium",
+                    "Tin", "Titanium", "Topaz", "Tungsten", "Unobtanium", "Uranium", "Vanadium", "Zultanite",
+                }
+            end
+            return options
+        end
+
+        trackConnection(RunService.RenderStepped:Connect(function()
+            local ok = pcall(function()
+                if not ESP.enabled then return end
+                if espHelper and type(espHelper.applyAdaptiveCadence) == "function" then
+                    espHelper.applyAdaptiveCadence(ESP)
+                else
+                    local visualCount = countActiveVisuals()
+                    if visualCount > 220 then
+                        ESP.updateInterval = 1 / 10
+                        ESP.metaRefreshInterval = 0.5
+                    elseif visualCount > 120 then
+                        ESP.updateInterval = 1 / 14
+                        ESP.metaRefreshInterval = 0.35
+                    else
+                        ESP.updateInterval = 1 / 20
+                        ESP.metaRefreshInterval = 0.22
+                    end
+                end
+                local now = os.clock()
+                if (now - ESP.lastUpdateAt) < ESP.updateInterval then
+                    return
+                end
+                ESP.lastUpdateAt = now
+                local char = Players.LocalPlayer.Character
+                local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+                if not hrp then return end
+                if (now - (ESP.lastDiscoveryAt or 0)) >= ESP.discoveryInterval then
+                    ESP.lastDiscoveryAt = now
+                    -- Re-discover ores as player moves/new ores stream in.
+                    pcall(espScanAll)
+                end
+
+                for target, v in pairs(ESP.activeVisuals) do
+                    if target and target.Parent then
+                        local renderPart = v.renderPart
+                        if not (renderPart and renderPart.Parent) then
+                            renderPart = getOreRenderPart(target)
+                            v.renderPart = renderPart
+                            if renderPart and ESP.activeRenderParts[renderPart] == nil then
+                                ESP.activeRenderParts[renderPart] = target
+                            end
+                        end
+                        local pos = renderPart and renderPart.Position or getTargetPosition(target)
+                        if not pos then
+                            if v.visual and v.visual:IsA("Highlight") then
+                                v.visual.Enabled = false
+                            end
+                            v.billboard.Enabled = false
+                            continue
+                        end
+                        local dist = (hrp.Position - pos).Magnitude
+                        if not dist then continue end
+                        -- Distance culling: purge distant visuals so thousands of 3D instances don't accumulate
+                        if dist > (ESP.maxDistance + 60) then
+                            if espRuntimeHelper and type(espRuntimeHelper.destroyVisualEntry) == "function" then
+                                espRuntimeHelper.destroyVisualEntry(v)
+                            else
+                                if v.visual and v.visual.Parent then pcall(function() v.visual:Destroy() end) end
+                                if v.billboard and v.billboard.Parent then pcall(function() v.billboard:Destroy() end) end
+                            end
+                            ESP.activeVisuals[target] = nil
+                            if renderPart and ESP.activeRenderParts[renderPart] == target then
+                                ESP.activeRenderParts[renderPart] = nil
+                            end
+                            continue
+                        end
+                        local visible = dist <= ESP.maxDistance
+                        if espRuntimeHelper and type(espRuntimeHelper.setVisualVisibility) == "function" then
+                            espRuntimeHelper.setVisualVisibility(v, visible)
+                        else
+                            if v.visual and v.visual:IsA("Highlight") then
+                                v.visual.Enabled = visible
+                            elseif v.visual and v.visual:IsA("BoxHandleAdornment") then
+                                v.visual.Visible = visible
+                            end
+                            v.billboard.Enabled = visible
+                        end
+                        if visible then
+                            local oreName = v.oreName
+                            local color = v.color
+                            local shouldRefreshMeta = (now >= (v.nextMetaRefreshAt or 0))
+                            if shouldRefreshMeta then
+                                oreName = getOreNameForEsp(target, renderPart)
+                                color = getOreColor(target, oreName, renderPart)
+                                v.oreName = oreName
+                                v.color = color
+                                v.nextMetaRefreshAt = now + ESP.metaRefreshInterval
+                            end
+
+                            -- Keep ESP color/adornee in sync (no manual refresh needed).
+                            if v.renderPart ~= renderPart then
+                                v.renderPart = renderPart
+                                if v.visual and v.visual:IsA("BoxHandleAdornment") and renderPart then
+                                    v.visual.Adornee = renderPart
+                                end
+                                if v.billboard and renderPart then
+                                    v.billboard.Adornee = renderPart
+                                end
+                            end
+                            if espRuntimeHelper and type(espRuntimeHelper.syncVisualStyle) == "function" then
+                                espRuntimeHelper.syncVisualStyle(v, color, renderPart)
+                            else
+                                if v.visual then
+                                    if v.visual:IsA("Highlight") then
+                                        v.visual.FillColor = color
+                                        v.visual.OutlineColor = color
+                                        v.visual.FillTransparency = 0.78
+                                        v.visual.OutlineTransparency = 0.05
+                                    elseif v.visual:IsA("BoxHandleAdornment") then
+                                        v.visual.Color3 = color
+                                        v.visual.Transparency = 0.72
+                                        if renderPart and renderPart:IsA("BasePart") then
+                                            v.visual.Size = renderPart.Size + Vector3.new(0.05, 0.05, 0.05)
+                                        end
+                                    end
+                                end
+                                if v.label then
+                                    v.label.TextColor3 = color
+                                end
+                            end
+                            local distInt = math.floor(dist)
+                            if distInt ~= v.lastDistanceInt then
+                                v.lastDistanceInt = distInt
+                                local priceTag = v.orePrice and string.format("$%d | ", v.orePrice) or ""
+                                v.label.Text = string.format("%s\n%s[%d studs]", oreName, priceTag, distInt)
+                            end
+                        end
+                    end
+                end
+            end)
+            if not ok then
+                -- Keep Farm tab alive even if one ore object is malformed.
+            end
+        end))
+
+        local function watchFolder(folder)
+            if not folder then return end
+            if espRuntimeHelper and type(espRuntimeHelper.bindFolder) == "function" then
+                local helperConns = espRuntimeHelper.bindFolder(
+                    folder,
+                    function() return ESP.enabled end,
+                    espApply,
+                    findOreTargetFromInstance
+                )
+                for _, conn in ipairs(helperConns) do
+                    trackConnection(conn)
+                end
+                return
+            end
+            local childAddedConn = folder.ChildAdded:Connect(function(child)
+                if not ESP.enabled then return end
+                if child:IsA("BasePart") or child:IsA("Model") then
+                    task.wait(0.1)
+                    espApply(child)
+                else
+                    task.delay(0.12, function()
+                        if not ESP.enabled then return end
+                        if not child or not child.Parent then return end
+                        for _, desc in ipairs(child:GetDescendants()) do
+                            if desc:IsA("BasePart") then
+                                local candidate = findOreTargetFromInstance(desc) or desc
+                                espApply(candidate)
+                            elseif desc:IsA("Model") then
+                                espApply(desc)
+                            end
+                        end
+                    end)
+                end
+            end)
+            trackConnection(childAddedConn)
+            local descAddedConn = folder.DescendantAdded:Connect(function(desc)
+                if not ESP.enabled then return end
+                if not (desc:IsA("BasePart") or desc:IsA("Model")) then return end
+                task.defer(function()
+                    if not ESP.enabled then return end
+                    if not desc or not desc.Parent then return end
+                    local candidate = findOreTargetFromInstance(desc) or desc
+                    espApply(candidate)
+                end)
+            end)
+            trackConnection(descAddedConn)
+        end
+
+        task.spawn(function()
+            local placedOre    = workspace:WaitForChild("PlacedOre",    30)
+            local spawnedBlocks = workspace:WaitForChild("SpawnedBlocks", 30)
+            watchFolder(placedOre)
+            watchFolder(spawnedBlocks)
+        end)
+
+        trackConnection(Players.LocalPlayer.CharacterAdded:Connect(function()
+            espClearAll()
+            if ESP.enabled then
+                task.wait(1)
+                espScanAll()
+            end
+        end))
+
+        -- Auto Mine Section
+        local AutoMineSection = Farm:CreateSection("⛏️ Auto Mining")
+        local OreLabel = Farm:CreateLabel("Auto Mine Status: Idle")
+
+        local autoMineTargetAdornee = nil
+        local autoMineHighlightInst = nil
+        local autoMineBillboardInst = nil
+
+        local function clearAutoMineTargetVisual()
+            autoMineTargetAdornee = nil
+            if autoMineHighlightInst then
+                autoMineHighlightInst.Adornee = nil
+                autoMineHighlightInst.Enabled = false
+            end
+            if autoMineBillboardInst then
+                autoMineBillboardInst.Adornee = nil
+                autoMineBillboardInst.Enabled = false
+            end
+        end
+
+        local function setAutoMineTargetVisual(targetModel, renderPart)
+            if not targetModel or not targetModel.Parent then
+                clearAutoMineTargetVisual()
+                return
+            end
+            local adornee = nil
+            if targetModel:IsA("Model") or targetModel:IsA("BasePart") then
+                adornee = targetModel
+            elseif renderPart and renderPart:IsA("BasePart") and renderPart.Parent then
+                adornee = renderPart
+            else
+                adornee = renderPart or targetModel
+            end
+            if not adornee or not adornee.Parent then
+                clearAutoMineTargetVisual()
+                return
+            end
+            if autoMineTargetAdornee == adornee and autoMineHighlightInst and autoMineHighlightInst.Enabled then
+                return
+            end
+            autoMineTargetAdornee = adornee
+
+            if not autoMineHighlightInst or not autoMineHighlightInst.Parent then
+                local hl = Instance.new("Highlight")
+                hl.Name = "RavenHub_AutoMineMarker"
+                hl.FillColor = Color3.fromRGB(55, 255, 130)
+                hl.OutlineColor = Color3.fromRGB(255, 220, 50)
+                hl.FillTransparency = 0.74
+                hl.OutlineTransparency = 0.12
+                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                hl.Parent = workspace
+                autoMineHighlightInst = hl
+            end
+            autoMineHighlightInst.Adornee = adornee
+            autoMineHighlightInst.Enabled = true
+
+            local partForBillboard = renderPart
+            if not partForBillboard or not partForBillboard.Parent or not partForBillboard:IsA("BasePart") then
+                if adornee:IsA("BasePart") then
+                    partForBillboard = adornee
+                elseif adornee:IsA("Model") then
+                    partForBillboard = adornee:FindFirstChildWhichIsA("BasePart", true)
+                end
+            end
+            if partForBillboard and partForBillboard.Parent then
+                if not autoMineBillboardInst or not autoMineBillboardInst.Parent then
+                    local bb = Instance.new("BillboardGui")
+                    bb.Name = "RavenHub_AutoMineTag"
+                    bb.AlwaysOnTop = true
+                    bb.Size = UDim2.new(0, 132, 0, 34)
+                    bb.StudsOffsetWorldSpace = Vector3.new(0, 2.9, 0)
+                    bb.MaxDistance = 420
+                    bb.LightInfluence = 0
+                    bb.Parent = workspace
+
+                    local frame = Instance.new("Frame")
+                    frame.Size = UDim2.new(1, 0, 1, 0)
+                    frame.BackgroundColor3 = Color3.fromRGB(22, 95, 58)
+                    frame.BackgroundTransparency = 0.12
+                    frame.BorderSizePixel = 0
+                    frame.Parent = bb
+
+                    local corner = Instance.new("UICorner")
+                    corner.CornerRadius = UDim.new(0, 7)
+                    corner.Parent = frame
+
+                    local stroke = Instance.new("UIStroke")
+                    stroke.Color = Color3.fromRGB(255, 230, 80)
+                    stroke.Thickness = 1.5
+                    stroke.Parent = frame
+
+                    local tl = Instance.new("TextLabel")
+                    tl.Size = UDim2.new(1, -8, 1, -6)
+                    tl.Position = UDim2.new(0, 4, 0, 3)
+                    tl.BackgroundTransparency = 1
+                    tl.Font = Enum.Font.GothamBold
+                    tl.TextSize = 15
+                    tl.TextColor3 = Color3.new(1, 1, 1)
+                    tl.Text = "⛏ AUTO MINE"
+                    tl.Parent = frame
+
+                    autoMineBillboardInst = bb
+                end
+                autoMineBillboardInst.Adornee = partForBillboard
+                autoMineBillboardInst.Enabled = true
+            else
+                if autoMineBillboardInst then
+                    autoMineBillboardInst.Adornee = nil
+                    autoMineBillboardInst.Enabled = false
+                end
+            end
+        end
+
+        local autoMineEnabled = autoSettingsLoaded.autoMineEnabled
+        local autoMineThread
+        local autoMineRange = math.clamp(autoSettingsLoaded.autoMineRange, 5, 50)
+        local autoMineDelay = math.clamp(autoSettingsLoaded.autoMineDelay, 0, 5)
+        local instantMineEnabled = autoSettingsLoaded.instantMine ~= false
+        local onlyOresEnabled = autoSettingsLoaded.onlyOres ~= false
+        local mineAnyOreEnabled = autoSettingsLoaded.mineAnyOre ~= false
+        local forceMineDamage = math.clamp(tonumber(autoSettingsLoaded.forceMineDamage) or 0, 0, 5000)
+        local forceMineMadCommId = math.max(0, math.floor(tonumber(autoSettingsLoaded.forceMineMadCommId) or 0))
+        local safeProfileEnabled = autoSettingsLoaded.safeProfileEnabled ~= false
+        local safeNearbyPauseEnabled = autoSettingsLoaded.safeNearbyPauseEnabled ~= false
+        local safeNearbyRadius = math.clamp(tonumber(autoSettingsLoaded.safeNearbyRadius) or 70, 20, 200)
+        local safeSellCooldown = math.clamp(tonumber(autoSettingsLoaded.safeSellCooldown) or 6, 2, 20)
+        local OreIgnoreList = autoSettingsLoaded.oreIgnoreList
+        local autoSellEnabled = autoSettingsLoaded.autoSellEnabled
+        local autoSellThread
+        local autoSellThreshold = 90
+        local autoSellOreCount = math.clamp(autoSettingsLoaded.autoSellOreCount, 1, 64)
+
+        local function buildSettingsPayload()
+            return {
+                settingsVersion = CURRENT_SETTINGS_VERSION,
+                autoMineEnabled = autoMineEnabled,
+                autoMineRange = autoMineRange,
+                autoMineDelay = autoMineDelay,
+                instantMine = instantMineEnabled,
+                onlyOres = onlyOresEnabled,
+                mineAnyOre = mineAnyOreEnabled,
+                forceMineDamage = forceMineDamage,
+                forceMineMadCommId = forceMineMadCommId,
+                safeProfileEnabled = safeProfileEnabled,
+                safeNearbyPauseEnabled = safeNearbyPauseEnabled,
+                safeNearbyRadius = safeNearbyRadius,
+                safeSellCooldown = safeSellCooldown,
+                oreIgnoreList = OreIgnoreList,
+                autoSellEnabled = autoSellEnabled,
+                autoSellOreCount = autoSellOreCount,
+                autoSellMethod = autoSellMethod,
+                walkSpeed = walkSpeedValue,
+                infiniteJumpEnabled = infiniteJumpEnabled,
+                sellOreKey = sellOreKeyValue,
+                oreEspEnabled = ESP.enabled,
+                oreEspDistance = ESP.maxDistance,
+                oreEspFilter = ESP.filterOre,
+                oreNameById = oreNameById,
+                oreNameByRuntime = oreNameByRuntime,
+                oreNameBySignature = oreNameBySignature,
+                oreNameBySignatureCoarse = oreNameBySignatureCoarse,
+                oreNameByColorSignature = oreNameByColorSignature,
+                sharedOreNameByColorSignature = sharedOreNameByColorSignature,
+            }
+        end
+
+        saveAutoSettings = function()
+            if settingsHelper and type(settingsHelper.saveAsync) == "function" then
+                settingsHelper.saveAsync(SETTINGS_FILE, canWriteSettingsFile, buildSettingsPayload, function(ok, err)
+                    settingsSaveOk = ok
+                    settingsLastSaveError = err
+                end)
+                return
+            end
+            if not canWriteSettingsFile then
+                settingsSaveOk = false
+                settingsLastSaveError = "writefile unavailable"
+                return
+            end
+            saveSettingsTaskId = saveSettingsTaskId + 1
+            local currentTaskId = saveSettingsTaskId
+            task.delay(0.2, function()
+                if currentTaskId ~= saveSettingsTaskId then
+                    return
+                end
+                local payload = buildSettingsPayload()
+                local okWrite, errWrite = pcall(function()
+                    writefile(SETTINGS_FILE, HttpService:JSONEncode(payload))
+                end)
+                settingsSaveOk = okWrite
+                settingsLastSaveError = okWrite and nil or (errWrite and tostring(errWrite) or "unknown")
+            end)
+        end
+
+        local function safeSetUiText(element, text)
+            if safeUiHelper and type(safeUiHelper.safeSetText) == "function" then
+                return safeUiHelper.safeSetText(element, text)
+            end
+            if not element or type(element.Set) ~= "function" then
+                return false
+            end
+            local ok = pcall(function()
+                element:Set(text)
+            end)
+            return ok
+        end
+
+        local autoMineCtx = {
+            enabled = false,
+            localPlayer = Players.LocalPlayer,
+            playersService = Players,
+            replicatedStorage = game:GetService("ReplicatedStorage"),
+            workspaceService = workspace,
+            range = autoMineRange,
+            delay = autoMineDelay,
+            instantMine = instantMineEnabled,
+            onlyOres = onlyOresEnabled,
+            mineAnyOre = mineAnyOreEnabled,
+            forceDamage = forceMineDamage,
+            forceMadCommId = forceMineMadCommId,
+            safeProfile = safeProfileEnabled,
+            safeNearbyPause = safeNearbyPauseEnabled,
+            safeNearbyRadius = safeNearbyRadius,
+            oreIgnoreList = OreIgnoreList,
+            setStatus = function(text) safeSetUiText(OreLabel, text) end,
+            clearVisual = clearAutoMineTargetVisual,
+            setVisual = setAutoMineTargetVisual,
+            trackConnection = trackConnection,
+            getOreRenderPart = getOreRenderPart,
+            getOreNameForEsp = getOreNameForEsp,
+            makeOreSignature = makeOreSignature,
+            getTargetGridPosition = getTargetGridPosition,
+            canonicalizeOreName = canonicalizeOreName,
+            pickKnownOreFromText = pickKnownOreFromText,
+            normalizeOreToken = normalizeOreToken,
+            oreReferenceFromList = oreReferenceFromList,
+            autoMineHelper = autoMineHelper,
+            sellHelper = sellHelper,
+            bagCapacity = 25,
+            bagFullThreshold = 100,
+        }
+
+        local AutoMineToggle = Farm:CreateToggle({
+            Name = "Auto Mine",
+            CurrentValue = autoMineEnabled,
+            Flag = "AutoMineToggle",
+            Callback = function(state)
+                autoMineEnabled = state
+                autoMineCtx.enabled = state
+                saveAutoSettings()
+                if autoMineEnabled then
+                    if autoMineLoopHelper and type(autoMineLoopHelper.start) == "function" then
+                        autoMineThread = autoMineLoopHelper.start(autoMineCtx)
+                    else
+                        autoMineThread = task.spawn(function()
+                            local ReplicatedStorage = game:GetService("ReplicatedStorage")
+                            local Players = game:GetService("Players")
+                            local LocalPlayer = Players.LocalPlayer
+                        local lockedTarget = nil
+                        local lastTargetSignature = nil
+                        local sameTargetLoops = 0
+                        local oreSwitchHitLimit = 2
+                        local blockedTargetUntil = {}
+                        local nextMineAllowedAt = 0
+                        local nextEquipAllowedAt = 0
+                        local lastMineFiredAt = 0
+                        local remoteMinInterval = 0.12
+                        local remoteBackoffInterval = 0.35
+                        local remoteClientDrainConnections = {}
+                        local oreContainers = {
+                            workspace:FindFirstChild("PlacedOre"),
+                            workspace:FindFirstChild("SpawnedBlocks"),
+                        }
+                        local nextContainersRefreshAt = 0
+                        local lastProgressTargetKey = nil
+                        local lastProgressDurability = nil
+                        local staleProgressHits = 0
+                        local targetLockedAt = 0
+                        local firedHitsOnTarget = 0
+                        local mineMadCommAlternateCounter = 0
+                        local invalidMadCommIds = {}
+                        local drillPacketNonce = 22000
+                        local drillCollectDisabled = false
+                        local nextTargetSearchAt = 0
+                        local targetSearchActiveInterval = 0.08
+                        local targetSearchIdleInterval = 0.28
+                        local noTargetLoopSleep = 0.14
+                        local lastAutoMineStatusText = nil
+
+                        local function randomRange(minValue, maxValue)
+                            if autoMineHelper and type(autoMineHelper.randomRange) == "function" then
+                                return autoMineHelper.randomRange(minValue, maxValue)
+                            end
+                            return minValue + (maxValue - minValue) * math.random()
+                        end
+
+                        local function setAutoMineStatus(text)
+                            if lastAutoMineStatusText == text then
+                                return
+                            end
+                            lastAutoMineStatusText = text
+                            safeSetUiText(OreLabel, text)
+                        end
+
+                        local function hasNearbyPlayers(rootPart, radius)
+                            if autoMineHelper and type(autoMineHelper.hasNearbyPlayers) == "function" then
+                                return autoMineHelper.hasNearbyPlayers(LocalPlayer, Players, rootPart, radius)
+                            end
+                            if not rootPart then return false end
+                            for _, otherPlayer in ipairs(Players:GetPlayers()) do
+                                if otherPlayer ~= LocalPlayer and otherPlayer.Character then
+                                    local otherRoot = otherPlayer.Character:FindFirstChild("HumanoidRootPart")
+                                    if otherRoot and otherRoot.Position and rootPart and rootPart.Position and (otherRoot.Position - rootPart.Position).Magnitude <= radius then
+                                        return true
+                                    end
+                                end
+                            end
+                            return false
+                        end
+                        -- Numeric MadComm folders under MadCommEvents with an Activate RemoteEvent (discovered each call).
+                        local function collectNumericMadCommActivateEntries(madCommEvents)
+                            if autoMineHelper and type(autoMineHelper.collectNumericMadCommActivateEntries) == "function" then
+                                return autoMineHelper.collectNumericMadCommActivateEntries(madCommEvents, invalidMadCommIds)
+                            end
+                            local entries = {}
+                            if not madCommEvents then
+                                return entries
+                            end
+                            for _, child in ipairs(madCommEvents:GetChildren()) do
+                                local idNum = tonumber(child.Name)
+                                if idNum and not invalidMadCommIds[idNum] then
+                                    local act = child:FindFirstChild("Activate")
+                                    if act and act:IsA("RemoteEvent") then
+                                        table.insert(entries, {
+                                            idNum = idNum,
+                                            remote = act,
+                                        })
+                                    end
+                                end
+                            end
+                            table.sort(entries, function(a, b)
+                                return a.idNum < b.idNum
+                            end)
+                            return entries
+                        end
+
+                        local function getMadCommIdFromRemote(remote)
+                            if autoMineHelper and type(autoMineHelper.getMadCommIdFromRemote) == "function" then
+                                return autoMineHelper.getMadCommIdFromRemote(remote)
+                            end
+                            if not remote or not remote.Parent then
+                                return nil
+                            end
+                            local n = tonumber(remote.Parent.Name)
+                            if not n then
+                                return nil
+                            end
+                            return math.floor(n + 0.5)
+                        end
+
+                        local function isMadCommIdAllowed(idNum)
+                            if autoMineHelper and type(autoMineHelper.isMadCommIdAllowed) == "function" then
+                                return autoMineHelper.isMadCommIdAllowed(idNum, invalidMadCommIds)
+                            end
+                            local n = tonumber(idNum)
+                            if not n then
+                                return false
+                            end
+                            n = math.floor(n + 0.5)
+                            return not invalidMadCommIds[n]
+                        end
+
+                        local function markMadCommRemoteInvalid(remote)
+                            if autoMineHelper and type(autoMineHelper.markMadCommRemoteInvalid) == "function" then
+                                autoMineHelper.markMadCommRemoteInvalid(remote, invalidMadCommIds)
+                                return
+                            end
+                            local idNum = getMadCommIdFromRemote(remote)
+                            if idNum then
+                                invalidMadCommIds[idNum] = true
+                            end
+                        end
+
+                        local function resolveToolMadCommId(tool)
+                            if autoMineHelper and type(autoMineHelper.resolveToolMadCommId) == "function" then
+                                return autoMineHelper.resolveToolMadCommId(tool)
+                            end
+                            if not tool then return nil end
+                            local id = tonumber(tool:GetAttribute("MadCommId"))
+                            if id then
+                                return math.floor(id + 0.5)
+                            end
+                            local queue = { tool }
+                            local qi = 1
+                            while qi <= #queue do
+                                local node = queue[qi]
+                                qi = qi + 1
+                                if node and node.GetAttributes then
+                                    local attrs = node:GetAttributes()
+                                    for k, v in pairs(attrs) do
+                                        if type(k) == "string" and string.find(string.lower(k), "madcomm", 1, true) then
+                                            local n = tonumber(v)
+                                            if n then
+                                                return math.floor(n + 0.5)
+                                            end
+                                        end
+                                    end
+                                end
+                                if node and node.GetChildren then
+                                    for _, child in ipairs(node:GetChildren()) do
+                                        table.insert(queue, child)
+                                        if child:IsA("IntValue") or child:IsA("NumberValue") or child:IsA("StringValue") then
+                                            local ln = string.lower(tostring(child.Name))
+                                            if string.find(ln, "madcomm", 1, true) then
+                                                local n = tonumber(child.Value)
+                                                if n then
+                                                    return math.floor(n + 0.5)
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                            return nil
+                        end
+
+                        local function resolveActivateRemote(tool)
+                            local madCommEvents = ReplicatedStorage:FindFirstChild("MadCommEvents")
+                            if autoMineHelper and type(autoMineHelper.resolveActivateRemote) == "function" then
+                                return autoMineHelper.resolveActivateRemote(
+                                    tool,
+                                    madCommEvents,
+                                    forceMineMadCommId,
+                                    isMadCommIdAllowed,
+                                    resolveToolMadCommId,
+                                    function(events)
+                                        return collectNumericMadCommActivateEntries(events)
+                                    end
+                                )
+                            end
+                            if forceMineMadCommId > 0 and madCommEvents then
+                                local forcedFolder = madCommEvents:FindFirstChild(tostring(forceMineMadCommId))
+                                local forcedRemote = forcedFolder and forcedFolder:FindFirstChild("Activate")
+                                if forcedRemote and forcedRemote:IsA("RemoteEvent") and isMadCommIdAllowed(forceMineMadCommId) then
+                                    return forcedRemote
+                                end
+                            end
+                            -- Must match equipped pickaxe: wrong MadComm folder => server ignores hits (HP never drops).
+                            if tool then
+                                local madCommId = resolveToolMadCommId(tool)
+                                if madCommId and madCommEvents then
+                                    local commFolder = madCommEvents:FindFirstChild(tostring(madCommId))
+                                    local remote = commFolder and commFolder:FindFirstChild("Activate")
+                                    if remote and isMadCommIdAllowed(madCommId) then
+                                        return remote
+                                    end
+                                end
+                                local nested = tool:FindFirstChild("Activate", true)
+                                if nested then
+                                    return nested
+                                end
+                            end
+                            if madCommEvents then
+                                local discovered = collectNumericMadCommActivateEntries(madCommEvents)
+                                if #discovered > 0 then
+                                    -- Folder ids can change each session; never hardcode. Prefer tool MadCommId; else first sorted id.
+                                    return discovered[1].remote
+                                end
+                            end
+                            return nil
+                        end
+
+                        -- Round-robin across discovered numeric Activate remotes only when pickaxe MadCommId is absent.
+                        local function pickMineActivateRemoteAlternateDiscovered(tool)
+                            local madCommEvents = ReplicatedStorage:FindFirstChild("MadCommEvents")
+                            if autoMineHelper and type(autoMineHelper.pickMineActivateRemoteAlternateDiscovered) == "function" then
+                                local remote, nextCounter = autoMineHelper.pickMineActivateRemoteAlternateDiscovered(
+                                    tool,
+                                    madCommEvents,
+                                    forceMineMadCommId,
+                                    isMadCommIdAllowed,
+                                    resolveToolMadCommId,
+                                    function(events)
+                                        return collectNumericMadCommActivateEntries(events)
+                                    end,
+                                    mineMadCommAlternateCounter
+                                )
+                                mineMadCommAlternateCounter = tonumber(nextCounter) or mineMadCommAlternateCounter
+                                return remote
+                            end
+                            if forceMineMadCommId > 0 and madCommEvents then
+                                local forcedFolder = madCommEvents:FindFirstChild(tostring(forceMineMadCommId))
+                                local forcedRemote = forcedFolder and forcedFolder:FindFirstChild("Activate")
+                                if forcedRemote and forcedRemote:IsA("RemoteEvent") and isMadCommIdAllowed(forceMineMadCommId) then
+                                    return forcedRemote
+                                end
+                            end
+                            if tool and madCommEvents then
+                                local madCommId = resolveToolMadCommId(tool)
+                                if madCommId then
+                                    local folder = madCommEvents:FindFirstChild(tostring(madCommId))
+                                    local bound = folder and folder:FindFirstChild("Activate")
+                                    if bound and bound:IsA("RemoteEvent") and isMadCommIdAllowed(madCommId) then
+                                        return bound
+                                    end
+                                end
+                                local nested = tool:FindFirstChild("Activate", true)
+                                if nested and nested:IsA("RemoteEvent") then
+                                    return nested
+                                end
+                            end
+                            local discovered = madCommEvents and collectNumericMadCommActivateEntries(madCommEvents)
+                                or {}
+                            if #discovered >= 2 then
+                                mineMadCommAlternateCounter = mineMadCommAlternateCounter + 1
+                                local idx = ((mineMadCommAlternateCounter - 1) % #discovered) + 1
+                                return discovered[idx].remote
+                            end
+                            if #discovered == 1 then
+                                return discovered[1].remote
+                            end
+                            return resolveActivateRemote(tool)
+                        end
+
+                        -- Captured mining packets: FireServer(damage, Vector3int16 grid).
+                        local function mineGridForActivateRemote(gridPos)
+                            if autoMineHelper and type(autoMineHelper.mineGridForActivateRemote) == "function" then
+                                return autoMineHelper.mineGridForActivateRemote(gridPos)
+                            end
+                            local x = math.floor(tonumber(gridPos.X or gridPos.x) or 0)
+                            local y = math.floor(tonumber(gridPos.Y or gridPos.y) or 0)
+                            local z = math.floor(tonumber(gridPos.Z or gridPos.z) or 0)
+                            return Vector3int16.new(x, y, z)
+                        end
+                        local function buildGridCandidates(primaryGridPos, renderPart)
+                            if autoMineHelper and type(autoMineHelper.buildGridCandidates) == "function" then
+                                return autoMineHelper.buildGridCandidates(primaryGridPos, renderPart)
+                            end
+                            local candidates = {}
+                            local seen = {}
+                            local function addCandidate(pos)
+                                if not pos then return end
+                                local vec = mineGridForActivateRemote(pos)
+                                local key = tostring(vec.X) .. "|" .. tostring(vec.Y) .. "|" .. tostring(vec.Z)
+                                if seen[key] then return end
+                                seen[key] = true
+                                table.insert(candidates, vec)
+                            end
+                            addCandidate(primaryGridPos)
+                            if renderPart then
+                                local worldPos = renderPart.Position
+                                if worldPos then
+                                    -- Some servers want raw world-int grid; others want scaled grid. Try both safely.
+                                    addCandidate(Vector3int16.new(
+                                        math.floor(worldPos.X),
+                                        math.floor(worldPos.Y),
+                                        math.floor(worldPos.Z)
+                                    ))
+                                    addCandidate(Vector3int16.new(
+                                        math.floor(worldPos.X / 4),
+                                        math.floor(worldPos.Y / 4),
+                                        math.floor(worldPos.Z / 4)
+                                    ))
+                                end
+                            end
+                            return candidates
+                        end
+
+                        local function ensureRemoteClientDrain(remote)
+                            if autoMineHelper and type(autoMineHelper.ensureRemoteClientDrain) == "function" then
+                                autoMineHelper.ensureRemoteClientDrain(remote, remoteClientDrainConnections, trackConnection)
+                                return
+                            end
+                            if not remote or not remote:IsA("RemoteEvent") then
+                                return
+                            end
+                            if remoteClientDrainConnections[remote] then
+                                return
+                            end
+                            -- Drain server->client events from MadComm Activate remotes to avoid queue overflow logs.
+                            local conn = remote.OnClientEvent:Connect(function()
+                                -- Intentionally ignored.
+                            end)
+                            remoteClientDrainConnections[remote] = conn
+                            trackConnection(conn)
+                        end
+
+                        local function nextDrillPacketNonce(step)
+                            if autoMineHelper and type(autoMineHelper.nextDrillPacketNonce) == "function" then
+                                drillPacketNonce = autoMineHelper.nextDrillPacketNonce(drillPacketNonce, step)
+                                return drillPacketNonce
+                            end
+                            local s = tonumber(step) or 1
+                            drillPacketNonce = drillPacketNonce + math.max(1, math.floor(s))
+                            return drillPacketNonce
+                        end
+
+                        local function isKnownDrillVehicle(humanoid)
+                            if not humanoid or not humanoid.SeatPart then
+                                return false
+                            end
+                            local seat = humanoid.SeatPart
+                            local names = {
+                                "minimuncher",
+                                "exadrill",
+                                "speedminer",
+                            }
+                            local function matches(name)
+                                local ln = string.lower(tostring(name or ""))
+                                for _, token in ipairs(names) do
+                                    if string.find(ln, token, 1, true) then
+                                        return true
+                                    end
+                                end
+                                return false
+                            end
+                            if matches(seat.Name) then
+                                return true
+                            end
+                            local node = seat.Parent
+                            local depth = 0
+                            while node and depth < 7 do
+                                if matches(node.Name) then
+                                    return true
+                                end
+                                node = node.Parent
+                                depth = depth + 1
+                            end
+                            return false
+                        end
+
+                        local function resolveDrillRemotes()
+                            local madCommEvents = ReplicatedStorage:FindFirstChild("MadCommEvents")
+                            if not madCommEvents then
+                                return nil, nil, nil
+                            end
+                            local folder = madCommEvents:FindFirstChild("1313")
+                            if not folder and forceMineMadCommId > 0 then
+                                folder = madCommEvents:FindFirstChild(tostring(forceMineMadCommId))
+                            end
+                            local collectFolder = madCommEvents:FindFirstChild("1358")
+                            local drillCollectToggle = collectFolder and collectFolder:FindFirstChild("DrillOreCollectToggle")
+                            if drillCollectToggle and not drillCollectToggle:IsA("RemoteEvent") then
+                                drillCollectToggle = nil
+                            end
+                            if not folder then
+                                return nil, nil, drillCollectToggle
+                            end
+                            local drillActivate = folder:FindFirstChild("DrillActivate")
+                            local drillMine = folder:FindFirstChild("DrillMine")
+                            local folderIdNum = tonumber(folder.Name)
+                            if folderIdNum and not isMadCommIdAllowed(folderIdNum) then
+                                return nil, nil, drillCollectToggle
+                            end
+                            if drillActivate and drillActivate:IsA("RemoteEvent")
+                                and drillMine and drillMine:IsA("RemoteEvent")
+                            then
+                                return drillActivate, drillMine, drillCollectToggle
+                            end
+                            return nil, nil, drillCollectToggle
+                        end
+
+                        local function getDescendantGridPosition(target)
+                            if not target or not target.GetDescendants then return nil end
+                            for _, desc in ipairs(target:GetDescendants()) do
+                                if desc:IsA("Instance") then
+                                    local p = desc:GetAttribute("ChunkPosition") or desc:GetAttribute("GridPosition")
+                                    if p then return p end
+                                end
+                            end
+                            return nil
+                        end
+
+                        local function getTargetGridPositionDeep(target, renderPart)
+                            local gridPos = getTargetGridPosition(target, renderPart)
+                            if gridPos then return gridPos end
+                            gridPos = getDescendantGridPosition(target)
+                            if gridPos then return gridPos end
+                            if renderPart then
+                                gridPos = getDescendantGridPosition(renderPart)
+                                if gridPos then return gridPos end
+                            end
+                            return nil
+                        end
+
+                        local function GetTool(characterOnly)
+                            for _,v in pairs(LocalPlayer.Character:GetChildren()) do
+                                if v:FindFirstChild("EquipRemote") and string.lower(v.Name):find("pickaxe") then
+                                    return v
+                                end
+                            end
+                            if characterOnly then
+                                return nil
+                            end
+                            for _,v in pairs(LocalPlayer:FindFirstChild("InnoBackpack") and LocalPlayer.InnoBackpack:GetChildren() or {}) do
+                                if v:FindFirstChild("EquipRemote") and string.lower(v.Name):find("pickaxe") then
+                                    return v
+                                end
+                            end
+                            return nil
+                        end
+
+                        local function getNumberLike(value)
+                            if type(value) == "number" then return value end
+                            if typeof(value) == "number" then return value end
+                            if type(value) == "string" then
+                                local n = tonumber(value)
+                                if n then return n end
+                            end
+                            return nil
+                        end
+
+                        local function getNumericByKeys(instance, keys)
+                            if not instance or type(keys) ~= "table" then return nil end
+                            for _, key in ipairs(keys) do
+                                local attr = instance:GetAttribute(key)
+                                local n = getNumberLike(attr)
+                                if n then return n end
+                            end
+                            for _, key in ipairs(keys) do
+                                local child = instance:FindFirstChild(key, true)
+                                if child then
+                                    local n = nil
+                                    if child:IsA("NumberValue") or child:IsA("IntValue") or child:IsA("DoubleValue") then
+                                        n = child.Value
+                                    elseif child:IsA("StringValue") then
+                                        n = tonumber(child.Value)
+                                    end
+                                    if n then return n end
+                                end
+                            end
+                            return nil
+                        end
+
+                        local function getOreEconomyForAutoMine(oreName, target, renderPart)
+                            local canonical = canonicalizeOreName(oreName) or pickKnownOreFromText(oreName)
+                            local row = canonical and oreReferenceFromList[canonical]
+                            if not row then
+                                return {
+                                    price = nil,
+                                    required = nil,
+                                    canonical = canonical,
+                                }
+                            end
+                            return {
+                                price = row.price,
+                                required = row.required,
+                                canonical = canonical,
+                            }
+                        end
+
+                        local function pickaxeCanMineOre(pickaxeDamage, economy)
+                            if mineAnyOreEnabled ~= false then
+                                return true
+                            end
+                            if forceMineDamage > 0 then
+                                return true
+                            end
+                            if type(economy) ~= "table" then return true end
+                            if economy.required == nil then return true end
+                            return (tonumber(pickaxeDamage) or 0) >= economy.required
+                        end
+
+                        local function resolvePickaxeDamage(tool)
+                            if not tool then return 10 end
+                            local pickaxeStrengthByName = {
+                                ["rusty pickaxe"] = 7,
+                                ["copper pickaxe"] = 12,
+                                ["iron pickaxe"] = 20,
+                                ["steel pickaxe"] = 35,
+                                ["platinum pickaxe"] = 60,
+                                ["titanium pickaxe"] = 100,
+                                ["infernum pickaxe"] = 200,
+                                ["diamond pickaxe"] = 400,
+                                ["mithril pickaxe"] = 600,
+                                ["adamantium pickaxe"] = 800,
+                                ["unobtainium pickaxe"] = 1000,
+                            }
+                            local damageKeys = {
+                                "Damage", "MineDamage", "MiningDamage", "Power", "MiningPower", "Strength", "HitPower",
+                            }
+                            local damage = getNumericByKeys(tool, damageKeys)
+                            if not damage and tool.Parent then
+                                damage = getNumericByKeys(tool.Parent, damageKeys)
+                            end
+                            if not damage and tool.GetDescendants then
+                                local bestCandidate = nil
+                                for _, desc in ipairs(tool:GetDescendants()) do
+                                    if desc:IsA("NumberValue") or desc:IsA("IntValue") or desc:IsA("DoubleValue") or desc:IsA("StringValue") then
+                                        local ln = string.lower(tostring(desc.Name))
+                                        if string.find(ln, "damage", 1, true)
+                                            or string.find(ln, "mining", 1, true)
+                                            or string.find(ln, "power", 1, true)
+                                            or string.find(ln, "strength", 1, true)
+                                        then
+                                            local raw = desc:IsA("StringValue") and tonumber(desc.Value) or tonumber(desc.Value)
+                                            if raw and raw > 0 then
+                                                if not bestCandidate then
+                                                    bestCandidate = raw
+                                                else
+                                                    -- Prefer practical ranges over outliers from unrelated stats.
+                                                    if (raw <= 1500 and (bestCandidate > 1500 or raw > bestCandidate))
+                                                        or (bestCandidate > 1500 and raw < bestCandidate)
+                                                    then
+                                                        bestCandidate = raw
+                                                    end
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                                damage = bestCandidate
+                            end
+                            if not damage then
+                                local key = string.lower(tostring(tool.Name))
+                                damage = pickaxeStrengthByName[key]
+                            end
+                            damage = tonumber(damage) or 10
+                            return math.clamp(damage, 1, 9999)
+                        end
+
+                        local function getTargetDurability(target, renderPart)
+                            local hpKeys = {
+                                "Health", "HP", "HitPoints", "Hitpoints", "Durability", "MineHealth", "OreHealth", "Integrity",
+                            }
+                            local durability = getNumericByKeys(target, hpKeys)
+                            if durability == nil and renderPart then
+                                durability = getNumericByKeys(renderPart, hpKeys)
+                            end
+                            if durability == nil and target and target.GetDescendants then
+                                for _, desc in ipairs(target:GetDescendants()) do
+                                    if desc:IsA("NumberValue") or desc:IsA("IntValue") then
+                                        local n = string.lower(desc.Name)
+                                        if string.find(n, "health", 1, true)
+                                            or string.find(n, "durability", 1, true)
+                                            or string.find(n, "hp", 1, true)
+                                        then
+                                            durability = desc.Value
+                                            break
+                                        end
+                                    end
+                                end
+                            end
+                            return tonumber(durability)
+                        end
+
+                        local function isIgnoredOre(oreName)
+                            if type(OreIgnoreList) ~= "table" then return false end
+                            if type(oreName) ~= "string" or oreName == "" then return false end
+                            local canonical = canonicalizeOreName(oreName) or normalizeOreToken(oreName) or oreName
+                            if OreIgnoreList[canonical] == true or OreIgnoreList[oreName] == true then
+                                return true
+                            end
+                            return table.find(OreIgnoreList, canonical) ~= nil or table.find(OreIgnoreList, oreName) ~= nil
+                        end
+
+                        local function isTargetValid(target, rootPart, pickaxeDamage)
+                            if not target or not target.Parent or not rootPart then
+                                return false
+                            end
+                            local renderPart = getOreRenderPart(target)
+                            if not renderPart or not renderPart.Parent then
+                                return false
+                            end
+                            local oreName = getOreNameForEsp(target, renderPart)
+                            if isIgnoredOre(oreName) then
+                                return false
+                            end
+                            local economy = getOreEconomyForAutoMine(oreName, target, renderPart)
+                            if not pickaxeCanMineOre(pickaxeDamage, economy) then
+                                return false
+                            end
+                            if not rootPart or not rootPart.Position or not renderPart or not renderPart.Position then
+                                return false
+                            end
+                            local dist = (rootPart.Position - renderPart.Position).Magnitude
+                            return dist <= (autoMineRange + 8)
+                        end
+
+                        local function markTargetLoop(target, renderPart)
+                            local sig = makeOreSignature(target, renderPart) or tostring(target)
+                            if sig == lastTargetSignature then
+                                sameTargetLoops = sameTargetLoops + 1
+                            else
+                                lastTargetSignature = sig
+                                sameTargetLoops = 1
+                            end
+                        end
+
+                        local function resetTargetLock()
+                            lockedTarget = nil
+                            lastTargetSignature = nil
+                            sameTargetLoops = 0
+                            targetLockedAt = 0
+                            firedHitsOnTarget = 0
+                        end
+
+                        local function getTargetKey(target, renderPart)
+                            return makeOreSignature(target, renderPart) or tostring(target)
+                        end
+
+                        local function isTargetTemporarilyBlocked(target, renderPart)
+                            local key = getTargetKey(target, renderPart)
+                            local t = blockedTargetUntil[key]
+                            if not t then return false end
+                            if t <= os.clock() then
+                                blockedTargetUntil[key] = nil
+                                return false
+                            end
+                            return true
+                        end
+
+                        local function blockTargetTemporarily(target, renderPart, seconds)
+                            local key = getTargetKey(target, renderPart)
+                            blockedTargetUntil[key] = os.clock() + (seconds or 2.0)
+                        end
+
+                        while autoMineEnabled do
+                            if not LocalPlayer then task.wait(0.1) continue end
+                            local Character = LocalPlayer.Character
+                            if not Character then task.wait(0.1) continue end
+                            local humanoid = Character:FindFirstChildOfClass("Humanoid")
+                            local inVehicleDrill = isKnownDrillVehicle(humanoid)
+                            if not inVehicleDrill then
+                                drillCollectDisabled = false
+                            end
+                            local noTargetMode = false
+                            local Tool = GetTool()
+                            local isPickaxe = Tool and string.lower(Tool.Name):find("pickaxe") ~= nil
+                            if not inVehicleDrill and Tool and Tool.Parent == LocalPlayer.InnoBackpack and isPickaxe then
+                                local equipRemote = Tool:FindFirstChild("EquipRemote")
+                                local canEquip = true
+                                if safeProfileEnabled and os.clock() < nextEquipAllowedAt then
+                                    canEquip = false
+                                end
+                                if equipRemote and canEquip then
+                                    equipRemote:FireServer(true)
+                                    if safeProfileEnabled then
+                                        nextEquipAllowedAt = os.clock() + randomRange(0.8, 1.5)
+                                    end
+                                    setAutoMineStatus("Auto Mine Status: equipping pickaxe")
+                                    task.wait(0.22)
+                                end
+                            end
+                            Tool = GetTool(true)
+                            if not inVehicleDrill and not Tool then
+                                clearAutoMineTargetVisual()
+                                resetTargetLock()
+                                setAutoMineStatus("Auto Mine Status: waiting pickaxe equip")
+                                task.wait(0.1)
+                                continue
+                            end
+                            local root = Character and Character:FindFirstChild("HumanoidRootPart")
+                            if root then
+                                if safeProfileEnabled and safeNearbyPauseEnabled and hasNearbyPlayers(root, safeNearbyRadius) then
+                                    resetTargetLock()
+                                    clearAutoMineTargetVisual()
+                                    setAutoMineStatus("Auto Mine Status: paused (players nearby)")
+                                    task.wait(randomRange(0.3, 0.7))
+                                    continue
+                                end
+                                local pickaxeDamage = inVehicleDrill and 9999 or resolvePickaxeDamage(Tool)
+                                if forceMineDamage > 0 then
+                                    pickaxeDamage = forceMineDamage
+                                end
+                                local closestBlock, closestDist = nil, math.huge
+                                local weakPickaxeNoTargets = false
+
+                                local now = os.clock()
+                                if now >= nextContainersRefreshAt then
+                                    oreContainers[1] = workspace:FindFirstChild("PlacedOre")
+                                    oreContainers[2] = workspace:FindFirstChild("SpawnedBlocks")
+                                    nextContainersRefreshAt = now + 1.5
+                                end
+
+                                if isTargetValid(lockedTarget, root, pickaxeDamage) then
+                                    closestBlock = lockedTarget
+                                    nextTargetSearchAt = now + targetSearchActiveInterval
+                                else
+                                    resetTargetLock()
+                                    clearAutoMineTargetVisual()
+                                    if now >= nextTargetSearchAt then
+                                        closestBlock = nil
+                                        closestDist = math.huge
+                                        local bestPrice = -math.huge
+                                        local anyInRange = false
+                                        local anyMineable = false
+                                        for _, container in ipairs(oreContainers) do
+                                            if container then
+                                                for _, v in pairs(container:GetChildren()) do
+                                                    local renderPart = getOreRenderPart(v)
+                                                    if not renderPart then continue end
+                                                    if isTargetTemporarilyBlocked(v, renderPart) then continue end
+                                                    local oreName = getOreNameForEsp(v, renderPart)
+                                                    if isIgnoredOre(oreName) then continue end
+                                                    if not root or not root.Position or not renderPart or not renderPart.Position then continue end
+                                                    local dist = (root.Position - renderPart.Position).Magnitude
+                                                    if dist and dist <= autoMineRange then
+                                                        anyInRange = true
+                                                        local economy = getOreEconomyForAutoMine(oreName, v, renderPart)
+                                                        if pickaxeCanMineOre(pickaxeDamage, economy) then
+                                                            anyMineable = true
+                                                            local p = economy.price
+                                                            if p == nil then
+                                                                p = -1
+                                                            end
+                                                            if p > bestPrice or (p == bestPrice and dist < closestDist) then
+                                                                bestPrice = p
+                                                                closestDist = dist
+                                                                closestBlock = v
+                                                            end
+                                                        end
+                                                    end
+                                                end
+                                            end
+                                        end
+                                        if not closestBlock and anyInRange and not anyMineable then
+                                            weakPickaxeNoTargets = true
+                                        end
+                                        lockedTarget = closestBlock
+                                        if lockedTarget then
+                                            targetLockedAt = os.clock()
+                                            firedHitsOnTarget = 0
+                                            nextTargetSearchAt = now + targetSearchActiveInterval
+                                        else
+                                            nextTargetSearchAt = now + targetSearchIdleInterval
+                                        end
+                                    end
+                                end
+
+                                if closestBlock then
+                                    local renderPart = getOreRenderPart(closestBlock)
+                                    if not renderPart or not renderPart.Parent then
+                                        clearAutoMineTargetVisual()
+                                        setAutoMineStatus("Auto Mine Status: switching ore (no render part)")
+                                        resetTargetLock()
+                                        task.wait(0.08)
+                                        continue
+                                    end
+
+
+
+                                    setAutoMineTargetVisual(closestBlock, renderPart)
+                                    local oreName = getOreNameForEsp(closestBlock, renderPart)
+                                    local targetKey = getTargetKey(closestBlock, renderPart)
+                                    local targetDurability = getTargetDurability(closestBlock, renderPart)
+                                    -- Server may reject hits (wrong plot, desync, anti-cheat): HP jumps up after we already damaged once.
+                                    if lastProgressTargetKey == targetKey
+                                        and lastProgressDurability ~= nil
+                                        and targetDurability ~= nil
+                                        and firedHitsOnTarget >= 1
+                                    then
+                                        local prevD = lastProgressDurability
+                                        local jumpEps = math.max(2, prevD * 0.035)
+                                        if targetDurability > prevD + jumpEps then
+                                            setAutoMineStatus("Auto Mine Status: ore HP reset (server) — skip block")
+                                            lastProgressTargetKey = nil
+                                            lastProgressDurability = nil
+                                            staleProgressHits = 0
+                                            blockTargetTemporarily(closestBlock, renderPart, 12.0)
+                                            clearAutoMineTargetVisual()
+                                            resetTargetLock()
+                                            task.wait(0.12)
+                                            continue
+                                        end
+                                    end
+                                    local adaptiveMinInterval = math.clamp(0.9 / math.max(1, pickaxeDamage), 0.08, 0.55)
+                                    local elapsedOnTarget = (targetLockedAt > 0) and (os.clock() - targetLockedAt) or 0
+                                    -- Only treat "no progress" when we are actually allowed to fire; otherwise rate-limit waits
+                                    -- look identical to stuck HP and falsely ramp staleProgressHits.
+                                    local nowMine = os.clock()
+                                    local readyToFireAt = math.max(nextMineAllowedAt, lastMineFiredAt + adaptiveMinInterval)
+                                    local canCountStale = nowMine >= readyToFireAt - 0.02
+                                    if lastProgressTargetKey ~= targetKey or not lastProgressDurability or not targetDurability then
+                                        staleProgressHits = 0
+                                        firedHitsOnTarget = 0
+                                    elseif canCountStale then
+                                        if targetDurability >= (lastProgressDurability - 0.001) then
+                                            staleProgressHits = staleProgressHits + 1
+                                        else
+                                            staleProgressHits = 0
+                                            firedHitsOnTarget = 0
+                                        end
+                                    end
+                                    if staleProgressHits > 0 then
+                                        adaptiveMinInterval = math.min(0.95, adaptiveMinInterval + (staleProgressHits * 0.06))
+                                    end
+                                    local expectedHits = nil
+                                    if targetDurability and targetDurability > 0 and pickaxeDamage > 0 then
+                                        expectedHits = math.max(1, math.ceil(targetDurability / pickaxeDamage))
+                                    end
+                                    -- High-HP ores need many hits; old caps (15 hits / 6s) forced re-target before the block could break.
+                                    local hitSwitchLimit = oreSwitchHitLimit
+                                    if expectedHits then
+                                        hitSwitchLimit = math.ceil(expectedHits * 1.9 + 18)
+                                        hitSwitchLimit = math.clamp(hitSwitchLimit, oreSwitchHitLimit, 1200)
+                                    end
+                                    local hardHitLimit
+                                    if expectedHits then
+                                        hardHitLimit = math.ceil(expectedHits * 2.25 + 36)
+                                        hardHitLimit = math.clamp(hardHitLimit, 40, 1800)
+                                    else
+                                        hardHitLimit = math.clamp(math.ceil(480 / math.max(1, pickaxeDamage)), 24, 160)
+                                    end
+                                    local perHitDelayEst = math.max(autoMineDelay, adaptiveMinInterval, 0.1)
+                                    local targetTimeLimit
+                                    if expectedHits then
+                                        targetTimeLimit = math.clamp(expectedHits * perHitDelayEst * 4.2 + 16, 20, 720)
+                                    else
+                                        targetTimeLimit = math.clamp(14 * perHitDelayEst * 2.2, 10, 120)
+                                    end
+                                    local staleProgressCap = 4
+                                    if expectedHits and expectedHits > 45 then
+                                        staleProgressCap = 18
+                                    elseif expectedHits and expectedHits > 18 then
+                                        staleProgressCap = 12
+                                    end
+                                    local staleGraceHits = expectedHits and math.clamp(math.floor(expectedHits * 0.45) + 8, 10, 220) or 10
+                                    local staleMinElapsed = expectedHits and math.clamp(perHitDelayEst * math.min(expectedHits * 0.4, 70), 2.5, 34) or 2.8
+                                    local canSwitchFromNoProgress = staleProgressHits >= staleProgressCap
+                                        and firedHitsOnTarget >= staleGraceHits
+                                        and elapsedOnTarget >= staleMinElapsed
+                                    if canSwitchFromNoProgress then
+                                        setAutoMineStatus("Auto Mine Status: switching ore (no progress)")
+                                        blockTargetTemporarily(closestBlock, renderPart, 3.0)
+                                        clearAutoMineTargetVisual()
+                                        resetTargetLock()
+                                        task.wait(0.08)
+                                        continue
+                                    end
+                                    if elapsedOnTarget > targetTimeLimit then
+                                        setAutoMineStatus("Auto Mine Status: switching ore (too long)")
+                                        blockTargetTemporarily(closestBlock, renderPart, 2.8)
+                                        clearAutoMineTargetVisual()
+                                        resetTargetLock()
+                                        task.wait(0.08)
+                                        continue
+                                    end
+                                    if firedHitsOnTarget >= hardHitLimit then
+                                        setAutoMineStatus("Auto Mine Status: switching ore (no effect)")
+                                        blockTargetTemporarily(closestBlock, renderPart, 3.0)
+                                        clearAutoMineTargetVisual()
+                                        resetTargetLock()
+                                        task.wait(0.08)
+                                        continue
+                                    end
+                                    local gridPos = getTargetGridPositionDeep(closestBlock, renderPart)
+                                    if not gridPos then
+                                        local worldPos = renderPart and renderPart.Position
+                                        if not worldPos then
+                                            clearAutoMineTargetVisual()
+                                            setAutoMineStatus("Auto Mine Status: target no position")
+                                            task.wait(0.03)
+                                            continue
+                                        end
+                                        gridPos = Vector3int16.new(
+                                            math.floor(worldPos.X / 4),
+                                            math.floor(worldPos.Y / 4),
+                                            math.floor(worldPos.Z / 4)
+                                        )
+                                    end
+                                    local gridCandidates = buildGridCandidates(gridPos, renderPart)
+                                    local gridForRemote = gridCandidates[1] or mineGridForActivateRemote(gridPos)
+                                    if #gridCandidates >= 2 and staleProgressHits >= 2 then
+                                        local altIdx = (firedHitsOnTarget % #gridCandidates) + 1
+                                        gridForRemote = gridCandidates[altIdx]
+                                    end
+                                    local firedOk = false
+                                    local attemptedFire = false
+                                    local fireFailed = false
+                                    local mineModeText = "pickaxe"
+                                    local firedActivateRemote = nil
+                                    local firedMineRemote = nil
+                                    local now = os.clock()
+                                    local minReadyAt = math.max(nextMineAllowedAt, lastMineFiredAt + adaptiveMinInterval)
+                                    if now < minReadyAt then
+                                        task.wait(math.max(0.03, minReadyAt - now))
+                                        continue
+                                    end
+                                    local cellInt = nil
+                                    if autoMineHelper and type(autoMineHelper.getOreCell) == "function" then
+                                        cellInt = autoMineHelper.getOreCell(renderPart)
+                                    else
+                                        local terrain = workspace:FindFirstChildOfClass("Terrain")
+                                        if terrain and renderPart and renderPart.Position then
+                                            cellInt = terrain:WorldToCell(renderPart.Position)
+                                        end
+                                    end
+                                    if not cellInt and renderPart and renderPart.Position then
+                                        local wp = renderPart.Position
+                                        cellInt = Vector3int16.new(math.floor(wp.X), math.floor(wp.Y), math.floor(wp.Z))
+                                    end
+
+                                    if inVehicleDrill then
+                                        local drillActivateRemote, drillMineRemote, drillCollectToggleRemote = resolveDrillRemotes()
+                                        if drillActivateRemote and drillMineRemote then
+                                            attemptedFire = true
+                                            firedActivateRemote = drillActivateRemote
+                                            firedMineRemote = drillMineRemote
+                                            ensureRemoteClientDrain(drillActivateRemote)
+                                            ensureRemoteClientDrain(drillMineRemote)
+                                            if drillCollectToggleRemote then
+                                                ensureRemoteClientDrain(drillCollectToggleRemote)
+                                                if not drillCollectDisabled then
+                                                    pcall(function()
+                                                        drillCollectToggleRemote:FireServer(false)
+                                                    end)
+                                                    drillCollectDisabled = true
+                                                end
+                                            end
+                                            local okFire = pcall(function()
+                                                if drillActivateRemote:IsA("RemoteFunction") then
+                                                    drillActivateRemote:InvokeServer(true)
+                                                else
+                                                    drillActivateRemote:FireServer(true)
+                                                end
+                                                if drillMineRemote:IsA("RemoteFunction") then
+                                                    drillMineRemote:InvokeServer(cellInt)
+                                                else
+                                                    drillMineRemote:FireServer(cellInt)
+                                                end
+                                            end)
+                                            firedOk = okFire
+                                            fireFailed = not okFire
+                                            mineModeText = "drill"
+                                        end
+                                    else
+                                        local pickaxeComp = autoMineHelper and type(autoMineHelper.getPickaxeComponent) == "function" and autoMineHelper.getPickaxeComponent(player) or nil
+                                        if pickaxeComp and pickaxeComp.ActivateRemote then
+                                            attemptedFire = true
+                                            firedActivateRemote = pickaxeComp.ActivateRemote._Remote
+                                            local okFire = pcall(function()
+                                                pickaxeComp.ActivateRemote:InvokeServer(cellInt)
+                                            end)
+                                            firedOk = okFire
+                                            fireFailed = not okFire
+                                        else
+                                            local activateRemote = pickMineActivateRemoteAlternateDiscovered(Tool)
+                                            if activateRemote then
+                                                attemptedFire = true
+                                                firedActivateRemote = activateRemote
+                                                ensureRemoteClientDrain(activateRemote)
+                                                local okFire = pcall(function()
+                                                    if activateRemote:IsA("RemoteFunction") then
+                                                        activateRemote:InvokeServer(cellInt)
+                                                    else
+                                                        activateRemote:FireServer(cellInt)
+                                                    end
+                                                end)
+                                                firedOk = okFire
+                                                fireFailed = not okFire
+                                            end
+                                        end
+                                    end
+                                    if firedOk then
+                                        lastMineFiredAt = os.clock()
+                                        firedHitsOnTarget = firedHitsOnTarget + 1
+                                        lastProgressTargetKey = targetKey
+                                        lastProgressDurability = targetDurability
+                                        markTargetLoop(closestBlock, renderPart)
+                                        if sameTargetLoops >= hitSwitchLimit then
+                                            setAutoMineStatus("Auto Mine Status: switching ore (hit limit)")
+                                            blockTargetTemporarily(closestBlock, renderPart, 2.5)
+                                            clearAutoMineTargetVisual()
+                                            resetTargetLock()
+                                            task.wait(0.08)
+                                            continue
+                                        end
+                                        local hpText = targetDurability and (" | hp~" .. tostring(math.floor(targetDurability + 0.5))) or ""
+                                        local mineEcon = getOreEconomyForAutoMine(oreName, closestBlock, renderPart)
+                                        local econText = ""
+                                        if mineEcon.price then
+                                            econText = econText .. " | $" .. tostring(mineEcon.price)
+                                        end
+                                        if mineEcon.required then
+                                            econText = econText .. " need≥" .. tostring(mineEcon.required)
+                                        end
+                                        setAutoMineStatus("Auto Mine Status: mining " .. tostring(oreName) .. " (" .. mineModeText .. " | dmg " .. tostring(math.floor(pickaxeDamage + 0.5)) .. hpText .. econText .. ")")
+                                    else
+                                        if attemptedFire and fireFailed then
+                                            if inVehicleDrill then
+                                                -- Drill path failed: stop retrying this MadComm folder for this session.
+                                                markMadCommRemoteInvalid(firedActivateRemote)
+                                                markMadCommRemoteInvalid(firedMineRemote)
+                                            else
+                                                markMadCommRemoteInvalid(firedActivateRemote)
+                                            end
+                                            nextMineAllowedAt = os.clock() + remoteBackoffInterval
+                                            setAutoMineStatus("Auto Mine Status: backoff (remote busy)")
+                                            task.wait(0.08)
+                                            continue
+                                        end
+                                        setAutoMineStatus("Auto Mine Status: mine remote missing")
+                                        clearAutoMineTargetVisual()
+                                        resetTargetLock()
+                                    end
+                                    local waitDelay = tonumber(autoMineDelay) or 0
+                                    if instantMineEnabled == false and safeProfileEnabled then
+                                        waitDelay = math.max(waitDelay, 0.45) + randomRange(0.06, 0.38)
+                                        waitDelay = math.max(waitDelay, adaptiveMinInterval)
+                                    elseif instantMineEnabled ~= false then
+                                        waitDelay = math.max(0, waitDelay)
+                                    end
+                                    nextMineAllowedAt = os.clock() + waitDelay
+                                    if waitDelay > 0 then
+                                        task.wait(waitDelay)
+                                    else
+                                        task.wait(0.01)
+                                    end
+                                    continue
+                                else
+                                    clearAutoMineTargetVisual()
+                                    resetTargetLock()
+                                    noTargetMode = true
+                                    if weakPickaxeNoTargets then
+                                        setAutoMineStatus("Auto Mine Status: pickaxe too weak for nearby ores")
+                                    else
+                                        setAutoMineStatus("Auto Mine Status: no target in range")
+                                    end
+                                end
+                            end
+                            if noTargetMode then
+                                if instantMineEnabled ~= false then
+                                    task.wait(0.05)
+                                elseif safeProfileEnabled then
+                                    task.wait(math.max(noTargetLoopSleep, randomRange(0.12, 0.22)))
+                                else
+                                    task.wait(noTargetLoopSleep)
+                                end
+                            elseif instantMineEnabled ~= false then
+                                task.wait(0.01)
+                            elseif safeProfileEnabled then
+                                task.wait(randomRange(0.06, 0.14))
+                            else
+                                task.wait(0.03)
+                            end
+                        end
+                        clearAutoMineTargetVisual()
+                    end)
+                end
+                else
+                    autoMineEnabled = false
+                    autoMineCtx.enabled = false
+                    clearAutoMineTargetVisual()
+                    safeSetUiText(OreLabel, "Auto Mine Status: Idle")
+                end
+            end,
+        })
+        if autoMineEnabled then
+            task.defer(function()
+                pcall(function()
+                    AutoMineToggle:Set(true)
+                end)
+            end)
+        end
+
+        local RangeSlider = Farm:CreateSlider({
+            Name = "Auto Mine Range",
+            Range = {5, 50},
+            Increment = 1,
+            Suffix = " studs",
+            CurrentValue = autoMineRange,
+            Flag = "AutoMineRange",
+            Callback = function(Value)
+                autoMineRange = Value
+                autoMineCtx.range = Value
+                saveAutoSettings()
+            end,
+        })
+
+        local DelaySlider = Farm:CreateSlider({
+            Name = "Mining Delay",
+            Range = {0, 5},
+            Increment = 0.001,
+            Suffix = "s",
+            CurrentValue = autoMineDelay,
+            Flag = "MiningDelay",
+            Callback = function(Value)
+                autoMineDelay = Value
+                autoMineCtx.delay = Value
+                saveAutoSettings()
+            end,
+        })
+        Farm:CreateToggle({
+            Name = "⚡ Instant Mine (No Lag)",
+            CurrentValue = instantMineEnabled,
+            Flag = "InstantMine",
+            Callback = function(Value)
+                instantMineEnabled = Value
+                autoMineCtx.instantMine = Value
+                saveAutoSettings()
+            end,
+        })
+        Farm:CreateToggle({
+            Name = "💎 Only Ores (Never Mine Dirt/Stone)",
+            CurrentValue = onlyOresEnabled,
+            Flag = "OnlyOres",
+            Callback = function(Value)
+                onlyOresEnabled = Value
+                autoMineCtx.onlyOres = Value
+                saveAutoSettings()
+            end,
+        })
+        Farm:CreateToggle({
+            Name = "⛏️ Mine Any Ore (Bypass Pickaxe Req)",
+            CurrentValue = mineAnyOreEnabled,
+            Flag = "MineAnyOre",
+            Callback = function(Value)
+                mineAnyOreEnabled = Value
+                autoMineCtx.mineAnyOre = Value
+                saveAutoSettings()
+            end,
+        })
+        Farm:CreateInput({
+            Name = "Force Mining Damage (0 = Auto)",
+            CurrentValue = tostring(math.floor(forceMineDamage + 0.5)),
+            PlaceholderText = "Example: 98",
+            RemoveTextAfterFocusLost = false,
+            Flag = "ForceMineDamage",
+            Callback = function(Text)
+                local value = tonumber(Text)
+                if value == nil then
+                    return
+                end
+                forceMineDamage = math.clamp(value, 0, 5000)
+                autoMineCtx.forceDamage = forceMineDamage
+                saveAutoSettings()
+            end,
+        })
+        Farm:CreateInput({
+            Name = "Force MadCommId (0 = Auto)",
+            CurrentValue = tostring(forceMineMadCommId),
+            PlaceholderText = "Example: 1312",
+            RemoveTextAfterFocusLost = false,
+            Flag = "ForceMineMadCommId",
+            Callback = function(Text)
+                local value = tonumber(Text)
+                if value == nil then
+                    return
+                end
+                forceMineMadCommId = math.max(0, math.floor(value))
+                autoMineCtx.forceMadCommId = forceMineMadCommId
+                saveAutoSettings()
+            end,
+        })
+
+        Farm:CreateParagraph({
+            Title = "Movement System",
+            Content = "TP/Tween has been removed in this build."
+        })
+
+        local SafeProfileSection = Farm:CreateSection("🛡️ Safe Profile")
+        Farm:CreateToggle({
+            Name = "Safe Profile",
+            CurrentValue = safeProfileEnabled,
+            Flag = "SafeProfileEnabled",
+            Callback = function(Value)
+                safeProfileEnabled = Value
+                autoMineCtx.safeProfile = Value
+                saveAutoSettings()
+            end,
+        })
+        Farm:CreateToggle({
+            Name = "Pause When Players Nearby",
+            CurrentValue = safeNearbyPauseEnabled,
+            Flag = "SafeNearbyPause",
+            Callback = function(Value)
+                safeNearbyPauseEnabled = Value
+                autoMineCtx.safeNearbyPause = Value
+                saveAutoSettings()
+            end,
+        })
+        Farm:CreateSlider({
+            Name = "Nearby Pause Radius",
+            Range = {20, 200},
+            Increment = 5,
+            Suffix = " studs",
+            CurrentValue = safeNearbyRadius,
+            Flag = "SafeNearbyRadius",
+            Callback = function(Value)
+                safeNearbyRadius = Value
+                autoMineCtx.safeNearbyRadius = Value
+                saveAutoSettings()
+            end,
+        })
+        Farm:CreateSlider({
+            Name = "Auto Sell Cooldown",
+            Range = {2, 20},
+            Increment = 1,
+            Suffix = "s",
+            CurrentValue = safeSellCooldown,
+            Flag = "SafeSellCooldown",
+            Callback = function(Value)
+                safeSellCooldown = Value
+                saveAutoSettings()
+            end,
+        })
+
+        local oreIgnoreOptions = {}
+        local okOreOptions, resultOreOptions = pcall(getOreIgnoreOptions)
+        if okOreOptions and type(resultOreOptions) == "table" then
+            oreIgnoreOptions = resultOreOptions
+        else
+            oreIgnoreOptions = {
+                "Unknown", "Tin", "Iron", "Lead", "Cobalt", "Aluminium", "Silver", "Uranium", "Vanadium",
+                "Tungsten", "Gold", "Titanium", "Palladium", "Plutonium", "Mithril", "Thorium",
+                "Iridium", "Adamantium", "Rhodium", "Unobtanium", "Topaz", "Emerald", "Sapphire",
+                "Ruby", "Diamond", "Poudretteite", "Zultanite", "Grandidierite", "Musgravite", "Painite", "OreMesh",
+            }
+        end
+
+        local savedIgnoreSet = {}
+        for _, name in ipairs(oreIgnoreOptions) do
+            savedIgnoreSet[name] = true
+        end
+        local sanitizedIgnoreList = {}
+        if type(OreIgnoreList) == "table" then
+            for _, name in ipairs(OreIgnoreList) do
+                if type(name) == "string" and savedIgnoreSet[name] then
+                    table.insert(sanitizedIgnoreList, name)
+                end
+            end
+        end
+        OreIgnoreList = sanitizedIgnoreList
+
+        local OreIgnoreDropdown = Farm:CreateDropdown({
+            Name = "Ore Ignore List",
+            Options = oreIgnoreOptions,
+            CurrentOption = {},
+            MultipleOptions = true,
+            Flag = "OreIgnoreList",
+            Callback = function(Options)
+                local normalized = {}
+                local normalizedSet = {}
+                if type(Options) == "table" then
+                    for name, enabled in pairs(Options) do
+                        if enabled == true and type(name) == "string" then
+                            local canonical = canonicalizeOreName(name) or normalizeOreToken(name) or name
+                            if not normalizedSet[canonical] then
+                                normalizedSet[canonical] = true
+                                table.insert(normalized, canonical)
+                            end
+                        end
+                    end
+                    for _, value in ipairs(Options) do
+                        if type(value) == "string" then
+                            local canonical = canonicalizeOreName(value) or normalizeOreToken(value) or value
+                            if not normalizedSet[canonical] then
+                                normalizedSet[canonical] = true
+                                table.insert(normalized, canonical)
+                            end
+                        end
+                    end
+                end
+                OreIgnoreList = normalized
+                autoMineCtx.oreIgnoreList = normalized
+                saveAutoSettings()
+            end,
+        })
+        if #OreIgnoreList > 0 then
+            task.defer(function()
+                pcall(function()
+                    OreIgnoreDropdown:Set(OreIgnoreList)
+                end)
+            end)
+        end
+
+        -- Auto Sell Section
+        local AutoSellSection = Farm:CreateSection("💰 Auto Sell")
+        Farm:CreateDropdown({
+            Name = "Auto Sell Method",
+            Options = {"Remote (No TP / No Tween)"},
+            CurrentOption = {"Remote (No TP / No Tween)"},
+            MultipleOptions = false,
+            Flag = "AutoSellMethod",
+            Callback = function()
+                autoSellMethod = "Remote"
+                saveAutoSettings()
+            end,
+        })
+
+
+        local AutoSellToggle = Farm:CreateToggle({
+            Name = "Auto Sell",
+            CurrentValue = autoSellEnabled,
+            Flag = "AutoSellToggle",
+            Callback = function(state)
+                autoSellEnabled = state
+                saveAutoSettings()
+                if autoSellEnabled then
+                    if not autoSellThread then
+                        autoSellThread = task.spawn(function()
+                            local lastAutoSellAt = 0
+                            local function hasNearbyPlayersForSell(rootPart, radius)
+                                if not rootPart then return false end
+                                for _, otherPlayer in ipairs(game.Players:GetPlayers()) do
+                                    if otherPlayer ~= game.Players.LocalPlayer and otherPlayer.Character then
+                                        local otherRoot = otherPlayer.Character:FindFirstChild("HumanoidRootPart")
+                                        if otherRoot and otherRoot.Position and rootPart and rootPart.Position and (otherRoot.Position - rootPart.Position).Magnitude <= radius then
+                                            return true
+                                        end
+                                    end
+                                end
+                                return false
+                            end
+                            while autoSellEnabled do
+                                local player = game.Players.LocalPlayer
+                                local character = player.Character or player.CharacterAdded:Wait()
+                                local currentOres = countCarriedOres(player)
+
+                                if currentOres >= autoSellOreCount then
+                                    local hrp = character:FindFirstChild("HumanoidRootPart")
+                                    if hrp then
+                                        if safeProfileEnabled and safeNearbyPauseEnabled and hasNearbyPlayersForSell(hrp, safeNearbyRadius) then
+                                            task.wait(0.8)
+                                            continue
+                                        end
+                                        if safeProfileEnabled and (os.clock() - lastAutoSellAt) < safeSellCooldown then
+                                            task.wait(0.25)
+                                            continue
+                                        end
+
+                                        local okSell, sellErr, soldCount = sellOreBySelectedMethod()
+                                        if okSell then
+                                            lastAutoSellAt = os.clock()
+                                            Rayfield:Notify({
+                                                Title = "Auto Sell",
+                                                Content = "Sold " .. tostring(soldCount) .. " ores successfully!",
+                                                Duration = 3,
+                                            })
+                                            task.wait(2)
+                                        else
+                                            Rayfield:Notify({
+                                                Title = "Auto Sell Error",
+                                                Content = tostring(sellErr),
+                                                Duration = 3,
+                                            })
+                                        end
+                                    end
+                                end
+                                task.wait(safeProfileEnabled and 0.65 or 0.5)
+                            end
+                        end)
+                    end
+                else
+                    autoSellEnabled = false
+                    autoSellThread = nil
+                end
+            end,
+        })
+        if autoSellEnabled then
+            task.defer(function()
+                pcall(function()
+                    AutoSellToggle:Set(true)
+                end)
+            end)
+        end
+
+        local AutoSellOreCountInput = Farm:CreateInput({
+            Name = "Ore Capacity (Max: 64)",
+            CurrentValue = tostring(autoSellOreCount),
+            PlaceholderText = "Enter ore capacity (1-64)",
+            RemoveTextAfterFocusLost = false,
+            Flag = "AutoSellOreCount",
+            Callback = function(Text)
+                local value = tonumber(Text)
+                if value then
+                    if value > 64 then
+                        value = 64
+                        Rayfield:Notify({
+                            Title = "Ore Capacity Limited",
+                            Content = "Maximum capacity is 64 ores. Set to 64.",
+                            Duration = 3,
+                        })
+                    elseif value < 1 then
+                        value = 1
+                    end
+                    autoSellOreCount = value
+                    saveAutoSettings()
+                else
+                    Rayfield:Notify({
+                        Title = "Invalid Input",
+                        Content = "Please enter a valid number between 1 and 64.",
+                        Duration = 3,
+                                            })
+                end
+            end,
+        })
+
+        Farm:CreateLabel("💡 Sells when ore capacity reaches max (depends on backpack capacity)")
+
+        local sellOreKeyValue = autoSettingsLoaded.sellOreKey or ""
+        local Input = Farm:CreateInput({
+            Name = "Sell Ore Key (Optional)",
+            CurrentValue = sellOreKeyValue,
+            PlaceholderText = "Press key to sell ore (e.g. 'F')",
+            RemoveTextAfterFocusLost = false,
+            Flag = "SellOreKey",
+            Callback = function(Text)
+                task.spawn(function() task.wait(0.1) end)
+                sellOreKeyValue = tostring(Text or "")
+                if saveAutoSettings then
+                    saveAutoSettings()
+                end
+                if _G.sellOreKeyConnection then
+                    _G.sellOreKeyConnection:Disconnect()
+                    _G.sellOreKeyConnection = nil
+                end
+                if Text and Text ~= "" then
+                    _G.sellOreKeyConnection = game:GetService("UserInputService").InputBegan:Connect(function(input, gameProcessed)
+                        if gameProcessed then return end
+                        if input.KeyCode.Name:lower() == Text:lower() then
+                            local okSell, sellErr, oreCount = sellOreBySelectedMethod()
+                            if okSell then
+                                Rayfield:Notify({
+                                    Title = "Ore Sold",
+                                    Content = "Successfully sold " .. tostring(oreCount) .. " ores.",
+                                    Duration = 3,
+                                })
+                            else
+                                Rayfield:Notify({
+                                    Title = "Error",
+                                    Content = tostring(sellErr),
+                                    Duration = 3,
+                                })
+                            end
+                        end
+                    end)
+                    Rayfield:Notify({
+                        Title = "Key Bound",
+                        Content = "Sell Ore key bound to: " .. Text,
+                        Duration = 3,
+                                            })
+                end
+            end,
+        })
+        if sellOreKeyValue ~= "" then
+            task.defer(function()
+                pcall(function()
+                    Input:Set(sellOreKeyValue)
+                end)
+            end)
+        end
+
+        -- ORE ESP UI
+        local OreSection = OreESP:CreateSection("⚙️ Ore ESP Selection")
+        OreESP:CreateLabel("Reveals every type of ore found throughout mining.")
+        local OreDebugSection = OreESP:CreateSection("🧪 Ore Name Debug / Mapping")
+        local OreDebugLabel = OreESP:CreateLabel("Look at ore and press capture button")
+        local OreLearningStatusLabel = OreESP:CreateLabel("Ore Memory: checking...")
+        local OreManualName = ""
+
+        local function countTableEntries(tbl)
+            if oreResolverHelper and type(oreResolverHelper.countTableEntries) == "function" then
+                return oreResolverHelper.countTableEntries(tbl)
+            end
+            local n = 0
+            if type(tbl) ~= "table" then return 0 end
+            for _ in pairs(tbl) do
+                n = n + 1
+            end
+            return n
+        end
+
+        local function updateOreLearningStatus()
+            local memoryCount = countTableEntries(oreNameById) + countTableEntries(oreNameBySignature) + countTableEntries(oreNameBySignatureCoarse) + countTableEntries(oreNameByColorSignature)
+            local ioState = "save:off"
+            if canWriteSettingsFile then
+                ioState = settingsSaveOk and "save:ok" or "save:pending"
+                if settingsLastSaveError then
+                    ioState = "save:error"
+                end
+            end
+            local loadState = settingsLoadOk and "load:ok" or (canReadSettingsFile and "load:none/new" or "load:off")
+            local saveErrorText = ""
+            if settingsLastSaveError then
+                saveErrorText = " | err:" .. string.sub(tostring(settingsLastSaveError), 1, 22)
+            end
+            safeSetUiText(OreLearningStatusLabel, string.format(
+                "Ore Memory: %d entries | learned:%d | %s | %s%s",
+                memoryCount,
+                oreInferenceStats.learned,
+                loadState,
+                ioState,
+                saveErrorText
+            ))
+        end
+        updateOreLearningStatus()
+        task.spawn(function()
+            while scriptRunning do
+                task.wait(2)
+                updateOreLearningStatus()
+            end
+        end)
+
+        OreESP:CreateInput({
+            Name = "Manual Ore Name (optional)",
+            CurrentValue = "",
+            PlaceholderText = "Example: Titanium",
+            RemoveTextAfterFocusLost = false,
+            Flag = "OreManualNameInput",
+            Callback = function(Text)
+                OreManualName = Text or ""
+            end,
+        })
+
+        OreESP:CreateButton({
+            Name = "Capture Looked Ore (show id/name)",
+            Callback = function()
+                local target = getLookedOreTarget()
+                if not target then
+                    safeSetUiText(OreDebugLabel, "Ore Debug: no ore in crosshair")
+                    Rayfield:Notify({
+                        Title = "Ore Debug",
+                        Content = "No ore found in your crosshair.",
+                        Duration = 3,
+                                            })
+                    return
+                end
+
+                local renderPart = getOreRenderPart(target)
+                local oreId = getOreIdentifierDeep(target, renderPart) or "N/A"
+                local oreName = resolveOreName(target)
+                local runtimeName = (isInstance(target) and target.Name) or (renderPart and renderPart.Name) or "N/A"
+                local signature = makeOreSignature(target, renderPart)
+                local signatureText = signature and ("sig:" .. string.sub(signature, 1, 36) .. "...") or "sig:N/A"
+                local text = string.format("Ore Debug: %s | id: %s | runtime: %s | %s", tostring(oreName), tostring(oreId), tostring(runtimeName), signatureText)
+                safeSetUiText(OreDebugLabel, text)
+                Rayfield:Notify({
+                    Title = "Ore Captured",
+                    Content = text,
+                    Duration = 4,
+                    Image = 4483362458,
+                })
+            end,
+        })
+
+        OreESP:CreateButton({
+            Name = "Map Looked Ore Id -> Name",
+            Callback = function()
+                local target = getLookedOreTarget()
+                if not target then
+                    safeSetUiText(OreDebugLabel, "Ore Map: no ore in crosshair")
+                    Rayfield:Notify({
+                        Title = "Ore Mapping",
+                        Content = "No ore found in your crosshair.",
+                        Duration = 3,
+                                            })
+                    return
+                end
+
+                local ok, message = registerOreIdName(target, OreManualName)
+                safeSetUiText(OreDebugLabel, "Ore Map: " .. message)
+                updateOreLearningStatus()
+                Rayfield:Notify({
+                    Title = ok and "Ore Mapping Saved" or "Ore Mapping Failed",
+                    Content = message,
+                    Duration = 4,
+                })
+
+                if ok then
+                    espSyncAfterMappingUpdate()
+                end
+            end,
+        })
+
+        local function encodeFullSettings()
+            return HttpService:JSONEncode({
+                version = 1,
+                kind = "UMTFullSettings",
+                data = buildSettingsPayload(),
+            })
+        end
+
+        local function decodeFullSettings(text)
+            if type(text) ~= "string" or text == "" then
+                return nil, "Empty input"
+            end
+            local ok, decoded = pcall(function()
+                return HttpService:JSONDecode(text)
+            end)
+            if not ok or type(decoded) ~= "table" then
+                return nil, "Invalid JSON"
+            end
+            if type(decoded.data) == "table" then
+                return decoded.data, nil
+            end
+            return nil, "Expected { data: { ...settings } }"
+        end
+
+        OreESP:CreateButton({
+            Name = "Export Full Settings (Copy)",
+            Callback = function()
+                local text = encodeFullSettings()
+                if type(setclipboard) == "function" then
+                    pcall(function() setclipboard(text) end)
+                end
+                Rayfield:Notify({
+                    Title = "Exported",
+                    Content = "Full settings copied (or ready). Size: " .. tostring(#text) .. " chars.",
+                    Duration = 4,
+                })
+            end,
+        })
+
+        local fullSettingsImportBuffer = ""
+        OreESP:CreateInput({
+            Name = "Import Full Settings (JSON)",
+            CurrentValue = "",
+            PlaceholderText = "Paste full settings JSON here",
+            RemoveTextAfterFocusLost = false,
+            Flag = "ImportFullSettings",
+            Callback = function(Text)
+                fullSettingsImportBuffer = Text or ""
+            end,
+        })
+
+        OreESP:CreateButton({
+            Name = "Apply Imported Full Settings",
+            Callback = function()
+                local decoded, err = decodeFullSettings(fullSettingsImportBuffer)
+                if not decoded then
+                    Rayfield:Notify({
+                        Title = "Import Failed",
+                        Content = err,
+                        Duration = 4,
+                                            })
+                    return
+                end
+
+                autoMineEnabled = decoded.autoMineEnabled == true
+                autoMineRange = math.clamp(tonumber(decoded.autoMineRange) or autoMineRange, 5, 50)
+                autoMineDelay = math.clamp(tonumber(decoded.autoMineDelay) or autoMineDelay, 0, 5)
+                forceMineDamage = math.clamp(tonumber(decoded.forceMineDamage) or forceMineDamage, 0, 5000)
+                forceMineMadCommId = math.max(0, math.floor(tonumber(decoded.forceMineMadCommId) or forceMineMadCommId))
+                safeProfileEnabled = decoded.safeProfileEnabled ~= false
+                safeNearbyPauseEnabled = decoded.safeNearbyPauseEnabled ~= false
+                safeNearbyRadius = math.clamp(tonumber(decoded.safeNearbyRadius) or safeNearbyRadius, 20, 200)
+                safeSellCooldown = math.clamp(tonumber(decoded.safeSellCooldown) or safeSellCooldown, 2, 20)
+                OreIgnoreList = sanitizeStringArray(decoded.oreIgnoreList)
+                autoSellEnabled = decoded.autoSellEnabled == true
+                autoSellOreCount = math.clamp(tonumber(decoded.autoSellOreCount) or autoSellOreCount, 1, 64)
+                autoSellMethod = "Remote"
+                walkSpeedValue = math.clamp(tonumber(decoded.walkSpeed) or walkSpeedValue, 16, 500)
+                infiniteJumpEnabled = decoded.infiniteJumpEnabled == true
+                sellOreKeyValue = type(decoded.sellOreKey) == "string" and decoded.sellOreKey or sellOreKeyValue
+                ESP.enabled = decoded.oreEspEnabled == true
+                ESP.maxDistance = math.clamp(tonumber(decoded.oreEspDistance) or ESP.maxDistance, 0, 500)
+                if type(decoded.oreEspFilter) == "string" and decoded.oreEspFilter ~= "" then
+                    ESP.filterOre = decoded.oreEspFilter
+                end
+
+                oreNameById = {}
+                oreNameByRuntime = {}
+                oreNameBySignature = {}
+                oreNameBySignatureCoarse = {}
+                oreNameByColorSignature = {}
+                sharedOreNameByColorSignature = {}
+                mergeStringMap(oreNameById, decoded.oreNameById)
+                mergeStringMap(oreNameByRuntime, decoded.oreNameByRuntime)
+                mergeStringMap(oreNameBySignature, decoded.oreNameBySignature)
+                mergeStringMap(oreNameBySignatureCoarse, decoded.oreNameBySignatureCoarse)
+                mergeStringMap(oreNameByColorSignature, decoded.oreNameByColorSignature)
+                mergeStringMap(sharedOreNameByColorSignature, decoded.sharedOreNameByColorSignature)
+                oreNameCache = setmetatable({}, { __mode = "k" })
+
+                if saveAutoSettings then
+                    saveAutoSettings()
+                end
+                updateOreLearningStatus()
+                espSyncAfterMappingUpdate()
+
+                Rayfield:Notify({
+                    Title = "Imported",
+                    Content = "Applied full settings. Re-toggle features if needed.",
+                    Duration = 4,
+                                    })
+            end,
+        })
+
+        local function performOreMappingReset()
+            oreNameById = {}
+            oreNameByRuntime = {}
+            oreNameBySignature = {}
+            oreNameBySignatureCoarse = {}
+            oreNameByColorSignature = {}
+            oreNameCache = setmetatable({}, { __mode = "k" })
+            oreInferenceStats.learned = 0
+            if saveAutoSettings then
+                saveAutoSettings()
+            end
+            updateOreLearningStatus()
+            espSyncAfterMappingUpdate()
+            Rayfield:Notify({
+                Title = "Ore Mapping Reset",
+                Content = "Cleared learned ore mappings. Static rules remain unchanged.",
+                Duration = 4,
+                            })
+        end
+
+        local function showResetConfirmPopup(onConfirm)
+            local players = game:GetService("Players")
+            local localPlayer = players.LocalPlayer
+            local playerGui = localPlayer and localPlayer:FindFirstChildOfClass("PlayerGui")
+            if not playerGui then
+                Rayfield:Notify({
+                    Title = "Reset Confirmation",
+                    Content = "PlayerGui not available. Try again.",
+                    Duration = 3,
+                                    })
+                return
+            end
+
+            local existing = playerGui:FindFirstChild("UH_ResetConfirmPopup")
+            if existing then
+                existing:Destroy()
+            end
+
+            local screenGui = Instance.new("ScreenGui")
+            screenGui.Name = "UH_ResetConfirmPopup"
+            screenGui.ResetOnSpawn = false
+            screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+            screenGui.Parent = playerGui
+
+            local overlay = Instance.new("Frame")
+            overlay.Name = "Overlay"
+            overlay.Size = UDim2.fromScale(1, 1)
+            overlay.Position = UDim2.fromScale(0, 0)
+            overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+            overlay.BackgroundTransparency = 0.35
+            overlay.BorderSizePixel = 0
+            overlay.Parent = screenGui
+
+            local modal = Instance.new("Frame")
+            modal.Name = "Modal"
+            modal.Size = UDim2.fromOffset(420, 190)
+            modal.Position = UDim2.fromScale(0.5, 0.5)
+            modal.AnchorPoint = Vector2.new(0.5, 0.5)
+            modal.BackgroundColor3 = Color3.fromRGB(24, 26, 33)
+            modal.BorderSizePixel = 0
+            modal.Parent = overlay
+
+            local corner = Instance.new("UICorner")
+            corner.CornerRadius = UDim.new(0, 10)
+            corner.Parent = modal
+
+            local title = Instance.new("TextLabel")
+            title.Name = "Title"
+            title.Size = UDim2.new(1, -20, 0, 34)
+            title.Position = UDim2.fromOffset(10, 10)
+            title.BackgroundTransparency = 1
+            title.Text = "Confirm Reset Learned Ore Maps"
+            title.TextColor3 = Color3.fromRGB(255, 255, 255)
+            title.TextXAlignment = Enum.TextXAlignment.Left
+            title.Font = Enum.Font.GothamBold
+            title.TextSize = 16
+            title.Parent = modal
+
+            local message = Instance.new("TextLabel")
+            message.Name = "Message"
+            message.Size = UDim2.new(1, -20, 0, 72)
+            message.Position = UDim2.fromOffset(10, 48)
+            message.BackgroundTransparency = 1
+            message.Text = "This will delete all learned ore mappings (ID/signature/color). This action cannot be undone."
+            message.TextWrapped = true
+            message.TextColor3 = Color3.fromRGB(225, 225, 225)
+            message.TextXAlignment = Enum.TextXAlignment.Left
+            message.TextYAlignment = Enum.TextYAlignment.Top
+            message.Font = Enum.Font.Gotham
+            message.TextSize = 14
+            message.Parent = modal
+
+            local cancelButton = Instance.new("TextButton")
+            cancelButton.Name = "Cancel"
+            cancelButton.Size = UDim2.fromOffset(120, 34)
+            cancelButton.Position = UDim2.new(1, -260, 1, -48)
+            cancelButton.BackgroundColor3 = Color3.fromRGB(58, 62, 74)
+            cancelButton.Text = "Cancel"
+            cancelButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+            cancelButton.Font = Enum.Font.GothamBold
+            cancelButton.TextSize = 14
+            cancelButton.Parent = modal
+            Instance.new("UICorner", cancelButton).CornerRadius = UDim.new(0, 8)
+
+            local confirmButton = Instance.new("TextButton")
+            confirmButton.Name = "Confirm"
+            confirmButton.Size = UDim2.fromOffset(120, 34)
+            confirmButton.Position = UDim2.new(1, -130, 1, -48)
+            confirmButton.BackgroundColor3 = Color3.fromRGB(178, 64, 64)
+            confirmButton.Text = "Confirm Reset"
+            confirmButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+            confirmButton.Font = Enum.Font.GothamBold
+            confirmButton.TextSize = 14
+            confirmButton.Parent = modal
+            Instance.new("UICorner", confirmButton).CornerRadius = UDim.new(0, 8)
+
+            local function closePopup()
+                if screenGui and screenGui.Parent then
+                    screenGui:Destroy()
+                end
+            end
+
+            trackConnection(cancelButton.MouseButton1Click:Connect(closePopup))
+            trackConnection(confirmButton.MouseButton1Click:Connect(function()
+                closePopup()
+                if onConfirm then
+                    onConfirm()
+                end
+            end))
+        end
+
+        OreESP:CreateButton({
+            Name = "Reset Learned Ore Maps",
+            Callback = function()
+                showResetConfirmPopup(performOreMappingReset)
+            end,
+        })
+
+        OreESP:CreateLabel("Tip: if id is N/A, mapping uses ore signature (strict+coarse), not runtime name only.")
+
+        OreESP:CreateToggle({
+            Name = "Ore ESP",
+            CurrentValue = ESP.enabled,
+            Flag = "OreEspEnabled",
+            Callback = function(Value)
+                ESP.enabled = Value
+                if Value then
+                    espScanAll()
+                    Rayfield:Notify({
+                        Title = "Ore ESP",
+                        Content = "ESP เปิดแล้ว — scanning ore...",
+                        Duration = 2,
+                                            })
+                else
+                    espClearAll()
+                end
+                if saveAutoSettings then
+                    saveAutoSettings()
+                end
+            end,
+        })
+
+        OreESP:CreateSlider({
+            Name = "Ore ESP Distance",
+            Range = {0, 500},
+            Increment = 5,
+            Suffix = "studs",
+            CurrentValue = ESP.maxDistance,
+            Flag = "OreEspDistance",
+            Callback = function(Value)
+                ESP.maxDistance = Value
+                if saveAutoSettings then
+                    saveAutoSettings()
+                end
+            end,
+        })
+
+        local oreTypeOptions = getOreTypes()
+        local hasSavedFilter = false
+        for _, option in ipairs(oreTypeOptions) do
+            if option == ESP.filterOre then
+                hasSavedFilter = true
+                break
+            end
+        end
+        if not hasSavedFilter then
+            ESP.filterOre = "All"
+        end
+
+        OreESP:CreateDropdown({
+            Name = "ESP Filter Ore Type",
+            Options = oreTypeOptions,
+            CurrentOption = {ESP.filterOre},
+            MultipleOptions = false,
+            Flag = "OreEspFilter",
+            Callback = function(Option)
+                local selected = type(Option) == "table" and Option[1] or Option
+                ESP.filterOre = selected or "All"
+                espRescanIfEnabled()
+                if saveAutoSettings then
+                    saveAutoSettings()
+                end
+            end,
+        })
+        if ESP.enabled then
+            task.defer(function()
+                pcall(espRescanIfEnabled)
+            end)
+        end
+
+        OreESP:CreateButton({
+            Name = "Refresh ESP Scan",
+            Callback = function()
+                if ESP.enabled then
+                    espRescanIfEnabled()
+                    Rayfield:Notify({
+                        Title = "ESP Refreshed",
+                        Content = "Re-scanned ore in workspace.",
+                        Duration = 2,
+                                            })
+                else
+                    Rayfield:Notify({
+                        Title = "ESP ปิดอยู่",
+                        Content = "เปิด Ore ESP ก่อนแล้วค่อย Refresh",
+                        Duration = 2,
+                                            })
+                end
+            end,
+        })
+
+
+
+
+        local function destroyScript()
+            scriptRunning = false
+
+            autoMineEnabled = false
+            autoSellEnabled = false
+            clearAutoMineTargetVisual()
+            ESP.enabled = false
+            espClearAll()
+
+            if infiniteJumpConnection then
+                if playerUtilHelper and type(playerUtilHelper.stopConnection) == "function" then
+                    playerUtilHelper.stopConnection(infiniteJumpConnection)
+                else
+                    pcall(function()
+                        infiniteJumpConnection:Disconnect()
+                    end)
+                end
+                infiniteJumpConnection = nil
+            end
+
+            local globalConnections = {
+                "sellOreKeyConnection",
+            }
+            for _, key in ipairs(globalConnections) do
+                local conn = rawget(_G, key)
+                if conn then
+                    pcall(function() conn:Disconnect() end)
+                    _G[key] = nil
+                end
+            end
+
+            for _, conn in ipairs(cleanupConnections) do
+                pcall(function() conn:Disconnect() end)
+            end
+            cleanupConnections = {}
+        end
+        if scriptInfo and type(scriptInfo.registerCleanup) == "function" then
+            scriptInfo.registerCleanup(destroyScript)
+        end
+
+        -- Notification timer
+        task.spawn(function()
+            task.wait(10)
+            if not scriptRunning then return end
+            Rayfield:Notify({
+                Title = "Thanks for Using UtilityHub!",
+                Content = "Join our Discord server for updates and support!",
+                Duration = 5,
+                            })
+            while scriptRunning do
+                task.wait(500)
+                local messages = {
+                    { Title = "Thanks for Using UtilityHub!", Content = "Join our Discord server for updates and support!" },
+                    { Title = "Enjoying UtilityHub?", Content = "Support us by joining our Discord community!" },
+                    { Title = "UtilityHub Reminder", Content = "Don't forget to join our Discord for exclusive updates!" },
+                }
+                local randomMessage = messages[math.random(1, #messages)]
+                Rayfield:Notify({
+                    Title = randomMessage.Title,
+                    Content = randomMessage.Content,
+                    Duration = 5,
+                    Image = 4483362458,
+                })
+            end
+        end)
+
+    end -- ✅ ปิด return function
