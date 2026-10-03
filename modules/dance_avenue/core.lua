@@ -1,8 +1,7 @@
 -- ============================================================
 -- N3Z Dance Avenue - Core Module
--- v1.1.0 - Full Auto Play (Auto Arrows + Auto Perfect Hit)
--- Direct Game Engine Hook + VIM Keyboard Emulation
--- Compliant with AGENT.MD platform separation contract
+-- v1.2.0 - 100% Guaranteed Perfect + Native Human Autoplay
+-- Directly hooks Audition.Config.Windows and Audition.Judge.grade
 -- ============================================================
 
 return function(Window, ctx, adapter)
@@ -13,9 +12,8 @@ return function(Window, ctx, adapter)
     local UserInputService = game:GetService("UserInputService")
 
     local localPlayer = Players.LocalPlayer
-    local camera = Workspace.CurrentCamera
 
-    -- Cleanup previous instance if running
+    -- Cleanup previous instance
     local env = (type(getgenv) == "function" and getgenv()) or _G
     if env.__N3Z_DANCE_AVENUE_CLEANUP then
         pcall(env.__N3Z_DANCE_AVENUE_CLEANUP)
@@ -26,156 +24,115 @@ return function(Window, ctx, adapter)
         table.insert(cleanups, fn)
     end
 
-    -- State
     local state = {
-        autoArrows = true,     -- ออโต้กดลูกศรทั้งหมด (ระดับ 1 ถึง 11)
-        autoHit = true,        -- ออโต้เคาะ Spacebar / Perfect
-        hitAccuracy = "PERFECT",
-        humanDelay = 0.04,     -- ดีเลย์ระหว่างกดลูกศร (ป้องกันค้าง/เนียน)
+        alwaysPerfect = true,
+        autoPlay = true,
         walkSpeed = 26,
         speedEnabled = false,
         infJump = false,
     }
 
-    -- Actuator from adapter
-    local actuator = adapter.createRhythmActuator({
-        localPlayer = localPlayer,
-        settings = state,
-    })
-    addCleanup(function()
-        if actuator and actuator.destroy then pcall(actuator.destroy) end
-    end)
-
-    -- UI Tabs
-    local MainTab = Window:CreateTab("Auto Play")
-    local MovementTab = Window:CreateTab("Movement")
-    local MiscTab = Window:CreateTab("Misc")
-
     -- ----------------------------------------------------
-    -- 1. AUTO PLAY CONTROLS
+    -- 1. AUDITION HOOK (ALWAYS PERFECT)
     -- ----------------------------------------------------
-    MainTab:CreateToggle({
-        Name = "Auto Arrows (กดลูกศรทั้งหมด)",
-        Default = true,
-        Callback = function(v)
-            state.autoArrows = v
-        end,
-    })
+    local audition = ReplicatedStorage:WaitForChild("Audition")
+    local Config = require(audition:WaitForChild("Config"))
+    local Judge = require(audition:WaitForChild("Judge"))
 
-    MainTab:CreateToggle({
-        Name = "Auto Spacebar (เคาะ Perfect)",
-        Default = true,
-        Callback = function(v)
-            state.autoHit = v
-        end,
-    })
+    local origWindows = {}
+    for k, v in pairs(Config.Windows) do
+        origWindows[k] = v
+    end
 
-    MainTab:CreateSlider({
-        Name = "Arrow Press Delay (sec)",
-        Min = 0,
-        Max = 0.1,
-        Default = 0.04,
-        Callback = function(v)
-            state.humanDelay = v
-        end,
-    })
+    local origGrade = Judge.grade
 
-    -- Game Cache Helper
-    local cachedGame = nil
-    local function getActiveGame()
-        if cachedGame and cachedGame.slots and cachedGame.state then
-            return cachedGame
+    local function applyPerfectHook()
+        -- ขยาย Window ให้กว้าง ไม่ว่าจะเคาะตรงไหนหรือตอนไหน = PERFECT เสมอ
+        Config.Windows.PERFECT = 999.0
+        Config.Windows.GREAT = 999.0
+        Config.Windows.COOL = 999.0
+        Config.Windows.BAD = 999.0
+
+        Judge.grade = function(delta, windows)
+            return "PERFECT", 0
         end
+    end
+
+    local function restorePerfectHook()
+        for k, v in pairs(origWindows) do
+            Config.Windows[k] = v
+        end
+        Judge.grade = origGrade
+    end
+
+    applyPerfectHook()
+    addCleanup(restorePerfectHook)
+
+    -- Persistent Game Finder
+    local function getGameInstance()
         for _, obj in ipairs(getgc(true)) do
-            if type(obj) == "table" and rawget(obj, "arrowPresses") ~= nil and rawget(obj, "slots") ~= nil then
-                cachedGame = obj
+            if type(obj) == "table" and rawget(obj, "offsetMs") ~= nil then
                 return obj
             end
         end
         return nil
     end
 
-    local Judge = nil
-    pcall(function()
-        Judge = require(ReplicatedStorage:WaitForChild("Audition"):WaitForChild("Judge"))
-    end)
-
-    -- Engine Auto-Player Loop
-    local lastSolvedSlot = -1
-    local hasHitCurrentSlot = false
-
-    local autoLoop = RunService.Heartbeat:Connect(function()
-        local g = getActiveGame()
-        if not g or g.state ~= "playing" then
-            lastSolvedSlot = -1
-            hasHitCurrentSlot = false
-            return
-        end
-
-        local curIdx = g.cur
-        if not curIdx or not g.slots then return end
-
-        local slot = g.slots[curIdx]
-        if not slot then return end
-
-        -- 1. Auto Solve Arrow Keys for the current slot
-        if state.autoArrows and slot.dirs and #slot.dirs > 0 and lastSolvedSlot ~= curIdx then
-            local arrowCount = slot.arrowCount or #slot.dirs
-            local entered = slot.entered or 0
-
-            if entered < arrowCount then
-                for i = (entered + 1), arrowCount do
-                    local dir = slot.dirs[i]
-                    local isRed = slot.reds and slot.reds[i] == true
-                    local keyToPress = dir
-
-                    -- If note is RED (Chance mode), expectedKey is opposite!
-                    if isRed and Judge and Judge.expectedKey then
-                        keyToPress = Judge.expectedKey(dir, true)
-                    end
-
-                    -- Feed into game's onArrow
-                    if g.onArrow then
-                        pcall(g.onArrow, g, keyToPress)
-                    end
-
-                    if state.humanDelay > 0 then
-                        task.wait(state.humanDelay)
-                    end
+    -- Loop ensure autoplay & perfect
+    local loopConn = RunService.Heartbeat:Connect(function()
+        local g = getGameInstance()
+        if g then
+            if state.autoPlay then
+                if g.autoplay ~= "human" then
+                    g.autoplay = "human"
                 end
-            end
-            lastSolvedSlot = curIdx
-            hasHitCurrentSlot = false
-        end
-
-        -- 2. Auto Hit (Spacebar) on timing
-        if state.autoHit and not hasHitCurrentSlot then
-            local playerGui = localPlayer:FindFirstChild("PlayerGui")
-            local auditionUI = playerGui and playerGui:FindFirstChild("AuditionUI")
-            local cluster = auditionUI and auditionUI:FindFirstChild("Cluster")
-            local rhythmBar = cluster and cluster:FindFirstChild("RhythmBar")
-            local ball = rhythmBar and rhythmBar:FindFirstChild("Ball")
-
-            if ball and cluster.Visible then
-                local ballX = ball.Position.X.Scale
-                -- Perfect target zone: 0.795 - 0.825
-                if ballX >= 0.795 and ballX <= 0.825 then
-                    hasHitCurrentSlot = true
-                    if g.onHit then
-                        pcall(g.onHit, g)
-                    else
-                        actuator.triggerSpace()
-                    end
+            else
+                if g.autoplay == "human" then
+                    g.autoplay = nil
                 end
             end
         end
     end)
     addCleanup(function()
-        if autoLoop then autoLoop:Disconnect() end
+        if loopConn then loopConn:Disconnect() end
+        local g = getGameInstance()
+        if g then g.autoplay = nil end
     end)
 
     -- ----------------------------------------------------
-    -- 2. MOVEMENT MODIFIERS
+    -- 2. UI TABS
+    -- ----------------------------------------------------
+    local MainTab = Window:CreateTab("Auto Play")
+    local MovementTab = Window:CreateTab("Movement")
+    local MiscTab = Window:CreateTab("Misc")
+
+    MainTab:CreateToggle({
+        Name = "100% Always Perfect (เคาะเมื่อไหร่ก็ Perfect)",
+        Default = true,
+        Callback = function(v)
+            state.alwaysPerfect = v
+            if v then
+                applyPerfectHook()
+            else
+                restorePerfectHook()
+            end
+        end,
+    })
+
+    MainTab:CreateToggle({
+        Name = "Full Auto Play (บอทกดลูกศร + เคาะ Spacebar ให้อัตโนมัติ)",
+        Default = true,
+        Callback = function(v)
+            state.autoPlay = v
+            local g = getGameInstance()
+            if g then
+                g.autoplay = v and "human" or nil
+            end
+        end,
+    })
+
+    -- ----------------------------------------------------
+    -- 3. MOVEMENT MODIFIERS
     -- ----------------------------------------------------
     MovementTab:CreateToggle({
         Name = "Speed Hack",
@@ -243,19 +200,8 @@ return function(Window, ctx, adapter)
     end)
 
     -- ----------------------------------------------------
-    -- 3. MISC
+    -- 4. MISC
     -- ----------------------------------------------------
-    MiscTab:CreateButton({
-        Name = "Force Native Autoplay (Human Mode)",
-        Callback = function()
-            local g = getActiveGame()
-            if g then
-                g.autoplay = "human"
-                print("[N3Z] Forced native autoplay = human")
-            end
-        end,
-    })
-
     MiscTab:CreateButton({
         Name = "Rejoin Server",
         Callback = function()
