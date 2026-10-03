@@ -264,9 +264,9 @@ function Dock.new(opts)
     if self._isMobile then
         local mobileToggle = Instance.new("TextButton")
         mobileToggle.Name = "MobileMenuToggle"
-        mobileToggle.AnchorPoint = Vector2.new(1, 0)
-        mobileToggle.Position = UDim2.new(1, -10, 0, 10)
-        mobileToggle.Size = UDim2.fromOffset(48, 48)
+        mobileToggle.AnchorPoint = Vector2.new(0.5, 0.5)
+        mobileToggle.Position = UDim2.fromScale(0.92, 0.12)
+        mobileToggle.Size = UDim2.fromOffset(54, 54)
         mobileToggle.BackgroundColor3 = C.dockBg
         mobileToggle.BackgroundTransparency = 0.04
         mobileToggle.BorderSizePixel = 0
@@ -277,13 +277,76 @@ function Dock.new(opts)
         mobileToggle.Font = FONT_BOLD
         mobileToggle.ZIndex = 50
         mobileToggle.Parent = gui
-        corner(mobileToggle, 14)
+        corner(mobileToggle, 16)
         stroke(mobileToggle, C.border, 0)
+        self._mobileToggle = mobileToggle
+        self._mobileToggleX = 0.92
+        self._mobileToggleY = 0.12
+
+        local dragging = false
+        local dragInput = nil
+        local dragStart = nil
+        local moved = false
+
+        local function updateTogglePosition(input)
+            local cam = workspace.CurrentCamera
+            local size = cam and cam.ViewportSize
+            if not size or size.X <= 0 or size.Y <= 0 then return end
+
+            local x = math.clamp(input.Position.X / size.X, 0.06, 0.94)
+            local y = math.clamp(input.Position.Y / size.Y, 0.08, 0.92)
+            self:SetMobileTogglePosition(x, y)
+
+            if dragStart and not moved then
+                local delta = Vector2.new(input.Position.X, input.Position.Y) - dragStart
+                if delta.Magnitude >= 8 then
+                    moved = true
+                    self._mobileToggleSuppressUntil = os.clock() + 0.25
+                end
+            end
+        end
+
+        self._conn(mobileToggle.InputBegan:Connect(function(input)
+            local inputType = input.UserInputType
+            if inputType ~= Enum.UserInputType.Touch
+                and inputType ~= Enum.UserInputType.MouseButton1 then
+                return
+            end
+            dragging = true
+            moved = false
+            dragInput = (inputType == Enum.UserInputType.Touch) and input or nil
+            dragStart = Vector2.new(input.Position.X, input.Position.Y)
+        end))
+
+        self._conn(UserInputService.InputChanged:Connect(function(input)
+            if not dragging then return end
+            if dragInput then
+                if input ~= dragInput then return end
+            elseif input.UserInputType ~= Enum.UserInputType.MouseMovement then
+                return
+            end
+            updateTogglePosition(input)
+        end))
+
+        self._conn(UserInputService.InputEnded:Connect(function(input)
+            if not dragging then return end
+            if dragInput then
+                if input ~= dragInput then return end
+            elseif input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+                return
+            end
+            dragging = false
+            dragInput = nil
+            dragStart = nil
+            if moved and type(self._mobileToggleChanged) == "function" then
+                task.spawn(pcall, self._mobileToggleChanged, self._mobileToggleX, self._mobileToggleY)
+            end
+        end))
+
         self._conn(mobileToggle.Activated:Connect(function()
-            if self._dead then return end
+            if self._dead or os.clock() < (self._mobileToggleSuppressUntil or 0) then return end
             self:Toggle()
         end))
-        self._mobileToggle = mobileToggle
     end
     -- stage: bottom center column
     local stage = Instance.new("Frame")
@@ -525,6 +588,9 @@ function Dock.new(opts)
             end
             if self._logo then
                 self._logo.TextSize = panelW <= 380 and 12 or 14
+            end
+            if self._mobileToggle then
+                self:SetMobileTogglePosition(self._mobileToggleX or 0.92, self._mobileToggleY or 0.12)
             end
             task.defer(clampDockToViewport)
         end
@@ -1671,6 +1737,23 @@ function Dock:SetMenuKeyChangedCallback(fn)
     self._menuKeyChanged = type(fn) == "function" and fn or nil
 end
 
+function Dock:SetMobileTogglePosition(x, y)
+    if not self._mobileToggle then return false end
+    x = math.clamp(tonumber(x) or 0.92, 0.06, 0.94)
+    y = math.clamp(tonumber(y) or 0.12, 0.08, 0.92)
+    self._mobileToggleX = x
+    self._mobileToggleY = y
+    self._mobileToggle.Position = UDim2.fromScale(x, y)
+    return true
+end
+
+function Dock:GetMobileTogglePosition()
+    return self._mobileToggleX or 0.92, self._mobileToggleY or 0.12
+end
+
+function Dock:SetMobileToggleChangedCallback(fn)
+    self._mobileToggleChanged = type(fn) == "function" and fn or nil
+end
 function Dock:IsInputBlockEnabled()
     return self._inputBlockEnabled == true
 end

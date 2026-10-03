@@ -1,5 +1,5 @@
 -- ============================================================
--- N3Z HUB v2.2.0 - n3z.lua (entrypoint)
+-- N3Z HUB v2.2.1 - n3z.lua (entrypoint)
 -- Native-GUI dock hub. Run:
 --   loadstring(game:HttpGet(
 --     "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/n3z.lua"))()
@@ -43,7 +43,7 @@ local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/"
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
 local HUB_URL = REPO_URL
 
-local N3Z_VERSION = "v2.2.0"
+local N3Z_VERSION = "v2.2.1"
 
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: one object {id, name, version, game, placeIds, file, envKey?}
@@ -309,6 +309,18 @@ end)
 dock:SetHeader(gameName, "place " .. tostring(placeId) .. " - " .. localPlayer.Name, modLine)
 dock:SetMenuKeyName(isMobile and "TAP" or savedMenuKey.Name)
 
+if isMobile then
+    local toggleX = tonumber(configStore:Ensure("__hub.MobileToggleX", 0.92)) or 0.92
+    local toggleY = tonumber(configStore:Ensure("__hub.MobileToggleY", 0.12)) or 0.12
+    dock:SetMobileTogglePosition(toggleX, toggleY)
+    dock:SetMobileToggleChangedCallback(function(x, y)
+        x = math.floor((tonumber(x) or 0.92) * 10000 + 0.5) / 10000
+        y = math.floor((tonumber(y) or 0.12) * 10000 + 0.5) / 10000
+        configStore:Set("__hub.MobileToggleX", x)
+        configStore:Set("__hub.MobileToggleY", y)
+    end)
+end
+
 -- avatar (async, never blocks boot)
 task.spawn(function()
     local ok, content = pcall(function()
@@ -343,6 +355,17 @@ if isMobile then
         desc = "Use the floating N3Z button anywhere, or tap the active tab to collapse the panel",
         buttonText = "TOGGLE",
         onPress = function() dock:Toggle() end,
+    })
+    dock:AddRow("settings", {
+        kind = "action",
+        name = "Reset Mobile Button",
+        desc = "Move the floating N3Z button back to its default position",
+        buttonText = "RESET",
+        onPress = function()
+            dock:SetMobileTogglePosition(0.92, 0.12)
+            configStore:Set("__hub.MobileToggleX", 0.92)
+            configStore:Set("__hub.MobileToggleY", 0.12)
+        end,
     })
 else
     dock:AddRow("settings", {
