@@ -905,7 +905,7 @@ function Dock.new(opts)
         logo.Parent = bar
         self._logo = logo
 
-        -- 2. Utility Zone pinned to the right (SETTINGS + Avatar)
+        -- 2. Utility Zone pinned to the right (MODULES + SETTINGS + Avatar)
         local utilityZone = Instance.new("Frame")
         utilityZone.Name = "UtilityZone"
         utilityZone.BackgroundTransparency = 1
@@ -930,7 +930,7 @@ function Dock.new(opts)
         primaryScroll.BorderSizePixel = 0
         primaryScroll.AnchorPoint = Vector2.new(0, 0.5)
         primaryScroll.Position = UDim2.new(0, 42, 0.5, 0)
-        primaryScroll.Size = UDim2.new(1, -182, 0, L.tabH)
+        primaryScroll.Size = UDim2.new(1, -252, 0, L.tabH)
         primaryScroll.ScrollingDirection = Enum.ScrollingDirection.X
         -- Hidden when everything fits; clampPrimaryScroll exposes a thin
         -- horizontal thumb only while more primary tabs exist off-screen.
@@ -993,7 +993,7 @@ function Dock.new(opts)
             local logoW = logo.AbsoluteSize.X
             if logoW <= 0 then logoW = 36 end
             local utilW = utilityZone.AbsoluteSize.X
-            if utilW <= 0 then utilW = 134 end
+            if utilW <= 0 then utilW = 204 end
             local gap = 6
             local startX = logoW + gap
             primaryScroll.Position = UDim2.new(0, startX, 0.5, 0)
@@ -1037,23 +1037,24 @@ function Dock.new(opts)
         self._ensureVisible = ensureVisible
 
         conn(primaryScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
-            if self._activeTab and self._activeTab ~= "settings" then
+            local active = self._activeTab and self._tabs[self._activeTab] or nil
+            if active and active.btn and active.btn.Parent == primaryScroll then
                 pinIndicator(false)
             end
         end))
 
-        -- fixed tabs: primary tabs added to primaryScroll, settings added to utilityZone
+        -- fixed tabs: MODULES + SETTINGS are pinned in UtilityZone on desktop
         for _, id in ipairs(TAB_ORDER) do
             self:AddTab(TAB_LABEL[id], id)
         end
 
-        -- Avatar / Profile in UtilityZone (pinned right, after settings)
+        -- Avatar / Profile in UtilityZone (pinned right, after MODULES + SETTINGS)
         if L.showAvatar then
             local spacer = Instance.new("Frame")
             spacer.Name = "AvatarGap"
             spacer.BackgroundTransparency = 1
             spacer.Size = UDim2.new(0, 2, 0, 1)
-            spacer.LayoutOrder = 2
+            spacer.LayoutOrder = 3
             spacer.Parent = utilityZone
 
             local avWrap = Instance.new("Frame")
@@ -1061,7 +1062,7 @@ function Dock.new(opts)
             avWrap.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
             avWrap.BorderSizePixel = 0
             avWrap.Size = UDim2.new(0, 38, 0, 38)
-            avWrap.LayoutOrder = 3
+            avWrap.LayoutOrder = 4
             avWrap.Parent = utilityZone
             cornerRound(avWrap)
             local grad = Instance.new("UIGradient")
@@ -1118,8 +1119,12 @@ function Dock:AddTab(tabLabel, tabId)
         btn.LayoutOrder = #self._tabIds
         btn.Parent = self._tabsRow
     else
-        if string.lower(tostring(tabId)) == "settings" then
+        local utilityId = string.lower(tostring(tabId))
+        if utilityId == "modules" then
             btn.LayoutOrder = 1
+            btn.Parent = self._utilityZone
+        elseif utilityId == "settings" then
+            btn.LayoutOrder = 2
             btn.Parent = self._utilityZone
         else
             table.insert(self._primaryTabIds, tabId)
