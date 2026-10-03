@@ -48,7 +48,7 @@ local N3Z_VERSION = "v2.2.1"
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: one object {id, name, version, game, placeIds, file, envKey?}
 local MODULES = {
-    { id = "warzpvp", name = "WarZPVP", configName = "WarZ", version = "v1.5.2", game = "WarZPVP OPEN BETA",
+    { id = "warzpvp", name = "WarZPVP", configName = "WarZ", version = "v1.6.0", game = "WarZPVP OPEN BETA",
       placeIds = { 135187059974536 }, file = "modules/warz_pvp.lua", envKey = "__RAVEN_WARZPVP" },
     { id = "stealanegg", name = "Steal An Egg", version = "v1.2.7", game = "Steal An Egg",
       placeIds = { 107778070777162 }, file = "modules/steal_an_egg.lua" },

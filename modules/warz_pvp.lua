@@ -6,6 +6,7 @@
 --   v1.4.1 - R15 body bounds, validated head/LOS aim and bounded ESP updates.
 --   v1.5.1 - event-driven loot cache + 60 Hz cached label updates.
 --   v1.5.2 - automatic per-weapon ballistic prediction (lead + gravity drop).
+--   v1.6.0 - native ScreenGui visual fallback for mobile executors without Drawing API.
 --   Read-only visuals + mouse-driven aim.
 --   WarZ notes: FFA + Party/Clan relation colors, skip dead via WarzDead attribute,
 --   character = R15 (Head/HumanoidRootPart), WarzHitboxes folder present.
@@ -71,7 +72,7 @@ return function(Window, ctx)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.5.2"
+    environment.RAVEN_WARZPVP_VER = "1.6.0"
 
     local persistedAimKey = "MouseButton2"
     pcall(function()
@@ -141,17 +142,225 @@ return function(Window, ctx)
     end
 
     local hasDrawing = type(Drawing) == "table" and type(Drawing.new) == "function"
+    local nativeDrawingGui = nil
+    local nativeDrawingObjects = {}
+
+    local function getNativeDrawingParent()
+        local playerGui = localPlayer:FindFirstChildOfClass("PlayerGui")
+        if not playerGui then
+            pcall(function()
+                playerGui = localPlayer:WaitForChild("PlayerGui", 2)
+            end)
+        end
+        if playerGui then return playerGui end
+
+        if type(gethui) == "function" then
+            local ok, parent = pcall(gethui)
+            if ok and parent then return parent end
+        end
+
+        local ok, coreGui = pcall(game.GetService, game, "CoreGui")
+        return ok and coreGui or nil
+    end
+
+    local function ensureNativeDrawingGui()
+        if nativeDrawingGui and nativeDrawingGui.Parent then
+            return nativeDrawingGui
+        end
+        local parent = getNativeDrawingParent()
+        if not parent then return nil end
+
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "N3zWarzVisuals"
+        gui.IgnoreGuiInset = true
+        gui.ResetOnSpawn = false
+        gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+        gui.DisplayOrder = 20
+        pcall(function()
+            gui.ScreenInsets = Enum.ScreenInsets.None
+        end)
+        local okParent = pcall(function()
+            gui.Parent = parent
+        end)
+        if not okParent then
+            pcall(function() gui:Destroy() end)
+            return nil
+        end
+        nativeDrawingGui = gui
+        return gui
+    end
+
+    local function newNativeDrawing(drawingType)
+        local gui = ensureNativeDrawingGui()
+        if not gui then return nil end
+
+        local state = {
+            Visible = false,
+            Color = Color3.new(1, 1, 1),
+            Transparency = 1,
+            Thickness = 1,
+            Filled = false,
+            Position = Vector2.zero,
+            Size = Vector2.zero,
+            Text = "",
+            Center = false,
+            Outline = false,
+            From = Vector2.zero,
+            To = Vector2.zero,
+            Radius = 0,
+            ZIndex = 0,
+        }
+
+        local inst
+        local stroke
+
+        if drawingType == "Text" then
+            local label = Instance.new("TextLabel")
+            label.Name = "NativeText"
+            label.BackgroundTransparency = 1
+            label.BorderSizePixel = 0
+            label.Text = ""
+            label.TextSize = 14
+            label.TextColor3 = state.Color
+            label.TextTransparency = 0
+            label.TextStrokeTransparency = 1
+            label.Font = Enum.Font.Code
+            label.AutomaticSize = Enum.AutomaticSize.XY
+            label.Size = UDim2.fromOffset(0, 0)
+            label.Visible = false
+            label.ZIndex = 1
+            label.Parent = gui
+            inst = label
+            state.Size = 14
+        elseif drawingType == "Line" then
+            local frame = Instance.new("Frame")
+            frame.Name = "NativeLine"
+            frame.BorderSizePixel = 0
+            frame.AnchorPoint = Vector2.new(0.5, 0.5)
+            frame.BackgroundColor3 = state.Color
+            frame.BackgroundTransparency = 0
+            frame.Visible = false
+            frame.ZIndex = 1
+            frame.Parent = gui
+            inst = frame
+        elseif drawingType == "Square" or drawingType == "Circle" then
+            local frame = Instance.new("Frame")
+            frame.Name = drawingType == "Circle" and "NativeCircle" or "NativeSquare"
+            frame.BorderSizePixel = 0
+            frame.BackgroundColor3 = state.Color
+            frame.BackgroundTransparency = 1
+            frame.Visible = false
+            frame.ZIndex = 1
+            frame.Parent = gui
+            inst = frame
+
+            stroke = Instance.new("UIStroke")
+            stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+            stroke.Color = state.Color
+            stroke.Thickness = 1
+            stroke.Parent = frame
+
+            if drawingType == "Circle" then
+                frame.AnchorPoint = Vector2.new(0.5, 0.5)
+                local corner = Instance.new("UICorner")
+                corner.CornerRadius = UDim.new(1, 0)
+                corner.Parent = frame
+            end
+        else
+            return nil
+        end
+
+        local removed = false
+        local proxy = {}
+
+        local function apply()
+            if removed or not inst or not inst.Parent then return end
+            local alpha = math.clamp(tonumber(state.Transparency) or 1, 0, 1)
+            inst.Visible = state.Visible == true
+            inst.ZIndex = math.max(1, math.floor(tonumber(state.ZIndex) or 0) + 1)
+
+            if drawingType == "Text" then
+                inst.Text = tostring(state.Text or "")
+                inst.TextSize = math.max(1, tonumber(state.Size) or 14)
+                inst.TextColor3 = state.Color
+                inst.TextTransparency = 1 - alpha
+                inst.TextStrokeColor3 = Color3.new(0, 0, 0)
+                inst.TextStrokeTransparency = state.Outline and (1 - alpha) or 1
+                inst.AnchorPoint = state.Center and Vector2.new(0.5, 0) or Vector2.new(0, 0)
+                inst.Position = UDim2.fromOffset(state.Position.X, state.Position.Y)
+            elseif drawingType == "Line" then
+                local from = state.From
+                local to = state.To
+                local delta = to - from
+                local length = delta.Magnitude
+                inst.Position = UDim2.fromOffset((from.X + to.X) * 0.5, (from.Y + to.Y) * 0.5)
+                inst.Size = UDim2.fromOffset(math.max(0.01, length), math.max(1, tonumber(state.Thickness) or 1))
+                inst.Rotation = math.deg(math.atan2(delta.Y, delta.X))
+                inst.BackgroundColor3 = state.Color
+                inst.BackgroundTransparency = 1 - alpha
+            elseif drawingType == "Square" then
+                inst.AnchorPoint = Vector2.zero
+                inst.Position = UDim2.fromOffset(state.Position.X, state.Position.Y)
+                inst.Size = UDim2.fromOffset(math.max(0, state.Size.X), math.max(0, state.Size.Y))
+                inst.BackgroundColor3 = state.Color
+                inst.BackgroundTransparency = state.Filled and (1 - alpha) or 1
+                stroke.Enabled = not state.Filled
+                stroke.Color = state.Color
+                stroke.Thickness = math.max(1, tonumber(state.Thickness) or 1)
+                stroke.Transparency = 1 - alpha
+            elseif drawingType == "Circle" then
+                local diameter = math.max(0, (tonumber(state.Radius) or 0) * 2)
+                inst.Position = UDim2.fromOffset(state.Position.X, state.Position.Y)
+                inst.Size = UDim2.fromOffset(diameter, diameter)
+                inst.BackgroundColor3 = state.Color
+                inst.BackgroundTransparency = state.Filled and (1 - alpha) or 1
+                stroke.Enabled = not state.Filled
+                stroke.Color = state.Color
+                stroke.Thickness = math.max(1, tonumber(state.Thickness) or 1)
+                stroke.Transparency = 1 - alpha
+            end
+        end
+
+        local mt = {}
+        function mt.__index(_, key)
+            if key == "Remove" then
+                return function()
+                    if removed then return end
+                    removed = true
+                    nativeDrawingObjects[proxy] = nil
+                    if inst then
+                        pcall(function() inst:Destroy() end)
+                    end
+                    inst = nil
+                end
+            end
+            if key == "TextBounds" and drawingType == "Text" then
+                local ok, bounds = pcall(function() return inst.TextBounds end)
+                return ok and bounds or Vector2.zero
+            end
+            return state[key]
+        end
+
+        function mt.__newindex(_, key, value)
+            state[key] = value
+            apply()
+        end
+
+        setmetatable(proxy, mt)
+        nativeDrawingObjects[proxy] = true
+        apply()
+        return proxy
+    end
 
     local function safeDrawing(drawingType)
-        if not hasDrawing then return nil end
-        local ok, obj = pcall(Drawing.new, drawingType)
-        if ok and obj then
-            -- executor default ZIndex is 1, same as the menu chassis,
-            -- so ESP used to render through the menu. Keep every module
-            -- drawing strictly below the menu.
-            pcall(function() obj.ZIndex = 0 end)
+        if hasDrawing then
+            local ok, obj = pcall(Drawing.new, drawingType)
+            if ok and obj then
+                pcall(function() obj.ZIndex = 0 end)
+                return obj
+            end
         end
-        return (ok and obj) or nil
+        return newNativeDrawing(drawingType)
     end
 
     local function getHealthColor(ratio)
@@ -2006,6 +2215,19 @@ end
             pcall(function() bossAlertText:Remove() end)
             bossAlertText = nil
         end
+
+        local nativeObjects = {}
+        for obj in pairs(nativeDrawingObjects) do
+            table.insert(nativeObjects, obj)
+        end
+        for _, obj in ipairs(nativeObjects) do
+            pcall(function() obj:Remove() end)
+        end
+        table.clear(nativeDrawingObjects)
+        if nativeDrawingGui then
+            pcall(function() nativeDrawingGui:Destroy() end)
+            nativeDrawingGui = nil
+        end
         bossWasPresent = false
         pcall(function()
             local ok, cs = pcall(require, localPlayer.PlayerScripts.Client.input.CombatSettings)
@@ -2042,6 +2264,7 @@ end
         return {
             version = environment.RAVEN_WARZPVP_VER,
             running = running,
+            visualBackend = hasDrawing and "Drawing" or "NativeGui",
             aimbot = settings.aimbot,
             aimKey = settings.aimKeyName,
             aimPosition = settings.aimPosition,
