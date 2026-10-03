@@ -1,6 +1,6 @@
 -- ============================================================
 -- N3Z Dance Avenue platform router
--- v1.3.0 - shared core + explicit PC/Mobile adapters
+-- v1.3.1 - shared core + explicit PC/Mobile adapters
 -- ============================================================
 
 return function(Window, ctx)

@@ -66,7 +66,7 @@ local MODULES = {
       placeIds = { 4639625707 }, file = "modules/war_tycoon.lua" },
     { id = "frisbeefrenzy", name = "Frisbee Frenzy", version = "v1.0.0", game = "Frisbee Frenzy",
       placeIds = { 106986181033085 }, file = "modules/frisbee_frenzy.lua" },
-    { id = "danceavenue", name = "Dance Avenue", configName = "DanceAvenue", version = "v1.3.0", game = "Dance Avenue",
+    { id = "danceavenue", name = "Dance Avenue", configName = "DanceAvenue", version = "v1.3.1", game = "Dance Avenue",
       placeIds = { 79341474117411 }, file = "modules/dance_avenue.lua", envKey = "__N3Z_DANCE_AVENUE",
       coreFile = "modules/dance_avenue/core.lua",
       platformFiles = {

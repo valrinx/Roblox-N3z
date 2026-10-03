@@ -1,7 +1,7 @@
 -- ============================================================
 -- N3Z Dance Avenue - Core Module
--- v1.3.0 - Ultra-Lightweight Zero Lag + 100% Guaranteed Perfect
--- Single GC cache (NO per-frame getgc scan), instant FPS recovery
+-- v1.3.1 - opt-in Perfect/Autoplay with exact state restoration
+-- No startup/per-frame getgc scan; controller scan runs only while Autoplay is enabled
 -- ============================================================
 
 return function(Window, ctx, adapter)
@@ -24,85 +24,146 @@ return function(Window, ctx, adapter)
     end
 
     local state = {
-        alwaysPerfect = true,
-        autoPlay = true,
+        alwaysPerfect = false,
+        autoPlay = false,
         walkSpeed = 26,
         speedEnabled = false,
         infJump = false,
     }
 
     -- ----------------------------------------------------
-    -- 1. ZERO-LAG PERFECT HOOK (Static Module Hook)
+    -- 1. OPT-IN PERFECT HOOK
     -- ----------------------------------------------------
     local audition = ReplicatedStorage:WaitForChild("Audition")
     local Config = require(audition:WaitForChild("Config"))
     local Judge = require(audition:WaitForChild("Judge"))
 
-    local origWindows = {}
-    for k, v in pairs(Config.Windows) do
-        origWindows[k] = v
-    end
-    local origGrade = Judge.grade
+    local perfectSnapshot = nil
 
     local function applyPerfectHook()
+        if perfectSnapshot then return end
+
+        local windows = {}
+        for k, v in pairs(Config.Windows) do
+            windows[k] = v
+        end
+        perfectSnapshot = {
+            windows = windows,
+            grade = Judge.grade,
+        }
+
         Config.Windows.PERFECT = 999.0
         Config.Windows.GREAT = 999.0
         Config.Windows.COOL = 999.0
         Config.Windows.BAD = 999.0
 
-        Judge.grade = function(delta, windows)
+        Judge.grade = function(_delta, _windows)
             return "PERFECT", 0
         end
     end
 
     local function restorePerfectHook()
-        for k, v in pairs(origWindows) do
+        local snapshot = perfectSnapshot
+        if not snapshot then return end
+        perfectSnapshot = nil
+
+        -- Restore the table exactly to the state captured immediately before
+        -- this enable operation.
+        local currentKeys = {}
+        for k in pairs(Config.Windows) do
+            currentKeys[#currentKeys + 1] = k
+        end
+        for _, k in ipairs(currentKeys) do
+            if snapshot.windows[k] == nil then
+                Config.Windows[k] = nil
+            end
+        end
+        for k, v in pairs(snapshot.windows) do
             Config.Windows[k] = v
         end
-        Judge.grade = origGrade
+        Judge.grade = snapshot.grade
     end
 
-    applyPerfectHook()
     addCleanup(restorePerfectHook)
 
     -- ----------------------------------------------------
-    -- 2. ZERO-LAG SINGLETON GAME FINDER (Run ONCE only!)
+    -- 2. OPT-IN AUTOPLAY CONTROLLER
     -- ----------------------------------------------------
-    local cachedGame = nil
-    local function findGameOnce()
-        if cachedGame then return cachedGame end
+    local autoplaySnapshots = setmetatable({}, { __mode = "k" })
+    local autoplayRunId = 0
+
+    local function isGameplayController(obj)
+        return type(obj) == "table"
+            and rawget(obj, "offsetMs") ~= nil
+            and rawget(obj, "state") ~= nil
+            and rawget(obj, "beat") ~= nil
+            and type(rawget(obj, "slots")) == "table"
+            and type(rawget(obj, "bots")) == "table"
+    end
+
+    local function findGameController()
+        local fallback = nil
         for _, obj in ipairs(getgc(true)) do
-            if type(obj) == "table" and rawget(obj, "offsetMs") ~= nil then
-                cachedGame = obj
-                return obj
+            if isGameplayController(obj) then
+                if rawget(obj, "state") == "playing" then
+                    return obj
+                end
+                fallback = fallback or obj
             end
         end
-        return nil
+        return fallback
     end
 
-    local g = findGameOnce()
-    if g then
-        g.autoplay = "human"
+    local function snapshotAutoplay(gameInst)
+        if not gameInst or autoplaySnapshots[gameInst] then return end
+        local original = rawget(gameInst, "autoplay")
+        autoplaySnapshots[gameInst] = {
+            hadValue = original ~= nil,
+            value = original,
+        }
     end
 
-    -- Run check only every 1.5 seconds (zero FPS drop)
-    local activeCheckRunning = true
-    task.spawn(function()
-        while activeCheckRunning do
-            local gameInst = findGameOnce()
-            if gameInst then
-                if state.autoPlay and gameInst.autoplay ~= "human" then
-                    gameInst.autoplay = "human"
-                elseif not state.autoPlay and gameInst.autoplay == "human" then
+    local function restoreAutoplay()
+        for gameInst, snapshot in pairs(autoplaySnapshots) do
+            if type(gameInst) == "table" and type(snapshot) == "table" then
+                if snapshot.hadValue then
+                    gameInst.autoplay = snapshot.value
+                else
                     gameInst.autoplay = nil
                 end
             end
-            task.wait(1.5)
+            autoplaySnapshots[gameInst] = nil
         end
-    end)
+    end
+
+    local function stopAutoplay()
+        state.autoPlay = false
+        autoplayRunId += 1
+        restoreAutoplay()
+    end
+
+    local function startAutoplay()
+        if state.autoPlay then return end
+        state.autoPlay = true
+        autoplayRunId += 1
+        local runId = autoplayRunId
+
+        task.spawn(function()
+            while state.autoPlay and autoplayRunId == runId do
+                local gameInst = findGameController()
+                if gameInst then
+                    snapshotAutoplay(gameInst)
+                    if gameInst.autoplay ~= "human" then
+                        gameInst.autoplay = "human"
+                    end
+                end
+                task.wait(1.5)
+            end
+        end)
+    end
+
     addCleanup(function()
-        activeCheckRunning = false
-        if cachedGame then cachedGame.autoplay = nil end
+        stopAutoplay()
     end)
 
     -- ----------------------------------------------------
@@ -114,10 +175,10 @@ return function(Window, ctx, adapter)
 
     MainTab:CreateToggle({
         Name = "100% Always Perfect (เคาะเมื่อไหร่ก็ Perfect)",
-        Default = true,
+        Default = false,
         Callback = function(v)
-            state.alwaysPerfect = v
-            if v then
+            state.alwaysPerfect = v == true
+            if state.alwaysPerfect then
                 applyPerfectHook()
             else
                 restorePerfectHook()
@@ -127,12 +188,12 @@ return function(Window, ctx, adapter)
 
     MainTab:CreateToggle({
         Name = "Full Auto Play (บอทกดลูกศร + เคาะ Spacebar อัตโนมัติ)",
-        Default = true,
+        Default = false,
         Callback = function(v)
-            state.autoPlay = v
-            local gameInst = findGameOnce()
-            if gameInst then
-                gameInst.autoplay = v and "human" or nil
+            if v then
+                startAutoplay()
+            else
+                stopAutoplay()
             end
         end,
     })
