@@ -13,6 +13,7 @@ local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local ContextActionService = game:GetService("ContextActionService")
 local localPlayer = Players.LocalPlayer
 
 -- ---------- theme (matches n3z-dock.html mockup) ----------
@@ -184,6 +185,11 @@ function Dock.new(opts)
     self._menuKey = opts.menuKey or Enum.KeyCode.K
     self._visible = true
     self._dead = false
+    self._inputBlockEnabled = (opts.blockInputEnabled ~= false)
+    self._inputBlockBound = false
+    self._inputActionName = "N3Z_MENU_INPUT_BLOCK"
+    -- clear a stale blocker left by an interrupted/re-executed dock
+    pcall(function() ContextActionService:UnbindAction(self._inputActionName) end)
     -- layout: "pc" default, "mobile" for touch devices (mockup parity)
     local layoutName = (opts.layout == "mobile") and "mobile" or "pc"
     local L = LAYOUTS[layoutName]
@@ -214,6 +220,24 @@ function Dock.new(opts)
     gui.DisplayOrder = 999
     gui.Parent = getGuiParent()
     self._gui = gui
+
+    -- Full-screen transparent mouse shield. It sits below every N3Z control
+    -- (ZIndex 0) but above the 3D game while a panel is open, so clicks outside
+    -- the menu are still marked as UI input instead of firing weapons/actions.
+    local inputShield = Instance.new("TextButton")
+    inputShield.Name = "InputShield"
+    inputShield.BackgroundTransparency = 1
+    inputShield.Text = ""
+    inputShield.TextTransparency = 1
+    inputShield.AutoButtonColor = false
+    inputShield.Active = true
+    inputShield.Modal = true
+    inputShield.Visible = false
+    inputShield.ZIndex = 0
+    inputShield.Position = UDim2.fromScale(0, 0)
+    inputShield.Size = UDim2.fromScale(1, 1)
+    inputShield.Parent = gui
+    self._inputShield = inputShield
 
     -- stage: bottom center column
     local stage = Instance.new("Frame")
@@ -391,6 +415,7 @@ function Dock.new(opts)
     bar.Name = "DockBar"
     bar.BackgroundColor3 = C.dockBg
     bar.BackgroundTransparency = 0.04
+    bar.Active = true
     bar.AutomaticSize = Enum.AutomaticSize.X
     bar.Size = UDim2.new(0, 0, 0, L.barH)
     bar.LayoutOrder = 2
@@ -405,16 +430,30 @@ function Dock.new(opts)
     barPad.Parent = bar
     self._bar = bar
 
-    -- draggable bar: free drag, flip panel when in top 40%.
-    -- 15px threshold so tab clicks don't nudge the menu.
+    -- Draggable dock. Listen at UserInputService level instead of only
+    -- bar.InputBegan: most of the visible bar is covered by tab/avatar
+    -- children, so child hit-testing otherwise prevents drag from starting.
+    -- A movement threshold preserves normal tab clicks.
     do
         local uis = game:GetService("UserInputService")
         local dragging = false
         local dragMoved = false
+        local dragInput = nil
         local grabOffset = nil
         local grabPos = nil
+
+        self._flipped = false
+
         local function setFlipped(f)
+            f = (f == true)
+            if self._flipped == f then return end
+
+            -- Keep the dock bar pinned to the exact same screen position while
+            -- the panel changes sides. Without this, changing LayoutOrder makes
+            -- the bar jump by roughly the panel height and "escape" the cursor.
+            local oldBarPos = bar.AbsolutePosition
             self._flipped = f
+
             if f then
                 bar.LayoutOrder = 1
                 panel.LayoutOrder = 2
@@ -424,45 +463,119 @@ function Dock.new(opts)
                 bar.LayoutOrder = 2
                 stageLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
             end
+
+            local function repinBar()
+                if self._dead or not stage.Parent or not bar.Parent then return end
+                local delta = oldBarPos - bar.AbsolutePosition
+                if delta.Magnitude > 0.5 then
+                    local p = stage.Position
+                    stage.Position = UDim2.new(
+                        p.X.Scale, p.X.Offset + delta.X,
+                        p.Y.Scale, p.Y.Offset + delta.Y
+                    )
+                end
+            end
+
+            -- Layout may settle immediately or on the next scheduler step
+            -- depending on executor/frame timing, so correct both times.
+            repinBar()
+            task.defer(repinBar)
         end
+
         local function applyFlipByY()
             local cam = workspace.CurrentCamera
             local vy = cam and cam.ViewportSize.Y or 1080
-            setFlipped(stage.AbsolutePosition.Y < vy * 0.4)
+            local barCenterY = bar.AbsolutePosition.Y + bar.AbsoluteSize.Y * 0.5
+            setFlipped(barCenterY < vy * 0.4)
         end
-        self._conn(bar.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1
-                or input.UserInputType == Enum.UserInputType.Touch then
-                dragging = true
-                dragMoved = false
-                grabPos = input.Position
-                grabOffset = input.Position - stage.AbsolutePosition
-            end
-        end))
-        self._conn(uis.InputChanged:Connect(function(input)
-            if not dragging then return end
+
+        local function pointerPos(input)
+            local p = input.Position
+            return Vector2.new(p.X, p.Y)
+        end
+
+        local function insideBar(pos)
+            local p = bar.AbsolutePosition
+            local sz = bar.AbsoluteSize
+            return pos.X >= p.X and pos.X <= p.X + sz.X
+                and pos.Y >= p.Y and pos.Y <= p.Y + sz.Y
+        end
+
+        local function beginDrag(input)
             local t = input.UserInputType
-            if t ~= Enum.UserInputType.MouseMovement and t ~= Enum.UserInputType.Touch then return end
+            if t ~= Enum.UserInputType.MouseButton1 and t ~= Enum.UserInputType.Touch then
+                return
+            end
+            local pos = pointerPos(input)
+            if not insideBar(pos) then return end
+
+            dragging = true
+            dragMoved = false
+            dragInput = (t == Enum.UserInputType.Touch) and input or nil
+            grabPos = pos
+            -- Preserve the exact point inside the dock bar that the cursor
+            -- grabbed. The panel can be much taller than the bar, so using
+            -- stage.AbsolutePosition makes the cursor drift near screen edges.
+            grabOffset = pos - bar.AbsolutePosition
+        end
+
+        self._conn(uis.InputBegan:Connect(function(input)
+            if self._dead then return end
+            beginDrag(input)
+        end))
+
+        self._conn(uis.InputChanged:Connect(function(input)
+            if self._dead or not dragging then return end
+            local t = input.UserInputType
+            if dragInput then
+                if input ~= dragInput then return end
+            elseif t ~= Enum.UserInputType.MouseMovement then
+                return
+            end
+
+            local pos = pointerPos(input)
             if not dragMoved then
-                if (input.Position - grabPos).Magnitude < 15 then return end
+                if (pos - grabPos).Magnitude < 8 then return end
                 dragMoved = true
+                self._dragSuppressUntil = os.clock() + 0.20
                 local absPos = stage.AbsolutePosition
                 stage.AnchorPoint = Vector2.new(0, 0)
                 stage.Position = UDim2.fromOffset(absPos.X, absPos.Y)
             end
+
             local cam = workspace.CurrentCamera
             local vx = cam and cam.ViewportSize.X or 1920
             local vy = cam and cam.ViewportSize.Y or 1080
-            local nx = math.clamp(input.Position.X - grabOffset.X, 0, math.max(0, vx - stage.AbsoluteSize.X))
-            local ny = math.clamp(input.Position.Y - grabOffset.Y, 0, math.max(0, vy - stage.AbsoluteSize.Y))
-            stage.Position = UDim2.fromOffset(nx, ny)
+
+            -- Clamp the BAR, not the full stage. This keeps the grabbed point
+            -- under the cursor even while an open panel extends above/below it.
+            local desiredBar = Vector2.new(
+                math.clamp(pos.X - grabOffset.X, 0, math.max(0, vx - bar.AbsoluteSize.X)),
+                math.clamp(pos.Y - grabOffset.Y, 0, math.max(0, vy - bar.AbsoluteSize.Y))
+            )
+            local delta = desiredBar - bar.AbsolutePosition
+            local sp = stage.Position
+            stage.Position = UDim2.new(
+                sp.X.Scale, sp.X.Offset + delta.X,
+                sp.Y.Scale, sp.Y.Offset + delta.Y
+            )
         end))
+
         self._conn(uis.InputEnded:Connect(function(input)
             if not dragging then return end
             local t = input.UserInputType
-            if t ~= Enum.UserInputType.MouseButton1 and t ~= Enum.UserInputType.Touch then return end
+            if dragInput then
+                if input ~= dragInput then return end
+            elseif t ~= Enum.UserInputType.MouseButton1 then
+                return
+            end
+
             dragging = false
-            if dragMoved then applyFlipByY() end
+            dragInput = nil
+            if dragMoved then
+                self._dragSuppressUntil = os.clock() + 0.20
+                applyFlipByY()
+            end
         end))
     end
 
@@ -652,6 +765,7 @@ function Dock:AddTab(tabLabel, tabId)
     local id = tabId
     local this = self
     self._conn(btn.MouseButton1Click:Connect(function()
+        if os.clock() < (this._dragSuppressUntil or 0) then return end
         this:SetActiveTab(id)
     end))
     -- hover: brighten (mockup .di:hover)
@@ -675,9 +789,67 @@ function Dock:AddTab(tabLabel, tabId)
     return tabId
 end
 
+-- Re-pin the dock bar after any layout mutation (panel open/close,
+-- switching pages with different heights, flip, etc.). After a manual drag the
+-- Stage uses absolute positioning, so AutomaticSize/UIListLayout changes must
+-- not be allowed to move the bar the user placed.
+function Dock:_repinBar(oldBarPos, holdSeconds)
+    local stage = self._stage
+    local bar = self._bar
+    if self._dead or not stage or not bar or not stage.Parent or not bar.Parent then return end
+
+    self._barPinToken = (self._barPinToken or 0) + 1
+    local token = self._barPinToken
+    local deadline = os.clock() + (holdSeconds or 0.65)
+    local correcting = false
+
+    local function repin()
+        if correcting or self._dead or token ~= self._barPinToken
+            or not stage.Parent or not bar.Parent then return end
+        local delta = oldBarPos - bar.AbsolutePosition
+        if delta.Magnitude > 0.25 then
+            correcting = true
+            local p = stage.Position
+            stage.Position = UDim2.new(
+                p.X.Scale, p.X.Offset + delta.X,
+                p.Y.Scale, p.Y.Offset + delta.Y
+            )
+            correcting = false
+        end
+    end
+
+    -- Correct immediately whenever UIListLayout/AutomaticSize moves the bar.
+    local posConn
+    posConn = bar:GetPropertyChangedSignal("AbsolutePosition"):Connect(function()
+        if self._dead or token ~= self._barPinToken or os.clock() >= deadline then
+            if posConn then posConn:Disconnect(); posConn = nil end
+            return
+        end
+        repin()
+    end)
+    self._conn(posConn)
+
+    -- Keep a render-step guard for the whole open/close animation window.
+    local frameConn
+    frameConn = RunService.RenderStepped:Connect(function()
+        if self._dead or token ~= self._barPinToken or os.clock() >= deadline then
+            if frameConn then frameConn:Disconnect(); frameConn = nil end
+            if posConn then posConn:Disconnect(); posConn = nil end
+            return
+        end
+        repin()
+    end)
+    self._conn(frameConn)
+
+    repin()
+end
+
 -- Clicking a tab opens its panel; clicking the active tab collapses it.
 function Dock:SetActiveTab(tabId)
     if not self._tabs[tabId] then return end
+
+    local oldBarPos = self._bar and self._bar.AbsolutePosition or nil
+
     if self._activeTab == tabId then
         self._activeTab = nil
         for id, t in pairs(self._tabs) do
@@ -688,8 +860,11 @@ function Dock:SetActiveTab(tabId)
         self._panel.Visible = false
         if self._indicator then self._indicator.Visible = false end
         self:_updateFooter()
+        self:_syncInputBlock()
+        if oldBarPos then self:_repinBar(oldBarPos, 0.8) end
         return
     end
+
     self._activeTab = tabId
     self._panel.Visible = true
     for id, t in pairs(self._tabs) do
@@ -702,6 +877,9 @@ function Dock:SetActiveTab(tabId)
     if self._pinIndicator then self._pinIndicator(true) end
     self:_animateRows(self._tabs[tabId].page)
     self:_updateFooter()
+    self:_syncInputBlock()
+
+    if oldBarPos then self:_repinBar(oldBarPos, 0.8) end
 end
 
 -- staggered row entrance (mockup rowIn): fresh snapshot each switch so
@@ -838,6 +1016,9 @@ function Dock:StartKeyRebind(chip)
             local short = keyShort(input.KeyCode)
             if chip then chip.Text = short end
             self:SetMenuKeyName(short)
+            if type(self._menuKeyChanged) == "function" then
+                task.spawn(pcall, self._menuKeyChanged, input.KeyCode)
+            end
         elseif chip and old then
             chip.Text = old
         end
@@ -1339,9 +1520,76 @@ function Dock:AddRow(tabId, def)
 end
 
 -- ---------- visibility / lifecycle ----------
+function Dock:IsPanelOpen()
+    return not self._dead
+        and self._visible == true
+        and self._activeTab ~= nil
+        and self._panel ~= nil
+        and self._panel.Visible == true
+end
+
+function Dock:SetMenuKey(keyCode)
+    if typeof(keyCode) == "EnumItem" and keyCode.EnumType == Enum.KeyCode then
+        self._menuKey = keyCode
+        self:SetMenuKeyName(keyShort(keyCode))
+        return true
+    end
+    return false
+end
+
+function Dock:SetMenuKeyChangedCallback(fn)
+    self._menuKeyChanged = type(fn) == "function" and fn or nil
+end
+
+function Dock:IsInputBlockEnabled()
+    return self._inputBlockEnabled == true
+end
+
+function Dock:SetInputBlockEnabled(v)
+    self._inputBlockEnabled = (v ~= false)
+    self:_syncInputBlock()
+end
+
+function Dock:_syncInputBlock()
+    local shouldBlock = self:IsInputBlockEnabled() and self:IsPanelOpen()
+
+    if self._inputShield then
+        pcall(function()
+            self._inputShield.Visible = shouldBlock
+            self._inputShield.Active = shouldBlock
+        end)
+    end
+
+    if shouldBlock == self._inputBlockBound then return end
+    self._inputBlockBound = shouldBlock
+
+    pcall(function()
+        ContextActionService:UnbindAction(self._inputActionName)
+    end)
+
+    if shouldBlock then
+        pcall(function()
+            ContextActionService:BindActionAtPriority(
+                self._inputActionName,
+                function()
+                    return Enum.ContextActionResult.Sink
+                end,
+                false,
+                10000,
+                Enum.UserInputType.MouseButton1,
+                Enum.UserInputType.MouseButton2,
+                Enum.UserInputType.MouseButton3,
+                Enum.UserInputType.MouseWheel,
+                Enum.UserInputType.Touch
+            )
+        end)
+    end
+end
+
 function Dock:SetVisible(v)
     self._visible = (v ~= false)
     self._stage.Visible = self._visible
+    self:_syncInputBlock()
 end
 
 function Dock:Toggle()
@@ -1353,25 +1601,78 @@ function Dock:OnUnload(fn)
 end
 
 function Dock:Destroy()
+    if self._dead then return end
     self._dead = true
-    for _, fn in ipairs(self._unloadFns) do
+    self._visible = false
+    self._activeTab = nil
+
+    if self._inputBlockBound then
+        self._inputBlockBound = false
+        pcall(function() ContextActionService:UnbindAction(self._inputActionName) end)
+    end
+    pcall(function()
+        if self._inputShield then
+            self._inputShield.Visible = false
+            self._inputShield.Active = false
+        end
+    end)
+
+    -- Hide immediately. This makes unload deterministic even when Destroy()
+    -- is called from the button's own click callback.
+    pcall(function()
+        if self._stage then self._stage.Visible = false end
+        if self._gui then self._gui.Enabled = false end
+    end)
+
+    local unloadFns = self._unloadFns
+    self._unloadFns = {}
+    for _, fn in ipairs(unloadFns) do
         pcall(fn)
     end
-    for _, c in ipairs(self._conns) do
+
+    local conns = self._conns
+    self._conns = {}
+    for _, c in ipairs(conns) do
         pcall(function() c:Disconnect() end)
     end
-    pcall(function() self._gui:Destroy() end)
+
+    local gui = self._gui
+    self._gui = nil
+    self._stage = nil
+    self._bar = nil
+    self._panel = nil
+    self._inputShield = nil
+    if gui then pcall(function() gui:Destroy() end) end
 end
 
--- sweep orphan N3zDock guis (duplicates from re-execute / failed unload)
+local function guiRoots()
+    local roots, seen = {}, {}
+    local function add(root)
+        if typeof(root) == "Instance" and not seen[root] then
+            seen[root] = true
+            roots[#roots + 1] = root
+        end
+    end
+    pcall(function()
+        if type(gethui) == "function" then add(gethui()) end
+    end)
+    pcall(function() add(game:GetService("CoreGui")) end)
+    pcall(function() add(localPlayer:FindFirstChildOfClass("PlayerGui")) end)
+    return roots
+end
+
+-- Sweep orphan N3zDock GUIs from every parent the executor may have used.
 function Dock.destroyAllGuis()
-    local parent = getGuiParent()
-    if not parent then return 0 end
     local n = 0
-    for _, c in ipairs(parent:GetChildren()) do
-        if c.Name == "N3zDock" and c.ClassName == "ScreenGui" then
-            pcall(function() c:Destroy() end)
-            n = n + 1
+    for _, parent in ipairs(guiRoots()) do
+        for _, c in ipairs(parent:GetChildren()) do
+            if c.Name == "N3zDock" and c:IsA("ScreenGui") then
+                local ok = pcall(function()
+                    c.Enabled = false
+                    c:Destroy()
+                end)
+                if ok then n = n + 1 end
+            end
         end
     end
     return n

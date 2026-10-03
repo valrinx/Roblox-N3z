@@ -8,6 +8,7 @@
 local Players = game:GetService("Players")
 local localPlayer = Players.LocalPlayer
 local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
 
 -- mobile: touch device without a keyboard -> mobile dock layout (mockup parity)
 local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
@@ -21,7 +22,7 @@ local N3Z_VERSION = "v2.1.1"
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: one object {id, name, version, game, placeIds, file, envKey?}
 local MODULES = {
-    { id = "warzpvp", name = "WarZPVP", version = "v1.5.0", game = "WarZPVP OPEN BETA",
+    { id = "warzpvp", name = "WarZPVP", configName = "WarZ", version = "v1.5.0", game = "WarZPVP OPEN BETA",
       placeIds = { 135187059974536 }, file = "modules/warz_pvp.lua", envKey = "__RAVEN_WARZPVP" },
     { id = "stealanegg", name = "Steal An Egg", version = "v1.2.7", game = "Steal An Egg",
       placeIds = { 107778070777162 }, file = "modules/steal_an_egg.lua" },
@@ -99,6 +100,129 @@ local function fetchHub(name)
     return fetch(name, name)
 end
 
+-- ---------- per-game executor-workspace config ----------
+-- Relative paths resolve inside the executor workspace:
+--   N3zHUB/<safe game name>/setting/config.json
+local function safeFolderName(name, fallback)
+    local value = tostring(name or "")
+    value = value:gsub("[^%w%s_%-]", "")
+    value = value:gsub("%s+", " ")
+    value = value:match("^%s*(.-)%s*$") or ""
+    if value == "" then value = tostring(fallback or "Game") end
+    return value:sub(1, 64)
+end
+
+local function ensureFolderTree(path)
+    if type(makefolder) ~= "function" then return false end
+    local current = ""
+    for part in tostring(path):gmatch("[^/]+") do
+        current = (current == "") and part or (current .. "/" .. part)
+        local exists = false
+        if type(isfolder) == "function" then
+            local ok, result = pcall(isfolder, current)
+            exists = ok and result == true
+        end
+        if not exists then pcall(makefolder, current) end
+    end
+    return true
+end
+
+local function createConfigStore(folderName)
+    folderName = safeFolderName(folderName, "Game" .. tostring(game.PlaceId))
+    local dir = "N3zHUB/" .. folderName .. "/setting"
+    local path = dir .. "/config.json"
+    local values = {}
+    local loaded = false
+
+    if type(readfile) == "function" and type(isfile) == "function" then
+        local okExists, exists = pcall(isfile, path)
+        if okExists and exists then
+            local okRead, rawConfig = pcall(readfile, path)
+            if okRead and type(rawConfig) == "string" and rawConfig ~= "" then
+                local okDecode, decoded = pcall(function()
+                    return HttpService:JSONDecode(rawConfig)
+                end)
+                if okDecode and type(decoded) == "table" then
+                    if type(decoded.values) == "table" then
+                        values = decoded.values
+                    else
+                        values = decoded
+                    end
+                    loaded = true
+                end
+            end
+        end
+    end
+
+    local store = {
+        path = path,
+        dir = dir,
+        game = folderName,
+        values = values,
+        loaded = loaded,
+        dirty = false,
+        _saveToken = 0,
+    }
+
+    function store:Has(key)
+        return type(key) == "string" and self.values[key] ~= nil
+    end
+
+    function store:Get(key, defaultValue)
+        local value = self.values[key]
+        if value == nil then return defaultValue end
+        return value
+    end
+
+    function store:Ensure(key, value)
+        if type(key) ~= "string" or key == "" then return value end
+        if self.values[key] == nil then
+            self.values[key] = value
+            self.dirty = true
+        end
+        return self.values[key]
+    end
+
+    function store:Flush()
+        if not self.dirty then return true end
+        if type(writefile) ~= "function" then return false end
+        ensureFolderTree(self.dir)
+        local payload = {
+            version = 1,
+            game = self.game,
+            placeId = game.PlaceId,
+            values = self.values,
+        }
+        local okEncode, encoded = pcall(function()
+            return HttpService:JSONEncode(payload)
+        end)
+        if not okEncode then return false end
+        local okWrite = pcall(writefile, self.path, encoded)
+        if okWrite then self.dirty = false end
+        return okWrite
+    end
+
+    function store:ScheduleSave()
+        self._saveToken += 1
+        local token = self._saveToken
+        task.delay(0.12, function()
+            if token == self._saveToken then
+                pcall(function() self:Flush() end)
+            end
+        end)
+    end
+
+    function store:Set(key, value)
+        if type(key) ~= "string" or key == "" then return end
+        if self.values[key] == value then return end
+        self.values[key] = value
+        self.dirty = true
+        self:ScheduleSave()
+    end
+
+    return store
+end
+
 -- ---------- env ----------
 local env = (type(getgenv) == "function" and getgenv()) or _G
 
@@ -136,8 +260,28 @@ end
 
 local gameName = activeMod and activeMod.game or tostring(game.Name)
 local modLine = (activeMod and activeMod.version or "no module")
-dock:SetHeader(gameName, "place " .. tostring(placeId) .. " · " .. localPlayer.Name, modLine)
-dock:SetMenuKeyName(isMobile and "TAP" or "K")
+local configFolderName = activeMod and (activeMod.configName or activeMod.name or activeMod.id)
+    or ("Game" .. tostring(placeId))
+local configStore = createConfigStore(configFolderName)
+Window:SetConfigStore(configStore)
+
+local savedBlockInput = configStore:Ensure("__hub.BlockGameInput", false)
+dock:SetInputBlockEnabled(savedBlockInput == true)
+
+local savedMenuKeyName = configStore:Ensure("__hub.MenuKey", "K")
+local savedMenuKey = nil
+if type(savedMenuKeyName) == "string" then
+    pcall(function() savedMenuKey = Enum.KeyCode[savedMenuKeyName] end)
+end
+if typeof(savedMenuKey) ~= "EnumItem" then savedMenuKey = Enum.KeyCode.K end
+dock:SetMenuKey(savedMenuKey)
+dock:SetMenuKeyChangedCallback(function(keyCode)
+    if typeof(keyCode) == "EnumItem" then
+        configStore:Set("__hub.MenuKey", keyCode.Name)
+    end
+end)
+dock:SetHeader(gameName, "place " .. tostring(placeId) .. " - " .. localPlayer.Name, modLine)
+dock:SetMenuKeyName(isMobile and "TAP" or savedMenuKey.Name)
 
 -- avatar (async, never blocks boot)
 task.spawn(function()
@@ -159,22 +303,22 @@ for _, m in ipairs(MODULES) do
     dock:AddRow("modules", {
         kind = "modulecard",
         name = m.name,
-        sub = m.version .. " · " .. (isActive and ("matched: " .. m.game) or "not in this game"),
+        sub = m.version .. " - " .. (isActive and ("matched: " .. m.game) or "not in this game"),
         active = isActive,
     })
 end
 
 -- ---------- SETTINGS tab ----------
-local profileName = "N3ZHUB/" .. (activeMod and activeMod.id or "global") .. "/settings/default.json"
+local profileName = configStore.path
 if isMobile then
     -- mobile: no keyboard — tap the active tab to collapse/expand (mockup footer)
     dock:AddRow("settings", {
-        kind = "action", name = "Menu Toggle", desc = "แตะแท็บที่เปิดอยู่ซ้ำเพื่อยุบ / กางเมนู",
+        kind = "action", name = "Menu Toggle", desc = "Tap the active tab to collapse or expand the menu",
     })
 else
     dock:AddRow("settings", {
-        kind = "action", name = "Menu Toggle Key", desc = "กดที่แถวแล้วกดปุ่มใหม่เพื่อเปลี่ยน",
-        chip = "K", rebindKey = true,
+        kind = "action", name = "Menu Toggle Key", desc = "Press this row, then press a key to change the menu hotkey",
+        chip = savedMenuKey.Name, rebindKey = true,
     })
 end
 dock:AddRow("settings", {
@@ -182,31 +326,43 @@ dock:AddRow("settings", {
     chip = "EDIT", clipboard = profileName,
 })
 
+dock:AddRow("settings", {
+    kind = "toggle",
+    name = "Block Game Input",
+    desc = "Block mouse / touch input from reaching the game while a menu tab is open",
+    value = dock:IsInputBlockEnabled(),
+    onChange = function(v)
+        dock:SetInputBlockEnabled(v)
+        configStore:Set("__hub.BlockGameInput", v == true)
+    end,
+})
+
 local unloadAll
 local unloadDone = false
 unloadAll = function()
     if unloadDone then return end
     unloadDone = true
-    if activeMod and activeMod.envKey then
-        pcall(function()
-            local t = env[activeMod.envKey]
-            if type(t) == "table" and type(t.Destroy) == "function" then
-                t.Destroy()
-            end
-        end)
+
+    -- Make the menu disappear before any module cleanup runs. Cleanup may
+    -- yield/error internally, but the hub itself should already be gone.
+    pcall(function() dock:SetVisible(false) end)
+
+    local moduleHandle = activeMod and activeMod.envKey and env[activeMod.envKey] or nil
+    if type(moduleHandle) == "table" and type(moduleHandle.Destroy) == "function" then
+        pcall(moduleHandle.Destroy)
     end
-    pcall(function() Window:Destroy() end)
-    pcall(function() dock:Destroy() end)
-    pcall(function() Dock.destroyAllGuis() end)
-    pcall(function()
-        local hui = nil
-        local ok, h = pcall(function() return gethui() end)
-        if ok and typeof(h) == "Instance" then hui = h end
-        if not hui then local ok2, cg = pcall(function() return game:GetService("CoreGui") end) if ok2 and cg then hui = cg end end
-        if hui then for _, c in ipairs(hui:GetChildren()) do if c.Name == "N3zDock" then pcall(function() c:Destroy() end) end end end
-    end)
+
     env.__N3Z_WINDOW = nil
     env.__RAVEN_WINDOW = nil
+
+    pcall(function() Window:Destroy() end)
+    pcall(function() Dock.destroyAllGuis() end)
+
+    -- One deferred sweep catches a GUI that was still inside its click event
+    -- when the first destroy ran.
+    task.defer(function()
+        pcall(function() Dock.destroyAllGuis() end)
+    end)
 end
 
 dock:AddRow("settings", {
@@ -235,6 +391,10 @@ end
 -- compat alias for old modules (set after load so the module's own
 -- startup cleanup can't destroy the window we just built)
 env.__RAVEN_WINDOW = Window
+
+-- First run writes one complete per-game config. Later UI changes autosave.
+pcall(function() configStore:Flush() end)
+
 
 -- boot: dock bar only. The panel opens when the user picks a tab.
 return Window

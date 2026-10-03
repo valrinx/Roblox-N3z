@@ -19,6 +19,9 @@ return function(Window, ctx)
 
     local localPlayer = Players.LocalPlayer
     local camera = Workspace.CurrentCamera
+    local dock = (type(ctx) == "table" and type(ctx.dock) == "table" and ctx.dock)
+        or (type(Window) == "table" and type(Window.dock) == "table" and Window.dock)
+        or nil
 
     -- Read-only access to WarZ's own current hit-shape solver.
     -- We only query the currently locked target, never every player per frame.
@@ -49,6 +52,14 @@ return function(Window, ctx)
     end)
     environment.RAVEN_WARZPVP_VER = "1.5.0"
 
+    local persistedAimKey = "MouseButton2"
+    pcall(function()
+        if type(Window.GetConfigValue) == "function" then
+            local saved = Window:GetConfigValue("WZP_AimKey", "MouseButton2")
+            if type(saved) == "string" and saved ~= "" then persistedAimKey = saved end
+        end
+    end)
+
     local running = true
     local connections = {}
     local uiSections = {} -- sections this module created (for clean reload)
@@ -74,7 +85,7 @@ return function(Window, ctx)
         aimFov = 150,
         aimPosition = "Auto",
         aimResponse = 0.35,
-        aimKeyName = "MouseButton2",
+        aimKeyName = persistedAimKey,
         autoHeal = false,
         healThreshold = 50,
         healSlot = 3,
@@ -509,12 +520,90 @@ return function(Window, ctx)
         return hum ~= nil and hum.Health > 0
     end
 
+    -- Drawing API may render above ScreenGui on some executors. Instead of
+    -- hiding all ESP while N3Z is open, clip only drawings that overlap the
+    -- visible panel rectangle.
+    local function getMenuPanelRect()
+        if dock and type(dock.IsPanelOpen) == "function" then
+            local okOpen, open = pcall(function() return dock:IsPanelOpen() end)
+            if okOpen and open and dock._panel then
+                local okRect, pos, size = pcall(function()
+                    return dock._panel.AbsolutePosition, dock._panel.AbsoluteSize
+                end)
+                if okRect and typeof(pos) == "Vector2" and typeof(size) == "Vector2" then
+                    return { x = pos.X, y = pos.Y, w = size.X, h = size.Y }
+                end
+            end
+        end
+
+        -- Fallback for older DrawingUI-style windows.
+        local ok, visible, pos, size = pcall(function()
+            return Window.visible, Window.pos, Window.size
+        end)
+        if ok and visible == true and typeof(pos) == "Vector2" and typeof(size) == "Vector2" then
+            return { x = pos.X, y = pos.Y, w = size.X, h = size.Y }
+        end
+        return nil
+    end
+
+    local function rectOverlapsMenu(x, y, w, h, rect)
+        if not rect then return false end
+        return x < rect.x + rect.w and x + w > rect.x
+            and y < rect.y + rect.h and y + h > rect.y
+    end
+
+    local function pointInMenu(p, rect)
+        return rect ~= nil
+            and p.X >= rect.x and p.X <= rect.x + rect.w
+            and p.Y >= rect.y and p.Y <= rect.y + rect.h
+    end
+
+    local function segmentOverlapsMenu(a, b, rect)
+        if not rect then return false end
+        if pointInMenu(a, rect) or pointInMenu(b, rect) then return true end
+
+        -- Liang-Barsky segment/rectangle intersection.
+        local dx, dy = b.X - a.X, b.Y - a.Y
+        local t0, t1 = 0, 1
+        local function clip(pv, qv)
+            if math.abs(pv) < 1e-6 then return qv >= 0 end
+            local r = qv / pv
+            if pv < 0 then
+                if r > t1 then return false end
+                if r > t0 then t0 = r end
+            else
+                if r < t0 then return false end
+                if r < t1 then t1 = r end
+            end
+            return true
+        end
+        return clip(-dx, a.X - rect.x)
+            and clip(dx, rect.x + rect.w - a.X)
+            and clip(-dy, a.Y - rect.y)
+            and clip(dy, rect.y + rect.h - a.Y)
+    end
+
+    local function textOverlapsMenu(d, rect)
+        if not d or not rect then return false end
+        local ok, pos, bounds, centered = pcall(function()
+            return d.Position, d.TextBounds, d.Center
+        end)
+        if not ok or typeof(pos) ~= "Vector2" then return false end
+        if typeof(bounds) ~= "Vector2" then
+            return pointInMenu(pos, rect)
+        end
+        local x = pos.X - ((centered == true) and bounds.X * 0.5 or 0)
+        local y = pos.Y
+        return rectOverlapsMenu(x, y, bounds.X, bounds.Y, rect)
+    end
+
     local function updatePlayerEsp()
         if not settings.espEnabled then
             for _, e in pairs(espCache) do hideEntry(e) end
             return
         end
         local camPos = camera.CFrame.Position
+        local menuRect = getMenuPanelRect()
         for _, p in ipairs(Players:GetPlayers()) do
             if p ~= localPlayer or settings.selfEsp then
                 local e = getEntry(p)
@@ -530,7 +619,7 @@ return function(Window, ctx)
                             if settings.boxEsp and e.box then
                                 e.box.Size = Vector2.new(w, h)
                                 e.box.Position = Vector2.new(x0, y0)
-                                e.box.Visible = true
+                                e.box.Visible = not rectOverlapsMenu(x0, y0, w, h, menuRect)
                             elseif e.box then
                                 e.box.Visible = false
                             end
@@ -547,7 +636,7 @@ return function(Window, ctx)
                                 end
                                 e.name.Text = label
                                 e.name.Position = Vector2.new(bounds.centerX, y0 - 18)
-                                e.name.Visible = true
+                                e.name.Visible = not textOverlapsMenu(e.name, menuRect)
                             elseif e.name then
                                 e.name.Visible = false
                             end
@@ -557,11 +646,13 @@ return function(Window, ctx)
                                 local bw = 4
                                 e.hpBack.Size = Vector2.new(bw, h)
                                 e.hpBack.Position = Vector2.new(x0 - bw - 2, y0)
-                                e.hpBack.Visible = true
-                                e.hpFill.Size = Vector2.new(bw, h * ratio)
-                                e.hpFill.Position = Vector2.new(x0 - bw - 2, y0 + h * (1 - ratio))
+                                e.hpBack.Visible = not rectOverlapsMenu(x0 - bw - 2, y0, bw, h, menuRect)
+                                local fillH = h * ratio
+                                local fillY = y0 + h * (1 - ratio)
+                                e.hpFill.Size = Vector2.new(bw, fillH)
+                                e.hpFill.Position = Vector2.new(x0 - bw - 2, fillY)
                                 e.hpFill.Color = getHealthColor(ratio)
-                                e.hpFill.Visible = true
+                                e.hpFill.Visible = not rectOverlapsMenu(x0 - bw - 2, fillY, bw, fillH, menuRect)
                             else
                                 if e.hpBack then e.hpBack.Visible = false end
                                 if e.hpFill then e.hpFill.Visible = false end
@@ -583,9 +674,11 @@ return function(Window, ctx)
                                                 local va, ona = camera:WorldToViewportPoint(a)
                                                 local vb, onb = camera:WorldToViewportPoint(b)
                                                 if ona and onb and va.Z > 0 and vb.Z > 0 then
-                                                    ln.From = Vector2.new(va.X, va.Y)
-                                                    ln.To = Vector2.new(vb.X, vb.Y)
-                                                    ln.Visible = true
+                                                    local from = Vector2.new(va.X, va.Y)
+                                                    local to = Vector2.new(vb.X, vb.Y)
+                                                    ln.From = from
+                                                    ln.To = to
+                                                    ln.Visible = not segmentOverlapsMenu(from, to, menuRect)
                                                 else
                                                     ln.Visible = false
                                                 end
@@ -682,6 +775,7 @@ return function(Window, ctx)
             return
         end
         local folder = Workspace:FindFirstChild("WarzLoot")
+        local menuRect = getMenuPanelRect()
         local seen = {}
         if folder then
             for _, model in ipairs(folder:GetChildren()) do
@@ -710,10 +804,10 @@ return function(Window, ctx)
                                 if lootCategoryAllowed(category) then
                                     local v, on = camera:WorldToViewportPoint(apos)
                                     if on and v.Z > 0 then
-                                        e.text.Visible = true
                                         e.text.Position = Vector2.new(v.X, v.Y)
                                         e.text.Text = string.format("%s [%s] %dm",
                                             itemName, category, math.floor(dist + 0.5))
+                                        e.text.Visible = not textOverlapsMenu(e.text, menuRect)
                                     else
                                         e.text.Visible = false
                                     end
@@ -798,7 +892,10 @@ return function(Window, ctx)
     local function updateBossEsp()
         if bossAlertText then
             local showAlert = settings.bossAlert and os.clock() < bossAlertUntil
-            pcall(function() bossAlertText.Visible = showAlert end)
+            local menuRect = getMenuPanelRect()
+            pcall(function()
+                bossAlertText.Visible = showAlert and not textOverlapsMenu(bossAlertText, menuRect)
+            end)
         end
         local model = settings.bossEsp and getBossModel() or nil
         if not model or not isAlive(model) then
@@ -829,6 +926,7 @@ return function(Window, ctx)
             end
         end
         local d = ensureBossDraw()
+        local menuRect = getMenuPanelRect()
         local hrp = model:FindFirstChild("HumanoidRootPart")
         local hum = model:FindFirstChildOfClass("Humanoid")
         if not hrp or not hum or not hum.MaxHealth or hum.MaxHealth <= 0 then
@@ -844,26 +942,27 @@ return function(Window, ctx)
         local w, h = bounds.w, bounds.h
         local x0, y0 = bounds.x, bounds.y
         if d.box then
-            d.box.Visible = true
             d.box.Size = Vector2.new(w, h)
             d.box.Position = Vector2.new(x0, y0)
+            d.box.Visible = not rectOverlapsMenu(x0, y0, w, h, menuRect)
         end
         if d.name then
-            d.name.Visible = true
             d.name.Position = Vector2.new(bounds.centerX, y0 - 18)
             d.name.Text = string.format("%s %dm", model.Name, math.floor(dist + 0.5))
+            d.name.Visible = not textOverlapsMenu(d.name, menuRect)
         end
         local frac = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
         if d.hpBg then
-            d.hpBg.Visible = true
             d.hpBg.Position = Vector2.new(x0 - 6, y0)
             d.hpBg.Size = Vector2.new(4, h)
+            d.hpBg.Visible = not rectOverlapsMenu(x0 - 6, y0, 4, h, menuRect)
         end
         if d.hpFill then
-            d.hpFill.Visible = true
             local fhh = h * frac
-            d.hpFill.Position = Vector2.new(x0 - 6, y0 + h - fhh)
+            local fhy = y0 + h - fhh
+            d.hpFill.Position = Vector2.new(x0 - 6, fhy)
             d.hpFill.Size = Vector2.new(4, math.max(fhh, 1))
+            d.hpFill.Visible = not rectOverlapsMenu(x0 - 6, fhy, 4, math.max(fhh, 1), menuRect)
         end
     end
 
@@ -977,9 +1076,14 @@ return function(Window, ctx)
         if not fovCircle then return end
         if settings.aimbot then
             local vs = camera.ViewportSize
-            fovCircle.Position = Vector2.new(vs.X / 2, vs.Y / 2)
-            fovCircle.Radius = settings.aimFov
-            fovCircle.Visible = true
+            local center = Vector2.new(vs.X / 2, vs.Y / 2)
+            local radius = settings.aimFov
+            fovCircle.Position = center
+            fovCircle.Radius = radius
+            local menuRect = getMenuPanelRect()
+            fovCircle.Visible = not rectOverlapsMenu(
+                center.X - radius, center.Y - radius, radius * 2, radius * 2, menuRect
+            )
         else
             fovCircle.Visible = false
         end
@@ -995,22 +1099,15 @@ return function(Window, ctx)
     local inputBlockBound = false
     local menuOpen = false
 
-    local function menuRect()
-        local ok, pos, size = pcall(function() return Window.pos, Window.size end)
-        if not ok or typeof(pos) ~= "Vector2" or typeof(size) ~= "Vector2" then
-            return nil
+    local function isMenuPanelOpen()
+        if dock and type(dock.IsPanelOpen) == "function" then
+            local ok, open = pcall(function() return dock:IsPanelOpen() end)
+            if ok then return open == true end
         end
-        return pos.X, pos.Y, size.X, size.Y
-    end
 
-    local function mouseOverMenu()
-        local x, y, w, h = menuRect()
-        if not x then return false end
-        local m = nil
-        pcall(function() m = UserInputService:GetMouseLocation() end)
-        if not m then return false end
-        local pad = 10
-        return m.X >= x - pad and m.Y >= y - pad and m.X <= x + w + pad and m.Y <= y + h + pad
+        -- Fallback for older/non-N3Z UI adapters.
+        local ok, open = pcall(function() return Window.visible == true end)
+        return ok and open == true
     end
 
     local function setInputBlock(on)
@@ -1019,20 +1116,13 @@ return function(Window, ctx)
         if on then
             pcall(function()
                 ContextActionService:BindActionAtPriority("RAVEN_WARZPVP_MENU_BLOCK",
-                    function(_, state, input)
-                        if state == Enum.UserInputState.Begin then
-                            return Enum.ContextActionResult.Sink
-                        end
-                        if state == Enum.UserInputState.Change
-                            and input
-                            and input.UserInputType == Enum.UserInputType.MouseWheel then
-                            return Enum.ContextActionResult.Sink
-                        end
-                        return Enum.ContextActionResult.Pass
+                    function()
+                        return Enum.ContextActionResult.Sink
                     end,
-                    false, 3000,
+                    false, 9000,
                     Enum.UserInputType.MouseButton1,
                     Enum.UserInputType.MouseButton2,
+                    Enum.UserInputType.MouseButton3,
                     Enum.UserInputType.Touch,
                     Enum.UserInputType.MouseWheel)
             end)
@@ -1044,18 +1134,26 @@ return function(Window, ctx)
     end
 
     local function updateMenuState()
-        local open = false
-        pcall(function() open = Window.visible == true end)
+        local open = isMenuPanelOpen()
         if open ~= menuOpen then
             menuOpen = open
+            if open then
+                -- Never carry an aim hold/lock into menu interaction.
+                aimHeld = false
+                aimLockPlayer, aimLockCharacter = nil, nil
+            end
         end
-        -- While a keybind is listening for its new key, drop the menu
-        -- input block so mouse buttons can be captured for rebinding.
-        local listening = capturingAimKey
-        if not listening then
-            pcall(function() listening = Window.activeKeybindListener ~= nil end)
+
+        -- Dock has its own generic blocker; keep this module-level sink as a
+        -- fallback for direct/module-only loads, but respect the user's N3Z
+        -- Block Game Input setting.
+        local blockEnabled = true
+        if dock and type(dock.IsInputBlockEnabled) == "function" then
+            local okBlock, enabled = pcall(function() return dock:IsInputBlockEnabled() end)
+            if okBlock then blockEnabled = enabled == true end
         end
-        setInputBlock(open and mouseOverMenu() and not listening)
+        setInputBlock(open and blockEnabled)
+        return open
     end
 
     -- Resolve a bindable name from an input object. Keyboard keys arrive via
@@ -1083,7 +1181,10 @@ return function(Window, ctx)
     local function updateAimbot(dt)
         if not settings.aimbot then aimHeld, aimLockPlayer, aimLockCharacter = false, nil, nil return end
         if capturingAimKey then aimHeld, aimLockPlayer, aimLockCharacter = false, nil, nil return end
-        if menuOpen and mouseOverMenu() then aimLockPlayer, aimLockCharacter = nil, nil return end
+        if menuOpen then
+            aimHeld, aimLockPlayer, aimLockCharacter = false, nil, nil
+            return
+        end
         if not aimHeld or not hasMouseMove then aimLockPlayer, aimLockCharacter = nil, nil return end
         local target = getAimTarget()
         if target then
@@ -1252,13 +1353,18 @@ return function(Window, ctx)
         if type(newKey) == "string" and newKey ~= "" and newKey ~= "None" then
             settings.aimKeyName = newKey
             self.key = newKey
+            pcall(function()
+                if type(Window.SetConfigValue) == "function" then
+                    Window:SetConfigValue("WZP_AimKey", newKey)
+                end
+            end)
         end
         capturingAimKey = false
         aimHeld = false
         refreshAimKeyLabel()
     end
     aimKeyBtn = CombatTab:CreateButton({
-        Name = "Aim Key: [MouseButton2]",
+        Name = "Aim Key: [" .. settings.aimKeyName .. "]",
         Callback = function()
             if capturingAimKey then return end
             capturingAimKey = true
@@ -1279,7 +1385,7 @@ return function(Window, ctx)
     -- the same path. Mouse input is accepted even when Roblox marks it
     -- gameProcessed; keyboard input is ignored while typing in a textbox.
     table.insert(connections, UserInputService.InputBegan:Connect(function(input, gameProcessed)
-        if capturingAimKey or not settings.aimbot then return end
+        if menuOpen or capturingAimKey or not settings.aimbot then return end
         if not inputMatchesAimKey(input) then return end
         if input.UserInputType == Enum.UserInputType.Keyboard then
             if gameProcessed then return end
@@ -1484,7 +1590,12 @@ end
         espTime += elapsed
         lootTime += elapsed
         bossTime += elapsed
-        pcall(updateMenuState)
+        local panelOpen = false
+        pcall(function() panelOpen = updateMenuState() end)
+
+        -- Keep ESP active while the menu is open. Each Drawing primitive
+        -- clips itself against the panel rectangle, so visuals outside the menu
+        -- remain visible instead of disappearing globally.
         pcall(updatePlayerEsp)
         if lootTime >= 1 / 8 then
             lootTime = 0
@@ -1609,6 +1720,8 @@ end
                 return n
             end)(),
             boss = bossWasPresent,
+            menuOpen = menuOpen,
+            inputBlocked = inputBlockBound,
         }
     end
 

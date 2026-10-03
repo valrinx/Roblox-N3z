@@ -12,6 +12,77 @@ return function(dock)
         itemsByFlag = {},
     }
     local unloadFns = {}
+    local configStore = nil
+
+    function Window:SetConfigStore(store)
+        configStore = store
+        self.configStore = store
+    end
+
+    function Window:GetConfigValue(flag, defaultValue)
+        if type(flag) ~= "string" or flag == "" then return defaultValue end
+        if configStore and type(configStore.Has) == "function" and configStore:Has(flag) then
+            return configStore:Get(flag, defaultValue)
+        end
+        if configStore and type(configStore.Ensure) == "function" then
+            configStore:Ensure(flag, defaultValue)
+        end
+        return defaultValue
+    end
+
+    function Window:SetConfigValue(flag, value)
+        if type(flag) ~= "string" or flag == "" then return end
+        self.flags[flag] = value
+        if configStore and type(configStore.Set) == "function" then
+            configStore:Set(flag, value)
+        end
+    end
+
+    local function resolveValue(flag, kind, declared)
+        local value = declared
+        if configStore and type(flag) == "string" and flag ~= "" and configStore:Has(flag) then
+            value = configStore:Get(flag, declared)
+        elseif kind == "toggle" then
+            -- First run: gameplay toggles always start OFF. A module's legacy
+            -- CurrentValue=true must never silently enable a feature.
+            value = false
+        end
+
+        if type(flag) == "string" and flag ~= "" then
+            Window.flags[flag] = value
+            if configStore and type(configStore.Ensure) == "function" then
+                configStore:Ensure(flag, value)
+            end
+        end
+        return value
+    end
+
+    local function userCallback(flag, callback)
+        return function(value)
+            if type(flag) == "string" and flag ~= "" then
+                Window:SetConfigValue(flag, value)
+            end
+            if type(callback) == "function" then
+                pcall(callback, value)
+            end
+        end
+    end
+
+    local function applyInitial(flag, callback, value)
+        if type(flag) == "string" and flag ~= "" then
+            Window.flags[flag] = value
+        end
+        if type(callback) == "function" then
+            pcall(callback, value)
+        end
+    end
+
+    local function rememberHandle(flag, handle)
+        if type(flag) == "string" and flag ~= "" then
+            Window.itemsByFlag[flag] = handle
+        end
+        return handle
+    end
 
     local function mapTabId(name)
         local n = string.lower(tostring(name or ""))
@@ -29,38 +100,47 @@ return function(dock)
 
         function tab:CreateToggle(def)
             def = def or {}
-            return dock:AddRow(tabId, {
+            local value = resolveValue(def.Flag, "toggle", def.CurrentValue == true)
+            local handle = dock:AddRow(tabId, {
                 kind = "toggle",
                 name = def.Name or "Toggle",
-                value = def.CurrentValue == true,
-                onChange = def.Callback,
+                value = value == true,
+                onChange = userCallback(def.Flag, def.Callback),
             })
+            applyInitial(def.Flag, def.Callback, value == true)
+            return rememberHandle(def.Flag, handle)
         end
 
         function tab:CreateSlider(def)
             def = def or {}
             local range = def.Range or { 0, 100 }
-            return dock:AddRow(tabId, {
+            local value = resolveValue(def.Flag, "slider", def.CurrentValue)
+            local handle = dock:AddRow(tabId, {
                 kind = "slider",
                 name = def.Name or "Slider",
                 min = range[1] or 0,
                 max = range[2] or 100,
                 step = def.Increment or 1,
                 suffix = def.Suffix or "",
-                value = def.CurrentValue,
-                onChange = def.Callback,
+                value = value,
+                onChange = userCallback(def.Flag, def.Callback),
             })
+            applyInitial(def.Flag, def.Callback, value)
+            return rememberHandle(def.Flag, handle)
         end
 
         function tab:CreateDropdown(def)
             def = def or {}
-            return dock:AddRow(tabId, {
+            local value = resolveValue(def.Flag, "dropdown", def.CurrentOption)
+            local handle = dock:AddRow(tabId, {
                 kind = "dropdown",
                 name = def.Name or "Dropdown",
                 options = def.Options or {},
-                value = def.CurrentOption,
-                onChange = def.Callback,
+                value = value,
+                onChange = userCallback(def.Flag, def.Callback),
             })
+            applyInitial(def.Flag, def.Callback, value)
+            return rememberHandle(def.Flag, handle)
         end
 
         function tab:CreateButton(def)
@@ -84,27 +164,25 @@ return function(dock)
 
         function tab:CreateKeybind(def)
             def = def or {}
-            local key = def.CurrentKeybind or def.Default or "None"
+            local declared = def.CurrentKeybind or def.Default or "None"
+            if typeof(declared) == "EnumItem" then declared = declared.Name end
+            local key = resolveValue(def.Flag, "keybind", declared)
             if typeof(key) == "EnumItem" then key = key.Name end
             local handle = dock:AddRow(tabId, {
                 kind = "keybind",
                 name = def.Name or "Keybind",
                 key = key,
-                callback = def.Callback,
+                callback = userCallback(def.Flag, def.Callback),
                 flag = def.Flag,
             })
-            if def.Flag then
-                local envFlag = def.Flag
-                local origSet = handle.Set
-                function handle:Set(newKey)
-                    if origSet then origSet(handle, newKey) end
-                    if Window.flags then Window.flags[envFlag] = newKey end
-                end
-                if Window.itemsByFlag then
-                    Window.itemsByFlag[def.Flag] = handle
-                end
+            local origSet = handle.Set
+            function handle:Set(newKey)
+                if typeof(newKey) == "EnumItem" then newKey = newKey.Name end
+                if origSet then origSet(handle, newKey) end
+                if def.Flag then Window:SetConfigValue(def.Flag, newKey) end
             end
-            return handle
+            applyInitial(def.Flag, def.Callback, key)
+            return rememberHandle(def.Flag, handle)
         end
 
         function tab:CreateLabel(text)
@@ -158,8 +236,13 @@ return function(dock)
         dock:Toggle()
     end
 
+    local windowDestroyed = false
     function Window:Destroy()
-        for _, fn in ipairs(unloadFns) do
+        if windowDestroyed then return end
+        windowDestroyed = true
+        local fns = unloadFns
+        unloadFns = {}
+        for _, fn in ipairs(fns) do
             pcall(fn)
         end
         dock:Destroy()
