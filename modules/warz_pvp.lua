@@ -5,6 +5,7 @@
 --   v1.4.0 — loot ESP (WarzLoot), boss ESP + spawn alert (WarzBoss), skeleton render fix
 --   v1.4.1 - R15 body bounds, validated head/LOS aim and bounded ESP updates.
 --   v1.5.1 - event-driven loot cache + 60 Hz cached label updates.
+--   v1.5.2 - automatic per-weapon ballistic prediction (lead + gravity drop).
 --   Read-only visuals + mouse-driven aim.
 --   WarZ notes: FFA + Party/Clan relation colors, skip dead via WarzDead attribute,
 --   character = R15 (Head/HumanoidRootPart), WarzHitboxes folder present.
@@ -19,6 +20,25 @@ return function(Window, ctx)
     local ContextActionService = game:GetService("ContextActionService")
 
     local localPlayer = Players.LocalPlayer
+    -- Cache the game's own weapon/ballistic helpers once. CurrentWeaponId is
+    -- updated by CombatSettings whenever the equipped weapon changes.
+    local CombatSettings = nil
+    local WarzProjectile = nil
+    pcall(function()
+        local client = localPlayer.PlayerScripts:FindFirstChild("Client")
+        local input = client and client:FindFirstChild("input")
+        local module = input and input:FindFirstChild("CombatSettings")
+        if module and module:IsA("ModuleScript") then
+            CombatSettings = require(module)
+        end
+    end)
+    pcall(function()
+        local shared = ReplicatedStorage:FindFirstChild("Shared")
+        local module = shared and shared:FindFirstChild("WarzProjectile")
+        if module and module:IsA("ModuleScript") then
+            WarzProjectile = require(module)
+        end
+    end)
     local camera = Workspace.CurrentCamera
     local dock = (type(ctx) == "table" and type(ctx.dock) == "table" and ctx.dock)
         or (type(Window) == "table" and type(Window.dock) == "table" and Window.dock)
@@ -51,7 +71,7 @@ return function(Window, ctx)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.5.1"
+    environment.RAVEN_WARZPVP_VER = "1.5.2"
 
     local persistedAimKey = "MouseButton2"
     pcall(function()
@@ -86,6 +106,7 @@ return function(Window, ctx)
         aimFov = 150,
         aimPosition = "Auto",
         aimResponse = 0.35,
+        aimPrediction = true,
         aimKeyName = persistedAimKey,
         autoHeal = false,
         healThreshold = 50,
@@ -1102,6 +1123,186 @@ return function(Window, ctx)
     local aimHeld = false
     local capturingAimKey = false -- true while the custom aim-key button listens
 
+    local ballisticCacheWeaponId = nil
+    local ballisticCache = nil
+    local predictionState = {
+        weaponId = nil,
+        rawSpeed = 0,
+        projectileSpeed = 0,
+        mass = 0,
+        travelTime = 0,
+        immediate = false,
+    }
+
+    local function getCurrentBallistics()
+        if type(CombatSettings) ~= "table"
+            or type(CombatSettings.BallisticsFor) ~= "function" then
+            ballisticCacheWeaponId = nil
+            ballisticCache = nil
+            return nil
+        end
+
+        local weaponId = CombatSettings.CurrentWeaponId
+        if type(weaponId) ~= "string" or weaponId == "" then
+            ballisticCacheWeaponId = nil
+            ballisticCache = nil
+            return nil
+        end
+        if weaponId == ballisticCacheWeaponId and ballisticCache then
+            return ballisticCache
+        end
+
+        local ok, data = pcall(CombatSettings.BallisticsFor)
+        if not ok or type(data) ~= "table" then
+            ballisticCacheWeaponId = nil
+            ballisticCache = nil
+            return nil
+        end
+
+        local rawSpeed = tonumber(data.Speed)
+        local scale = type(WarzProjectile) == "table" and tonumber(WarzProjectile.Scale) or 2.687
+        local mass = tonumber(data.Mass) or 1
+        if not rawSpeed or rawSpeed <= 0 or not scale or scale <= 0 then
+            ballisticCacheWeaponId = nil
+            ballisticCache = nil
+            return nil
+        end
+
+        local gravity = type(WarzProjectile) == "table" and WarzProjectile.Gravity
+            or Vector3.new(0, -9.81 * scale, 0)
+        if typeof(gravity) ~= "Vector3" then
+            gravity = Vector3.new(0, -9.81 * scale, 0)
+        end
+
+        ballisticCacheWeaponId = weaponId
+        ballisticCache = {
+            weaponId = weaponId,
+            rawSpeed = rawSpeed,
+            speed = rawSpeed * scale,
+            mass = mass,
+            immediate = data.Immediate == true,
+            gravity = gravity * mass,
+            stepSeconds = type(WarzProjectile) == "table"
+                and tonumber(WarzProjectile.StepSeconds) or (1 / 60),
+            lifetime = type(WarzProjectile) == "table"
+                and tonumber(WarzProjectile.Lifetime) or 5,
+        }
+        return ballisticCache
+    end
+
+    local function targetLinearVelocity(character)
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        if not root or not root:IsA("BasePart") then
+            return Vector3.zero
+        end
+
+        local velocity = root.AssemblyLinearVelocity
+        if typeof(velocity) ~= "Vector3" then
+            return Vector3.zero
+        end
+
+        -- Ignore replication/teleport spikes without affecting normal sprint,
+        -- jump or dash movement.
+        local speed = velocity.Magnitude
+        if speed > 300 then
+            velocity = velocity.Unit * 300
+        elseif speed < 0.05 then
+            velocity = Vector3.zero
+        end
+        return velocity
+    end
+
+    local function solveBallisticTime(relative, targetVelocity, ballistics)
+        local projectileSpeed = ballistics.speed
+        local maxTime = math.max(0.05, tonumber(ballistics.lifetime) or 5)
+        local distance = relative.Magnitude
+        if distance < 0.01 or projectileSpeed <= 0.01 then
+            return 0
+        end
+
+        -- Exact constant-velocity intercept provides a stable initial guess.
+        local vv = targetVelocity:Dot(targetVelocity)
+        local rv = relative:Dot(targetVelocity)
+        local a = vv - projectileSpeed * projectileSpeed
+        local b = 2 * rv
+        local c = relative:Dot(relative)
+        local t = distance / projectileSpeed
+
+        if math.abs(a) < 1e-6 then
+            if math.abs(b) > 1e-6 then
+                local linear = -c / b
+                if linear > 0 then t = linear end
+            end
+        else
+            local discriminant = b * b - 4 * a * c
+            if discriminant >= 0 then
+                local root = math.sqrt(discriminant)
+                local t1 = (-b - root) / (2 * a)
+                local t2 = (-b + root) / (2 * a)
+                local best = math.huge
+                if t1 > 0 then best = math.min(best, t1) end
+                if t2 > 0 then best = math.min(best, t2) end
+                if best < math.huge then t = best end
+            end
+        end
+
+        t = math.clamp(t, 0, maxTime)
+
+        -- WarzProjectile.Step is semi-implicit Euler:
+        -- velocity += Gravity * Mass * dt, then displacement = velocity * dt.
+        -- Fixed-point refinement below mirrors its extra +dt gravity term.
+        local stepSeconds = tonumber(ballistics.stepSeconds) or (1 / 60)
+        for _ = 1, 5 do
+            local gravityTravel = ballistics.gravity * (0.5 * t * (t + stepSeconds))
+            local required = relative + targetVelocity * t - gravityTravel
+            local nextTime = math.clamp(required.Magnitude / projectileSpeed, 0, maxTime)
+            if math.abs(nextTime - t) < 0.0001 then
+                t = nextTime
+                break
+            end
+            t = nextTime
+        end
+        return t
+    end
+
+    local function applyAimPrediction(point, character)
+        if not settings.aimPrediction or not point or not character then
+            predictionState.travelTime = 0
+            return point
+        end
+
+        local ballistics = getCurrentBallistics()
+        if not ballistics then
+            predictionState.weaponId = nil
+            predictionState.travelTime = 0
+            return point
+        end
+
+        predictionState.weaponId = ballistics.weaponId
+        predictionState.rawSpeed = ballistics.rawSpeed
+        predictionState.projectileSpeed = ballistics.speed
+        predictionState.mass = ballistics.mass
+        predictionState.immediate = ballistics.immediate
+
+        if ballistics.immediate then
+            predictionState.travelTime = 0
+            return point
+        end
+
+        local origin = camera and camera.CFrame.Position
+        if not origin then return point end
+
+        local relative = point - origin
+        local targetVelocity = targetLinearVelocity(character)
+        local travelTime = solveBallisticTime(relative, targetVelocity, ballistics)
+        predictionState.travelTime = travelTime
+
+        if travelTime <= 0 then return point end
+
+        local gravityTravel = ballistics.gravity
+            * (0.5 * travelTime * (travelTime + ballistics.stepSeconds))
+        return point + targetVelocity * travelTime - gravityTravel
+    end
     local function canSeeAimPoint(character, point)
         local origin = camera.CFrame.Position
         local direction = point - origin
@@ -1311,6 +1512,7 @@ return function(Window, ctx)
         if not aimHeld or not hasMouseMove then aimLockPlayer, aimLockCharacter = nil, nil return end
         local target = getAimTarget()
         if target then
+            target = applyAimPrediction(target, aimLockCharacter)
             local v, on = camera:WorldToViewportPoint(target)
             if on and v.Z > 0 then
                 local center = camera.ViewportSize / 2
@@ -1437,6 +1639,15 @@ return function(Window, ctx)
         Callback = function(v)
             settings.aimbot = v
             if not v then aimHeld, aimLockPlayer, aimLockCharacter = false, nil, nil end
+        end,
+    })
+    CombatTab:CreateToggle({
+        Name = "Auto Prediction",
+        CurrentValue = true,
+        Flag = "WZP_AimPrediction",
+        Callback = function(v)
+            settings.aimPrediction = v
+            if not v then predictionState.travelTime = 0 end
         end,
     })
     CombatTab:CreateDropdown({
@@ -1827,12 +2038,22 @@ end
                 if ok and shown then visible += 1 end
             end
         end
+        local currentBallistics = getCurrentBallistics()
         return {
             version = environment.RAVEN_WARZPVP_VER,
             running = running,
             aimbot = settings.aimbot,
             aimKey = settings.aimKeyName,
             aimPosition = settings.aimPosition,
+            prediction = {
+                enabled = settings.aimPrediction,
+                weaponId = currentBallistics and currentBallistics.weaponId or predictionState.weaponId,
+                rawSpeed = currentBallistics and currentBallistics.rawSpeed or predictionState.rawSpeed,
+                projectileSpeed = currentBallistics and currentBallistics.speed or predictionState.projectileSpeed,
+                mass = currentBallistics and currentBallistics.mass or predictionState.mass,
+                immediate = currentBallistics and currentBallistics.immediate or predictionState.immediate,
+                travelTime = predictionState.travelTime,
+            },
             aimHeld = aimHeld,
             target = aimLockPlayer and aimLockPlayer.Name or nil,
             skeleton = {entries = entries, lines = lines, visible = visible, ready = ready},
@@ -1857,6 +2078,10 @@ end
     if type(ctx) == "table" and ctx.__test == true then
         environment.__RAVEN_WARZPVP._test = {
             settings = settings,
+            currentBallistics = getCurrentBallistics,
+            solveBallisticTime = solveBallisticTime,
+            applyAimPrediction = applyAimPrediction,
+            targetLinearVelocity = targetLinearVelocity,
             espPlayers = function()
                 local n = 0
                 for _ in pairs(espCache) do n = n + 1 end
