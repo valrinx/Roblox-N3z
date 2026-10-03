@@ -94,6 +94,242 @@ Before committing a Mobile change, inspect the diff for accidental desktop chang
 Before committing a PC change, inspect the diff for accidental Mobile changes.
 Prefer small platform-scoped commits over mixed platform commits.
 
+## Menu and Tab Lifecycle Rules (PC and Mobile)
+
+These rules apply to the Hub menu and to every game module that creates tabs or controls.
+
+### 1. The Hub shell must never count as a successful module load
+
+Creating the dock/window is not enough to declare startup successful.
+
+Before a game module is allowed to populate the menu:
+- wait for required bootstrap state such as Players.LocalPlayer
+- resolve the active module
+- fetch and compile required module files
+- preflight the selected platform adapter
+- only then continue module initialization
+
+Do not leave an empty menu shell behind because bootstrap or module initialization failed.
+
+If initialization fails after the shell exists, surface a visible module error instead of silently leaving blank pages.
+
+### 2. Tabs are dynamic resources, not permanent decoration
+
+Do not show a tab only because its name exists in a fixed TAB_ORDER.
+
+A tab should remain visible only when:
+- it contains real usable content, or
+- it is explicitly protected by the Hub contract
+
+After module initialization finishes, prune empty tabs.
+
+Typical protected Hub tabs:
+- modules
+- settings
+
+Do not hardcode per-game lists of tabs to hide. Decide from actual tab content after initialization.
+
+### 3. Dock owns tab lifecycle
+
+Game modules request tabs and controls through the Dock/compat API.
+Game modules must not manually destroy internal tab buttons, pages, layouts, indicators, or scroll containers.
+
+The Dock should own APIs such as:
+- HasTabContent(tabId)
+- RemoveTab(tabId)
+- PruneEmptyTabs(keepTabs)
+- tab recreation when a previously pruned tab receives content later
+
+Removing a tab must update every related state:
+- tab button
+- page
+- tab registry
+- tab id order
+- primary tab order
+- toggle/count state
+- tab info/footer state
+- active tab
+- indicator
+- input-block state
+- scroll bounds and canvas position
+
+### 4. Active-tab removal must be safe
+
+Never leave activeTab pointing to a removed tab.
+
+If the active tab is removed:
+- hide/collapse its panel safely
+- clear active-tab state
+- hide its indicator
+- resync input blocking
+- preserve the bar position
+- leave the Hub usable
+
+A removed empty tab must never leave a blank open panel.
+
+### 5. No-module mode must be intentional
+
+When the current game has no registered module:
+- do not leave empty combat or visuals tabs visible
+- keep only useful protected Hub tabs
+- show a clear message such as No module for this game yet. in an appropriate surviving tab
+- do not create a fake empty tab only to display that message
+- menu open/close/collapse must still work
+- Settings must still work
+- unload/reload must still work
+
+No-module mode is a supported state, not an error path.
+
+### 6. Module-error mode must be visible
+
+If a registered module is detected but fails during initialization:
+- preserve an error-bearing tab instead of pruning it
+- show a concise startup error
+- do not silently fall back to a blank menu
+- do not misreport the game as having no module
+
+The user must be able to distinguish:
+- no module exists
+- module exists but failed to start
+- module loaded successfully
+
+### 7. Desktop tab bar layout contract
+
+On PC/Desktop, separate navigation into:
+- Primary zone: game/module tabs
+- Utility zone: persistent Hub controls such as Settings and Profile/Avatar
+
+Settings and Profile/Avatar must remain pinned to the right and must not be pushed by new primary tabs.
+
+Do not place Settings back into the same horizontal scrolling container as primary tabs.
+
+Adding game tabs must not increase the total bar width indefinitely.
+
+### 8. Desktop primary-tab overflow must be discoverable
+
+Primary tabs may scroll horizontally only when their real content width exceeds the available primary viewport width.
+
+When there is no overflow:
+- scrolling must be disabled
+- CanvasPosition must be reset to zero
+- no stale horizontal offset may clip tab labels
+- the overflow scrollbar/hint must be hidden
+
+When there is overflow:
+- scrolling may be enabled for the primary zone only
+- show a visible but unobtrusive horizontal scrollbar or equivalent scroll cue
+- Settings/Profile must remain stationary
+- mouse-wheel horizontal scrolling may operate only inside the overflowing primary zone
+- selecting a partially hidden tab should bring it fully into view
+
+After add/remove/prune/resize operations, recompute and clamp the scroll range again after layout settles.
+
+### 9. Mobile navigation is a separate layout contract
+
+Do not copy Desktop overflow behavior into Mobile automatically.
+
+Mobile may use its own:
+- tab sizing
+- horizontal scrolling
+- safe-area handling
+- touch gestures
+- floating Hub toggle
+- collapse/open behavior
+
+A Desktop menu task must not silently change Mobile navigation.
+A Mobile menu task must not silently change Desktop navigation.
+
+Shared Dock APIs may be reused, but platform presentation and interaction remain separately owned.
+
+### 10. Menu close/open must always have a reachable control
+
+Regardless of module state, tab count, overflow state, or startup failure:
+- Desktop must retain its configured menu key/collapse behavior
+- Mobile must retain its touch/floating toggle behavior
+- removing or pruning tabs must never remove the only way to close or reopen the Hub
+
+Never ship a state where a blank panel is open and the user cannot dismiss it.
+
+### 11. Do not redesign while fixing lifecycle bugs
+
+When fixing tab pruning, overflow, bootstrap, or module-loading behavior:
+- preserve existing colors
+- preserve typography
+- preserve spacing where possible
+- preserve animations
+- preserve existing platform-specific interaction
+
+Do not solve overflow by shrinking fonts, removing labels, widening the entire bar indefinitely, or moving pinned utility controls.
+
+Fix the container/lifecycle logic instead.
+
+### 12. Menu APIs must tolerate late module content
+
+A module may add a tab or row after initial Hub construction.
+
+If an empty tab was previously pruned and later receives valid content:
+- recreate it through the Dock API
+- restore correct ordering
+- recompute overflow
+- keep Settings/Profile pinned
+- do not require the module to know internal Dock implementation details
+
+### 13. Bootstrap dependencies must be ready before menu metadata uses them
+
+Never assume runtime objects exist immediately at executor injection time.
+
+Examples:
+- Players.LocalPlayer
+- player name/user id used by header/avatar
+- selected platform state
+- required module source
+- selected platform adapter
+
+Guard or wait for required bootstrap values before reading properties such as Name or UserId.
+
+A race during metadata/header creation must not prevent the active game module from loading.
+
+### 14. Menu validation matrix is mandatory
+
+For any Hub/tab-system change, validate at least these states.
+
+PC:
+- few primary tabs, no overflow
+- many primary tabs, real overflow
+- Settings/Profile stay pinned
+- scroll cue appears only during overflow
+- scroll position clamps after tab removal
+- active tab removal collapses safely
+- registered module loads its custom tabs
+- no-module state has no empty game tabs
+- module-error state shows a visible error
+- menu key still closes/reopens the Hub
+
+Mobile:
+- module tabs appear correctly
+- no-module state remains usable
+- Settings/navigation remains reachable
+- touch scrolling/toggle behavior still works
+- no Desktop-only scrollbar/input behavior leaks into Mobile
+
+Report PC and Mobile runtime validation separately.
+Do not use one platform as proof that the other passed.
+
+### 15. Menu versioning and scope
+
+A shared Hub/Dock menu behavior change requires a Hub version bump.
+
+Do not bump a game-module version when only Hub/Dock behavior changed.
+
+If module code itself changes, update that module version separately.
+
+Before commit:
+- run git diff --check
+- inspect the diff for accidental cross-platform menu changes
+- verify protected tabs and no-module behavior
+- verify overflow cue logic
+- verify that unrelated game logic was not modified
+
 ## Recommended adapter contract
 
 Adapters should expose a small explicit contract rather than reaching into core internals arbitrarily.
