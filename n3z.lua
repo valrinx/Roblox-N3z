@@ -92,8 +92,7 @@ local function fetch(localPath, urlPath)
             or error("N3Z: failed to fetch " .. tostring(urlPath))
     end
     return fetchGitHub(urlPath)
-        or fetchLocal(localPath)
-        or error("N3Z: failed to fetch " .. tostring(urlPath))
+        or error("N3Z: GitHub fetch failed for " .. tostring(urlPath) .. " (no local fallback in production)")
 end
 
 local function fetchHub(name)
