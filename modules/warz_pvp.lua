@@ -5,7 +5,7 @@
 --   v1.4.0 — loot ESP (WarzLoot), boss ESP + spawn alert (WarzBoss), skeleton render fix
 --   v1.4.1 - R15 body bounds, validated head/LOS aim and bounded ESP updates.
 --   Read-only visuals + mouse-driven aim.
---   WarZ notes: FFA (no Teams), skip dead via WarzDead attribute,
+--   WarZ notes: FFA + Party/Clan relation colors, skip dead via WarzDead attribute,
 --   character = R15 (Head/HumanoidRootPart), WarzHitboxes folder present.
 -- ============================================================
 
@@ -136,8 +136,28 @@ return function(Window, ctx)
         return Color3.fromHSV(math.clamp(ratio, 0, 1) * 0.33, 0.9, 1)
     end
 
-    -- FFA game: no teams, single ESP color.
+    -- Relation-aware ESP colors. Party has priority over clan.
+    -- Empty IDs never count as a relation.
     local ESP_COLOR = Color3.fromRGB(255, 200, 60)
+    local PARTY_COLOR = Color3.fromRGB(80, 220, 255)
+    local CLAN_COLOR = Color3.fromRGB(190, 120, 255)
+
+    local function sameNonEmptyPlayerAttribute(a, b, attribute)
+        local av = a and a:GetAttribute(attribute)
+        local bv = b and b:GetAttribute(attribute)
+        return type(av) == "string" and av ~= "" and av == bv
+    end
+
+    local function getPlayerRelationColor(player)
+        if not player or player == localPlayer then return nil end
+        if sameNonEmptyPlayerAttribute(localPlayer, player, "WarzPartyId") then
+            return PARTY_COLOR
+        end
+        if sameNonEmptyPlayerAttribute(localPlayer, player, "ClanId") then
+            return CLAN_COLOR
+        end
+        return nil
+    end
 
     -- WarZ renders the visible, animated body in
     -- Workspace.HeroVisualsLocal.Drift_<PlayerName>.LiveAim.
@@ -616,7 +636,9 @@ return function(Window, ctx)
                         if bounds then
                             local h, w = bounds.h, bounds.w
                             local x0, y0 = bounds.x, bounds.y
+                            local relationColor = getPlayerRelationColor(p)
                             if settings.boxEsp and e.box then
+                                e.box.Color = relationColor or ESP_COLOR
                                 e.box.Size = Vector2.new(w, h)
                                 e.box.Position = Vector2.new(x0, y0)
                                 e.box.Visible = not rectOverlapsMenu(x0, y0, w, h, menuRect)
@@ -636,6 +658,7 @@ return function(Window, ctx)
                                 end
                                 e.name.Text = label
                                 e.name.Position = Vector2.new(bounds.centerX, y0 - 18)
+                                e.name.Color = relationColor or Color3.fromRGB(255, 255, 255)
                                 e.name.Visible = not textOverlapsMenu(e.name, menuRect)
                             elseif e.name then
                                 e.name.Visible = false
@@ -667,6 +690,7 @@ return function(Window, ctx)
                                     local ln = e.bones[i]
                                     local pair = e.boneParts[i]
                                     if ln then
+                                        ln.Color = relationColor or ESP_COLOR
                                         if pair and e.liveAim and e.liveAim.Parent then
                                             local a = boneWorldPosition(pair[1])
                                             local b = boneWorldPosition(pair[2])
