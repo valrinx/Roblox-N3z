@@ -114,6 +114,8 @@ local dockSrc = fetchHub(isMobile and "n3z-dock-mobile.lua" or "n3z-dock.lua")
 local Dock = assert(loadstring(dockSrc, "@n3z-dock"))()
 local compatSrc = fetchHub("n3z-compat.lua")
 local makeWindow = assert(loadstring(compatSrc, "@n3z-compat"))()
+-- sweep orphan N3zDock guis (covers case where __N3Z_WINDOW was lost)
+pcall(function() Dock.destroyAllGuis() end)
 
 -- ---------- build ----------
 local dock = Dock.new({ menuKey = Enum.KeyCode.K })
@@ -196,6 +198,7 @@ unloadAll = function()
     end
     pcall(function() Window:Destroy() end)
     pcall(function() dock:Destroy() end)
+    pcall(function() Dock.destroyAllGuis() end)
     env.__N3Z_WINDOW = nil
     env.__RAVEN_WINDOW = nil
 end

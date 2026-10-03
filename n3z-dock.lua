@@ -886,25 +886,22 @@ local function makeToggle(parent, initial, onFlip, dock)
     local L = dock._layout
     local pill = Instance.new("Frame")
     pill.Name = "Toggle"
-    pill.BackgroundColor3 = initial and C.good or C.track
-    pill.BackgroundTransparency = initial and 0.72 or 0
+    pill.BackgroundColor3 = initial and C.accent or C.track
+    pill.BackgroundTransparency = initial and 0.15 or 0.2
     pill.BorderSizePixel = 0
     pill.Size = UDim2.new(0, L.tglW, 0, L.tglH)
     pill.Parent = parent
     corner(pill, L.tglH / 2)
-    local inset = stroke(pill, C.good, initial and 0.6 or 1)
-    inset.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 
     local knob = Instance.new("Frame")
     knob.Name = "Knob"
-    knob.BackgroundColor3 = initial and C.good or C.knobOff
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
     knob.BorderSizePixel = 0
     knob.Size = UDim2.new(0, L.knob, 0, L.knob)
     knob.AnchorPoint = Vector2.new(0.5, 0.5)
     knob.Position = initial and UDim2.new(0, L.tglOnX, 0.5, 0) or UDim2.new(0, L.tglOffX, 0.5, 0)
     knob.Parent = pill
     cornerRound(knob)
-    local knobGlow = glow(knob, C.good, 8, initial and 0.8 or 1, true)
 
     local state = initial == true
     local handle = {}
@@ -915,11 +912,9 @@ local function makeToggle(parent, initial, onFlip, dock)
         v = (v == true)
         if v == state then return end
         state = v
-        pill.BackgroundColor3 = state and C.good or C.track
-        pill.BackgroundTransparency = state and 0.72 or 0
-        inset.Transparency = state and 0.6 or 1
-        knob.BackgroundColor3 = state and C.good or C.knobOff
-        knobGlow.BackgroundTransparency = state and 0.8 or 1
+        pill.BackgroundColor3 = state and C.accent or C.track
+        pill.BackgroundTransparency = state and 0.15 or 0.2
+        knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
         knob:TweenPosition(
             state and UDim2.new(0, L.tglOnX, 0.5, 0) or UDim2.new(0, L.tglOffX, 0.5, 0),
             Enum.EasingDirection.Out, Enum.EasingStyle.Back, 0.3, true
@@ -982,7 +977,7 @@ function Dock:AddRow(tabId, def)
         pill.TextSize = 10
         pill.Font = FONT_BOLD
         pill.TextColor3 = def.active and C.dark or C.muted
-        pill.BackgroundColor3 = def.active and C.good or C.track
+        pill.BackgroundColor3 = def.active and C.accent or C.track
         pill.BackgroundTransparency = def.active and 0 or 0
         pill.AutomaticSize = Enum.AutomaticSize.XY
         pill.Parent = z
@@ -1305,6 +1300,20 @@ function Dock:Destroy()
         pcall(function() c:Disconnect() end)
     end
     pcall(function() self._gui:Destroy() end)
+end
+
+-- sweep orphan N3zDock guis (duplicates from re-execute / failed unload)
+function Dock.destroyAllGuis()
+    local parent = getGuiParent()
+    if not parent then return 0 end
+    local n = 0
+    for _, c in ipairs(parent:GetChildren()) do
+        if c.Name == "N3zDock" and c.ClassName == "ScreenGui" then
+            pcall(function() c:Destroy() end)
+            n = n + 1
+        end
+    end
+    return n
 end
 
 return Dock
