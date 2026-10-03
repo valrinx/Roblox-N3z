@@ -135,7 +135,7 @@ for _, m in ipairs(MODULES) do
 end
 
 local gameName = activeMod and activeMod.game or tostring(game.Name)
-local modLine = (activeMod and (activeMod.name .. " " .. activeMod.version) or "no module") .. " • " .. N3Z_VERSION
+local modLine = (activeMod and activeMod.version or "no module") .. " • " .. N3Z_VERSION
 dock:SetHeader(gameName, "place " .. tostring(placeId) .. " · " .. localPlayer.Name, modLine)
 dock:SetMenuKeyName(isMobile and "TAP" or "K")
 
