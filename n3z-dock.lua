@@ -930,7 +930,7 @@ function Dock.new(opts)
         primaryScroll.BorderSizePixel = 0
         primaryScroll.AnchorPoint = Vector2.new(0, 0.5)
         primaryScroll.Position = UDim2.new(0, 42, 0.5, 0)
-        primaryScroll.Size = UDim2.new(1, -252, 0, L.tabH)
+        primaryScroll.Size = UDim2.new(1, -192, 0, L.tabH)
         primaryScroll.ScrollingDirection = Enum.ScrollingDirection.X
         -- Hidden when everything fits; clampPrimaryScroll exposes a thin
         -- horizontal thumb only while more primary tabs exist off-screen.
@@ -993,7 +993,7 @@ function Dock.new(opts)
             local logoW = logo.AbsoluteSize.X
             if logoW <= 0 then logoW = 36 end
             local utilW = utilityZone.AbsoluteSize.X
-            if utilW <= 0 then utilW = 204 end
+            if utilW <= 0 then utilW = 144 end
             local gap = 6
             local startX = logoW + gap
             primaryScroll.Position = UDim2.new(0, startX, 0.5, 0)
@@ -1105,12 +1105,25 @@ function Dock:AddTab(tabLabel, tabId)
     if self._tabs[tabId] then return tabId end
     if self._prunedTabs then self._prunedTabs[tabId] = nil end
 
+    local normalizedTabId = string.lower(tostring(tabId))
+    local displayLabel = string.upper(tostring(tabLabel))
+    if not self._isMobile then
+        if normalizedTabId == "modules" then
+            displayLabel = "MODS"
+        elseif normalizedTabId == "settings" then
+            -- U+2699 in text presentation; compact and recognizable without
+            -- consuming the horizontal space of the SETTINGS label.
+            displayLabel = utf8.char(0x2699)
+        end
+    end
+
     local btn = Instance.new("TextButton")
     btn.Name = "Tab_" .. tabId
     btn.BackgroundTransparency = 1
     btn.AutoButtonColor = false
-    btn.Text = string.upper(tostring(tabLabel))
-    btn.TextSize = L.tabFont
+    btn.Text = displayLabel
+    btn.TextSize = (not self._isMobile and normalizedTabId == "settings")
+        and (L.tabFont + 3) or L.tabFont
     btn.TextColor3 = C.muted
     btn.Font = FONT_MED
     btn.AutomaticSize = Enum.AutomaticSize.X
@@ -1119,7 +1132,7 @@ function Dock:AddTab(tabLabel, tabId)
         btn.LayoutOrder = #self._tabIds
         btn.Parent = self._tabsRow
     else
-        local utilityId = string.lower(tostring(tabId))
+        local utilityId = normalizedTabId
         if utilityId == "modules" then
             btn.LayoutOrder = 1
             btn.Parent = self._utilityZone
@@ -1133,8 +1146,16 @@ function Dock:AddTab(tabLabel, tabId)
         end
     end
     local btnPad = Instance.new("UIPadding")
-    btnPad.PaddingLeft = UDim.new(0, L.tabPad)
-    btnPad.PaddingRight = UDim.new(0, L.tabPad)
+    local horizontalPad = L.tabPad
+    if not self._isMobile then
+        if normalizedTabId == "modules" then
+            horizontalPad = math.max(7, L.tabPad - 5)
+        elseif normalizedTabId == "settings" then
+            horizontalPad = math.max(6, L.tabPad - 7)
+        end
+    end
+    btnPad.PaddingLeft = UDim.new(0, horizontalPad)
+    btnPad.PaddingRight = UDim.new(0, horizontalPad)
     btnPad.Parent = btn
     local pressScale = Instance.new("UIScale")
     pressScale.Parent = btn
@@ -1159,12 +1180,56 @@ function Dock:AddTab(tabLabel, tabId)
         if os.clock() < (this._dragSuppressUntil or 0) then return end
         this:SetActiveTab(id)
     end))
+    local utilityTooltip = nil
+    if not self._isMobile
+        and (normalizedTabId == "modules" or normalizedTabId == "settings") then
+        utilityTooltip = Instance.new("TextLabel")
+        utilityTooltip.Name = "Tooltip_" .. normalizedTabId
+        utilityTooltip.BackgroundColor3 = C.panelBg
+        utilityTooltip.BackgroundTransparency = 0.04
+        utilityTooltip.BorderSizePixel = 0
+        utilityTooltip.AnchorPoint = Vector2.new(0.5, 0)
+        utilityTooltip.AutomaticSize = Enum.AutomaticSize.XY
+        utilityTooltip.Text = normalizedTabId == "modules" and "Modules" or "Settings"
+        utilityTooltip.TextColor3 = C.text
+        utilityTooltip.TextSize = 10
+        utilityTooltip.Font = FONT_MED
+        utilityTooltip.Visible = false
+        utilityTooltip.ZIndex = 90
+        utilityTooltip.Parent = self._gui
+        corner(utilityTooltip, 6)
+        stroke(utilityTooltip, C.border, 0.25)
+        pad(utilityTooltip, 7, 4, 7, 4)
+
+        local function placeUtilityTooltip()
+            if not utilityTooltip or not btn.Parent then return end
+            local pos = btn.AbsolutePosition
+            local size = btn.AbsoluteSize
+            utilityTooltip.Position = UDim2.fromOffset(
+                pos.X + size.X * 0.5,
+                pos.Y + size.Y + 5
+            )
+        end
+        self._conn(btn:GetPropertyChangedSignal("AbsolutePosition"):Connect(placeUtilityTooltip))
+        self._conn(btn:GetPropertyChangedSignal("AbsoluteSize"):Connect(placeUtilityTooltip))
+    end
+
     -- hover: brighten (mockup .di:hover)
     self._conn(btn.MouseEnter:Connect(function()
         if this._activeTab ~= id then btn.TextColor3 = C.text end
+        if utilityTooltip then
+            local pos = btn.AbsolutePosition
+            local size = btn.AbsoluteSize
+            utilityTooltip.Position = UDim2.fromOffset(
+                pos.X + size.X * 0.5,
+                pos.Y + size.Y + 5
+            )
+            utilityTooltip.Visible = true
+        end
     end))
     self._conn(btn.MouseLeave:Connect(function()
         if this._activeTab ~= id then btn.TextColor3 = C.muted end
+        if utilityTooltip then utilityTooltip.Visible = false end
     end))
     -- press: subtle scale (mockup .di:active)
     self._conn(btn.MouseButton1Down:Connect(function()
@@ -1175,7 +1240,7 @@ function Dock:AddTab(tabLabel, tabId)
     end))
 
     table.insert(self._tabIds, tabId)
-    self._tabs[tabId] = { btn = btn, page = page, order = #self._tabIds }
+    self._tabs[tabId] = { btn = btn, page = page, tooltip = utilityTooltip, order = #self._tabIds }
     self._tabToggles[tabId] = {}
     return tabId
 end
