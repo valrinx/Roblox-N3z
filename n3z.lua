@@ -1,12 +1,19 @@
 -- ============================================================
--- N3Z HUB v2.3.3 - n3z.lua (entrypoint)
+-- N3Z HUB v2.3.4 - n3z.lua (entrypoint)
 -- Native-GUI dock hub. Run:
 --   loadstring(game:HttpGet(
 --     "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/n3z.lua"))()
 -- ============================================================
 
 local Players = game:GetService("Players")
+
+-- Executors can inject before Players.LocalPlayer is populated. Waiting here
+-- keeps bootstrap from leaving an empty dock shell.
 local localPlayer = Players.LocalPlayer
+while not localPlayer do
+    task.wait()
+    localPlayer = Players.LocalPlayer
+end
 local UserInputService = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 
@@ -37,7 +44,7 @@ local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/"
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
 local HUB_URL = REPO_URL
 
-local N3Z_VERSION = "v2.3.3"
+local N3Z_VERSION = "v2.3.4"
 
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: one object {id, name, version, game, placeIds, file, envKey?}
@@ -59,7 +66,7 @@ local MODULES = {
       placeIds = { 4639625707 }, file = "modules/war_tycoon.lua" },
     { id = "frisbeefrenzy", name = "Frisbee Frenzy", version = "v1.0.0", game = "Frisbee Frenzy",
       placeIds = { 106986181033085 }, file = "modules/frisbee_frenzy.lua" },
-    { id = "danceavenue", name = "Dance Avenue", configName = "DanceAvenue", version = "v1.0.0", game = "Dance Avenue",
+    { id = "danceavenue", name = "Dance Avenue", configName = "DanceAvenue", version = "v1.3.0", game = "Dance Avenue",
       placeIds = { 79341474117411 }, file = "modules/dance_avenue.lua", envKey = "__N3Z_DANCE_AVENUE",
       coreFile = "modules/dance_avenue/core.lua",
       platformFiles = {
