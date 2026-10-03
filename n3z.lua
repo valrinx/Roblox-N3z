@@ -142,8 +142,8 @@ end
 
 local function fetch(localPath, urlPath)
     if DEV_LOCAL then
-        return fetchDevHttp(localPath)
-            or fetchLocal(localPath)
+        return fetchLocal(localPath)
+            or fetchDevHttp(localPath)
             or fetchGitHub(urlPath)
             or error("N3Z: failed to fetch " .. tostring(urlPath))
     end
