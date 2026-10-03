@@ -9,7 +9,8 @@
 --   v1.6.0 - native ScreenGui visual fallback for mobile executors without Drawing API.
 --   v1.6.1 - mobile-safe non-aim helpers and deterministic cleanup.
 --   v1.6.2 - force native visual backend on Android/iOS.
---   Read-only visuals + mouse-driven aim.
+--   v1.6.3 - separate Android/iOS fire-touch aim path from desktop mouse aim.
+--   Visuals + desktop mouse aim + isolated mobile fire-touch aim.
 --   WarZ notes: FFA + Party/Clan relation colors, skip dead via WarzDead attribute,
 --   character = R15 (Head/HumanoidRootPart), WarzHitboxes folder present.
 -- ============================================================
@@ -21,6 +22,7 @@ return function(Window, ctx)
     local ReplicatedStorage = game:GetService("ReplicatedStorage")
     local UserInputService = game:GetService("UserInputService")
     local ContextActionService = game:GetService("ContextActionService")
+    local GuiService = game:GetService("GuiService")
 
     local localPlayer = Players.LocalPlayer
     -- Cache the game's own weapon/ballistic helpers once. CurrentWeaponId is
@@ -91,7 +93,7 @@ return function(Window, ctx)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.6.2"
+    environment.RAVEN_WARZPVP_VER = "1.6.3"
 
     local persistedAimKey = "MouseButton2"
     pcall(function()
@@ -1377,7 +1379,10 @@ return function(Window, ctx)
     local aimLockPlayer = nil
     local aimLockCharacter = nil
     local aimHeld = false
-    local capturingAimKey = false -- true while the custom aim-key button listens
+    local mobileAimHeld = false
+    local mobileAimTouch = nil
+    local mobileAimGraceUntil = 0
+    local capturingAimKey = false -- desktop-only custom aim-key capture
 
     local ballisticCacheWeaponId = nil
     local ballisticCache = nil
@@ -1720,6 +1725,9 @@ return function(Window, ctx)
             if open then
                 -- Never carry an aim hold/lock into menu interaction.
                 aimHeld = false
+                mobileAimHeld = false
+                mobileAimTouch = nil
+                mobileAimGraceUntil = 0
                 aimLockPlayer, aimLockCharacter = nil, nil
             end
         end
@@ -1758,7 +1766,85 @@ return function(Window, ctx)
         return resolveInputName(input) == settings.aimKeyName
     end
 
+    local MOBILE_FIRE_TOKENS = {
+        "fire", "shoot", "attack", "trigger", "bullet", "ammo",
+    }
+
+    local function mobileTouchLooksLikeFire(input)
+        if not isMobileVisualClient
+            or input.UserInputType ~= Enum.UserInputType.Touch then
+            return false
+        end
+
+        local pos = input.Position
+        local okGui, guiObjects = pcall(function()
+            return GuiService:GetGuiObjectsAtPosition(pos.X, pos.Y)
+        end)
+        if okGui and type(guiObjects) == "table" then
+            for _, guiObject in ipairs(guiObjects) do
+                local current = guiObject
+                for _ = 1, 5 do
+                    if not current then break end
+                    local blob = string.lower(tostring(current.Name or ""))
+                    if current:IsA("TextButton") or current:IsA("TextLabel") then
+                        blob = blob .. " " .. string.lower(tostring(current.Text or ""))
+                    end
+                    for _, token in ipairs(MOBILE_FIRE_TOKENS) do
+                        if string.find(blob, token, 1, true) then
+                            return true
+                        end
+                    end
+                    current = current.Parent
+                end
+            end
+        end
+
+        local viewport = camera and camera.ViewportSize
+        if not viewport or viewport.X <= 0 or viewport.Y <= 0 then
+            return false
+        end
+        local nx = pos.X / viewport.X
+        local ny = pos.Y / viewport.Y
+        return nx >= 0.54 and nx <= 0.92
+            and ny >= 0.28 and ny <= 0.86
+    end
+
+    local function updateMobileAimbot(dt)
+        if not settings.aimbot then
+            mobileAimHeld = false
+            mobileAimTouch = nil
+            mobileAimGraceUntil = 0
+            aimLockPlayer, aimLockCharacter = nil, nil
+            return
+        end
+        if menuOpen then
+            mobileAimHeld = false
+            mobileAimTouch = nil
+            aimLockPlayer, aimLockCharacter = nil, nil
+            return
+        end
+        if not mobileAimHeld and os.clock() > mobileAimGraceUntil then
+            aimLockPlayer, aimLockCharacter = nil, nil
+            return
+        end
+
+        local target = getAimTarget()
+        if not target then return end
+        target = applyAimPrediction(target, aimLockCharacter)
+
+        local current = camera.CFrame
+        local delta = target - current.Position
+        if delta.Magnitude <= 0.01 then return end
+
+        local desired = CFrame.lookAt(current.Position, target, Vector3.yAxis)
+        local resp = math.clamp(settings.aimResponse, 0.01, 1)
+        local alpha = 1 - math.pow(1 - resp, (dt or 1 / 60) * 60)
+        camera.CFrame = current:Lerp(desired, math.clamp(alpha, 0, 1))
+    end
     local function updateAimbot(dt)
+        if isMobileVisualClient then
+            return updateMobileAimbot(dt)
+        end
         if not settings.aimbot then aimHeld, aimLockPlayer, aimLockCharacter = false, nil, nil return end
         if capturingAimKey then aimHeld, aimLockPlayer, aimLockCharacter = false, nil, nil return end
         if menuOpen then
@@ -1894,7 +1980,13 @@ return function(Window, ctx)
         Flag = "WZP_Aimbot",
         Callback = function(v)
             settings.aimbot = v
-            if not v then aimHeld, aimLockPlayer, aimLockCharacter = false, nil, nil end
+            if not v then
+                aimHeld = false
+                mobileAimHeld = false
+                mobileAimTouch = nil
+                mobileAimGraceUntil = 0
+                aimLockPlayer, aimLockCharacter = nil, nil
+            end
         end,
     })
     CombatTab:CreateToggle({
@@ -1918,6 +2010,7 @@ return function(Window, ctx)
             end
         end,
     })
+    if not isMobileVisualClient then
     -- Custom aim-key button. The library keybind control cannot capture
     -- MouseButton1 (its rebinding handler has no MB1 branch), so we capture
     -- here: any keyboard key or mouse button (MB1/MB2/MB3) can be bound.
@@ -2004,6 +2097,24 @@ return function(Window, ctx)
         local name = resolveInputName(input)
         if name then aimKeyProxy:Set(name) end
     end))
+    else
+        CombatTab:CreateLabel("Mobile Aim: fire-touch")
+
+        table.insert(connections, UserInputService.InputBegan:Connect(function(input)
+            if menuOpen or not settings.aimbot then return end
+            if not mobileTouchLooksLikeFire(input) then return end
+            mobileAimHeld = true
+            mobileAimTouch = input
+            mobileAimGraceUntil = os.clock() + 0.16
+        end))
+
+        table.insert(connections, UserInputService.InputEnded:Connect(function(input)
+            if mobileAimTouch ~= input then return end
+            mobileAimHeld = false
+            mobileAimTouch = nil
+            mobileAimGraceUntil = os.clock() + 0.10
+        end))
+    end
     CombatTab:CreateSlider({
         Name = "Aim Max Distance",
         Range = { 50, 2000 },
@@ -2269,6 +2380,9 @@ end
         settings.instantPickup = false
         pcall(applyInstantPickup)
         aimHeld, aimLockPlayer, aimLockCharacter, capturingAimKey = false, nil, nil, false
+        mobileAimHeld = false
+        mobileAimTouch = nil
+        mobileAimGraceUntil = 0
         pcall(function() setInputBlock(false) end)
         for _, c in ipairs(connections) do
             pcall(function() c:Disconnect() end)
@@ -2350,7 +2464,8 @@ end
             running = running,
             visualBackend = isMobileVisualClient and "NativeGui" or (hasDrawing and "Drawing" or "NativeGui"),
             aimbot = settings.aimbot,
-            aimKey = settings.aimKeyName,
+            aimInputMode = isMobileVisualClient and "FireTouch" or "DesktopKey",
+            aimKey = isMobileVisualClient and nil or settings.aimKeyName,
             aimPosition = settings.aimPosition,
             prediction = {
                 enabled = settings.aimPrediction,
@@ -2361,7 +2476,7 @@ end
                 immediate = currentBallistics and currentBallistics.immediate or predictionState.immediate,
                 travelTime = predictionState.travelTime,
             },
-            aimHeld = aimHeld,
+            aimHeld = isMobileVisualClient and (mobileAimHeld or os.clock() <= mobileAimGraceUntil) or aimHeld,
             target = aimLockPlayer and aimLockPlayer.Name or nil,
             skeleton = {entries = entries, lines = lines, visible = visible, ready = ready},
             loot = (function()
