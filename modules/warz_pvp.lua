@@ -7,6 +7,7 @@
 --   v1.5.1 - event-driven loot cache + 60 Hz cached label updates.
 --   v1.5.2 - automatic per-weapon ballistic prediction (lead + gravity drop).
 --   v1.6.0 - native ScreenGui visual fallback for mobile executors without Drawing API.
+--   v1.6.1 - mobile-safe non-aim helpers and deterministic cleanup.
 --   Read-only visuals + mouse-driven aim.
 --   WarZ notes: FFA + Party/Clan relation colors, skip dead via WarzDead attribute,
 --   character = R15 (Head/HumanoidRootPart), WarzHitboxes folder present.
@@ -40,6 +41,23 @@ return function(Window, ctx)
             WarzProjectile = require(module)
         end
     end)
+    local CombatInput = nil
+    local function getCombatInput()
+        if type(CombatInput) == "table" and type(CombatInput.RequestUseMed) == "function" then
+            return CombatInput
+        end
+        pcall(function()
+            local client = localPlayer.PlayerScripts:FindFirstChild("Client")
+            local input = client and client:FindFirstChild("input")
+            local module = input and input:FindFirstChild("CombatInput")
+            if module and module:IsA("ModuleScript") then
+                local api = require(module)
+                if type(api) == "table" then CombatInput = api end
+            end
+        end)
+        return CombatInput
+    end
+
     local camera = Workspace.CurrentCamera
     local dock = (type(ctx) == "table" and type(ctx.dock) == "table" and ctx.dock)
         or (type(Window) == "table" and type(Window.dock) == "table" and Window.dock)
@@ -72,7 +90,7 @@ return function(Window, ctx)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.6.0"
+    environment.RAVEN_WARZPVP_VER = "1.6.1"
 
     local persistedAimKey = "MouseButton2"
     pcall(function()
@@ -111,7 +129,6 @@ return function(Window, ctx)
         aimKeyName = persistedAimKey,
         autoHeal = false,
         healThreshold = 50,
-        healSlot = 3,
         healCooldown = 0,
         noRecoil = false,
         instantPickup = false,
@@ -2003,20 +2020,21 @@ return function(Window, ctx)
         Flag = "WZP_HealThreshold",
         Callback = function(v) settings.healThreshold = v end,
     })
-    CombatTab:CreateSlider({
-        Name = "Heal Slot",
-        Range = { 1, 9 },
-        Increment = 1,
-        Suffix = "",
-        CurrentValue = 3,
-        Flag = "WZP_HealSlot",
-        Callback = function(v) settings.healSlot = math.floor(v) end,
-    })
+    local cachedSharedConfig = nil
+    local recoilTime = 0
+
     -- No Recoil (Tier 2): modify weapon catalog tables directly
     -- When Recoil <= 0, WarzCamera.ApplyRecoil returns early (no effect). No hooks needed.
     local function applyNoRecoil()
-        local ok, cs = pcall(require, localPlayer.PlayerScripts.Client.input.CombatSettings)
-        if not ok or not cs then return end
+        local cs = CombatSettings
+        if type(cs) ~= "table" then
+            local ok, loaded = pcall(require, localPlayer.PlayerScripts.Client.input.CombatSettings)
+            if ok and type(loaded) == "table" then
+                CombatSettings = loaded
+                cs = loaded
+            end
+        end
+        if type(cs) ~= "table" then return end
         local catalog
         if type(cs.GetCatalog) == "function" then
             local ok2, cat = pcall(cs.GetCatalog)
@@ -2043,8 +2061,14 @@ return function(Window, ctx)
                 end
             end
         end
-        local okCfg, Config = pcall(require, ReplicatedStorage.Shared.Config)
-        if okCfg and Config and type(Config.Shop) == "table" then
+        if not cachedSharedConfig then
+            local okCfg, loaded = pcall(require, ReplicatedStorage.Shared.Config)
+            if okCfg and type(loaded) == "table" then
+                cachedSharedConfig = loaded
+            end
+        end
+        local Config = cachedSharedConfig
+        if Config and type(Config.Shop) == "table" then
             for _, item in pairs(Config.Shop) do
                 if type(item) == "table" then
                     if item.Recoil ~= nil and item._origRecoil == nil then
@@ -2067,14 +2091,26 @@ return function(Window, ctx)
     trackSection(CombatTab, "No Recoil")
 -- Instant Pickup (Tier 2): patch LootHold.Step to commit instantly
 local _origLootHoldStep = nil
-local function applyInstantPickup()
-    local lhMod
-    for _, c in ipairs(localPlayer.PlayerScripts.Client:GetDescendants()) do
+local _lootHoldModule = nil
+
+local function getLootHoldModule()
+    if type(_lootHoldModule) == "table" then return _lootHoldModule end
+    local client = localPlayer.PlayerScripts:FindFirstChild("Client")
+    if not client then return nil end
+    for _, c in ipairs(client:GetDescendants()) do
         if c.Name == "LootHold" and c:IsA("ModuleScript") then
             local ok, mod = pcall(require, c)
-            if ok and mod then lhMod = mod break end
+            if ok and type(mod) == "table" then
+                _lootHoldModule = mod
+                return mod
+            end
         end
     end
+    return nil
+end
+
+local function applyInstantPickup()
+    local lhMod = getLootHoldModule()
     if not lhMod then return end
     if settings.instantPickup then
         if not _origLootHoldStep then
@@ -2101,6 +2137,7 @@ end
         Flag = "WZP_NoRecoil",
         Callback = function(v)
             settings.noRecoil = v
+            recoilTime = 0
             pcall(applyNoRecoil)
         end,
     })
@@ -2151,9 +2188,16 @@ end
         pcall(updateFovCircle)
         pcall(updateAimbot, dt)
 
-        -- Keep recoil updated if active
+        -- Catalog edits persist; refresh at 2 Hz to catch weapon/config reloads
+        -- without scanning every weapon on every render frame.
         if settings.noRecoil then
-            pcall(applyNoRecoil)
+            recoilTime += dt
+            if recoilTime >= 0.5 then
+                recoilTime = 0
+                pcall(applyNoRecoil)
+            end
+        else
+            recoilTime = 0
         end
 
         -- Auto Heal (Tier 1): via CombatInput.RequestUseMed() (correct signature)
@@ -2161,15 +2205,17 @@ end
             pcall(function()
                 local char = localPlayer.Character
                 local hum = char and char:FindFirstChildOfClass("Humanoid")
-                if hum and hum.Health > 0 and hum.Health < settings.healThreshold then
+                if hum and hum.Health > 0 and hum.Health <= settings.healThreshold then
                     local now = os.clock()
                     if now - settings.healCooldown >= 0.5 then
                         local cd = tonumber(localPlayer:GetAttribute("WarzMedCdLeft")) or 0
                         if cd <= 0.05 then
-                            local ok, ci = pcall(require, localPlayer.PlayerScripts.Client.input.CombatInput)
-                            if ok and ci and type(ci.RequestUseMed) == "function" then
-                                pcall(ci.RequestUseMed)
-                                settings.healCooldown = now
+                            local ci = getCombatInput()
+                            if ci and type(ci.RequestUseMed) == "function" then
+                                local okUse = pcall(ci.RequestUseMed)
+                                if okUse then
+                                    settings.healCooldown = now
+                                end
                             end
                         end
                     end
@@ -2187,6 +2233,11 @@ end
         if not running then return end
         running = false
         settings.aimbot = false
+        settings.autoHeal = false
+        settings.noRecoil = false
+        pcall(applyNoRecoil)
+        settings.instantPickup = false
+        pcall(applyInstantPickup)
         aimHeld, aimLockPlayer, aimLockCharacter, capturingAimKey = false, nil, nil, false
         pcall(function() setInputBlock(false) end)
         for _, c in ipairs(connections) do
@@ -2244,6 +2295,9 @@ end
                 end
             end
         end)
+        if _G.__WZP_ApplyNoRecoil == applyNoRecoil then
+            _G.__WZP_ApplyNoRecoil = nil
+        end
         if environment.__RAVEN_WARZPVP == moduleHandle then
             environment.__RAVEN_WARZPVP = nil
         end
