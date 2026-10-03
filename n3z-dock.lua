@@ -405,6 +405,72 @@ function Dock.new(opts)
     barPad.Parent = bar
     self._bar = bar
 
+    -- draggable bar: drag to move, snap top/bottom on release.
+    -- top snap flips panel to open downward.
+    do
+        local uis = game:GetService("UserInputService")
+        local dragging = false
+        local dragMoved = false
+        local dragStartPos = nil
+        local stageStartPos = nil
+        local function setFlipped(f)
+            self._flipped = f
+            if f then
+                bar.LayoutOrder = 1
+                panel.LayoutOrder = 2
+                stageLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+            else
+                panel.LayoutOrder = 1
+                bar.LayoutOrder = 2
+                stageLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
+            end
+        end
+        local function snap()
+            local cam = workspace.CurrentCamera
+            local vy = cam and cam.ViewportSize.Y or 1080
+            if stage.AbsolutePosition.Y < vy * 0.4 then
+                setFlipped(true)
+                stage.AnchorPoint = Vector2.new(0.5, 0)
+                stage.Position = UDim2.new(0.5, 0, 0, 14)
+            else
+                setFlipped(false)
+                stage.AnchorPoint = Vector2.new(0.5, 1)
+                stage.Position = UDim2.new(0.5, 0, 1, -14)
+            end
+        end
+        self._conn(bar.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
+                dragging = true
+                dragMoved = false
+                dragStartPos = input.Position
+                stageStartPos = stage.AbsolutePosition
+            end
+        end))
+        self._conn(uis.InputChanged:Connect(function(input)
+            if not dragging then return end
+            local t = input.UserInputType
+            if t ~= Enum.UserInputType.MouseMovement and t ~= Enum.UserInputType.Touch then return end
+            local delta = input.Position - dragStartPos
+            if not dragMoved and delta.Magnitude < 6 then return end
+            dragMoved = true
+            local cam = workspace.CurrentCamera
+            local vx = cam and cam.ViewportSize.X or 1920
+            local vy = cam and cam.ViewportSize.Y or 1080
+            local nx = math.clamp(stageStartPos.X + delta.X, 0, math.max(0, vx - stage.AbsoluteSize.X))
+            local ny = math.clamp(stageStartPos.Y + delta.Y, 0, math.max(0, vy - stage.AbsoluteSize.Y))
+            stage.AnchorPoint = Vector2.new(0, 0)
+            stage.Position = UDim2.fromOffset(nx, ny)
+        end))
+        self._conn(uis.InputEnded:Connect(function(input)
+            if not dragging then return end
+            local t = input.UserInputType
+            if t ~= Enum.UserInputType.MouseButton1 and t ~= Enum.UserInputType.Touch then return end
+            dragging = false
+            if dragMoved then snap() end
+        end))
+    end
+
     -- tabs row: the only layout-managed child of the bar.
     -- SortOrder=LayoutOrder keeps logo -> tabs -> avatar in fixed order.
     local tabsRow = Instance.new("Frame")
@@ -848,7 +914,7 @@ function Dock:_textBlock(row, name, desc)
     holder.Size = UDim2.new(1, -170, 0, 0)
     holder.AutomaticSize = Enum.AutomaticSize.Y
     holder.Parent = row
-    local nl = label(name or "", L.nameFont, C.text, FONT_MED)
+    local nl = label(name or "", L.nameFont, C.text, FONT_BOLD)
     nl.Size = UDim2.new(1, 0, 0, L.nameH)
     nl.Parent = holder
     if desc and desc ~= "" then
