@@ -1,5 +1,5 @@
 -- ============================================================
--- N3Z HUB v2.2.4 - n3z.lua (entrypoint)
+-- N3Z HUB v2.3.0 - n3z.lua (entrypoint)
 -- Native-GUI dock hub. Run:
 --   loadstring(game:HttpGet(
 --     "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/n3z.lua"))()
@@ -37,13 +37,18 @@ local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/"
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
 local HUB_URL = REPO_URL
 
-local N3Z_VERSION = "v2.2.4"
+local N3Z_VERSION = "v2.3.0"
 
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: one object {id, name, version, game, placeIds, file, envKey?}
 local MODULES = {
-    { id = "warzpvp", name = "WarZPVP", configName = "WarZ", version = "v1.6.3", game = "WarZPVP OPEN BETA",
-      placeIds = { 135187059974536 }, file = "modules/warz_pvp.lua", envKey = "__RAVEN_WARZPVP" },
+    { id = "warzpvp", name = "WarZPVP", configName = "WarZ", version = "v1.7.0", game = "WarZPVP OPEN BETA",
+      placeIds = { 135187059974536 }, file = "modules/warz_pvp.lua", envKey = "__RAVEN_WARZPVP",
+      coreFile = "modules/warz_pvp/core.lua",
+      platformFiles = {
+          pc = "modules/warz_pvp/pc.lua",
+          mobile = "modules/warz_pvp/mobile.lua",
+      } },
     { id = "stealanegg", name = "Steal An Egg", version = "v1.2.7", game = "Steal An Egg",
       placeIds = { 107778070777162 }, file = "modules/steal_an_egg.lua" },
     { id = "illegalsoccer", name = "Illegal Soccer", version = "v1.4.4", game = "Illegal Soccer",
@@ -141,6 +146,24 @@ end
 
 local function fetchHub(name)
     return fetch(name, name)
+end
+
+local moduleFileCache = {}
+
+local function loadModuleFile(path)
+    assert(type(path) == "string" and path ~= "", "N3Z: module path is required")
+    if moduleFileCache[path] ~= nil then
+        return moduleFileCache[path]
+    end
+
+    local source = fetch(path, path)
+    local chunk, loadErr = loadstring(source, "@" .. path)
+    assert(chunk, "N3Z: failed to compile " .. path .. ": " .. tostring(loadErr))
+
+    local ok, result = pcall(chunk)
+    assert(ok, "N3Z: failed to prepare " .. path .. ": " .. tostring(result))
+    moduleFileCache[path] = result
+    return result
 end
 
 -- ---------- per-game executor-workspace config ----------
@@ -303,6 +326,16 @@ if activeMod then
     assert(okFactory, "N3Z: failed to prepare module " .. activeMod.id .. ": " .. tostring(factoryOrErr))
     assert(type(factoryOrErr) == "function", "N3Z: module did not return function(Window, ctx)")
     activeModuleFn = factoryOrErr
+
+    if type(activeMod.coreFile) == "string" then
+        loadModuleFile(activeMod.coreFile)
+    end
+    if type(activeMod.platformFiles) == "table" then
+        local platformFile = activeMod.platformFiles[isMobile and "mobile" or "pc"]
+        if type(platformFile) == "string" then
+            loadModuleFile(platformFile)
+        end
+    end
 end
 
 -- ---------- env ----------
@@ -467,7 +500,14 @@ dock:SetTabInfo("settings", "settings")
 
 -- ---------- load the preflighted game module ----------
 if activeMod then
-    local ctx = { game = activeMod.game, placeId = placeId, module = activeMod, dock = dock }
+    local ctx = {
+        game = activeMod.game,
+        placeId = placeId,
+        module = activeMod,
+        dock = dock,
+        platform = isMobile and "mobile" or "pc",
+        loadModuleFile = loadModuleFile,
+    }
     local ok, runErr = pcall(activeModuleFn, Window, ctx)
     if not ok then
         local message = tostring(runErr or "unknown module error")
