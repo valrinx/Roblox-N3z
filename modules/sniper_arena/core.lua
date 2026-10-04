@@ -4,6 +4,7 @@
 return function(Window, scriptInfo)
     local Players = game:GetService("Players")
     local RunService = game:GetService("RunService")
+    local GuiService = game:GetService("GuiService")
     local VirtualInputManager = game:GetService("VirtualInputManager")
 
     local localPlayer = Players.LocalPlayer
@@ -19,12 +20,13 @@ return function(Window, scriptInfo)
     local lockKeyActive = false
     local bindingName = "RavenSniperArenaAim_" .. tostring(localPlayer.UserId)
 
+
     local settings = {
         aimlock = false,
         aimPart = "Head",
         fov = 200,
         aimSmooth = 55,
-        aimActivation = "Toggle Key",
+        aimActivation = "Always",
         triggerBot = false,
         triggerDelay = 0.03,
         triggerCooldown = 0.16,
@@ -42,6 +44,91 @@ return function(Window, scriptInfo)
 
     local function getCamera()
         return workspace.CurrentCamera
+    end
+
+    local crosshairCache = nil
+    local crosshairRetryAt = 0
+
+    local function guiCenterToViewport(guiObject)
+        local camera = getCamera()
+        if not camera or not guiObject or not guiObject:IsA("GuiObject") then return nil end
+
+        local ok, pos, size = pcall(function()
+            return guiObject.AbsolutePosition, guiObject.AbsoluteSize
+        end)
+        if not ok or typeof(pos) ~= "Vector2" or typeof(size) ~= "Vector2"
+            or size.X <= 0 or size.Y <= 0 then
+            return nil
+        end
+
+        local rawCenter = pos + size * 0.5
+        local screenGui = guiObject:FindFirstAncestorOfClass("ScreenGui")
+        if screenGui then
+            local mapped = nil
+            pcall(function()
+                local rootPos = screenGui.AbsolutePosition
+                local rootSize = screenGui.AbsoluteSize
+                if typeof(rootPos) == "Vector2" and typeof(rootSize) == "Vector2"
+                    and rootSize.X > 0 and rootSize.Y > 0 then
+                    local relative = rawCenter - rootPos
+                    mapped = Vector2.new(
+                        relative.X * camera.ViewportSize.X / rootSize.X,
+                        relative.Y * camera.ViewportSize.Y / rootSize.Y
+                    )
+                end
+            end)
+            if mapped then return mapped end
+        end
+
+        local inset = Vector2.zero
+        pcall(function()
+            local topLeft = GuiService:GetGuiInset()
+            if typeof(topLeft) == "Vector2" then inset = topLeft end
+        end)
+        return rawCenter + inset
+    end
+
+    local function getCrosshairCenter()
+        local camera = getCamera()
+        local fallback = camera and camera.ViewportSize * 0.5 or Vector2.new(640, 360)
+
+        if crosshairCache and crosshairCache.Parent and crosshairCache:IsA("GuiObject") then
+            local ok, visible = pcall(function() return crosshairCache.Visible end)
+            if ok and visible then
+                return guiCenterToViewport(crosshairCache) or fallback
+            end
+        end
+
+        local now = os.clock()
+        if now < crosshairRetryAt then return fallback end
+        crosshairRetryAt = now + 0.5
+
+        local playerGui = localPlayer:FindFirstChildOfClass("PlayerGui")
+        if not playerGui then return fallback end
+
+        local hud = playerGui:FindFirstChild("Hud")
+        local gameGui = hud and hud:FindFirstChild("Game")
+        local started = gameGui and gameGui:FindFirstChild("Started")
+        local inGame = started and started:FindFirstChild("InGame")
+        local center = inGame and inGame:FindFirstChild("Center")
+        local combat = center and center:FindFirstChild("Combat")
+        local crosshair = combat and combat:FindFirstChild("Crosshair")
+
+        if not (crosshair and crosshair:IsA("GuiObject")) and hud then
+            for _, d in ipairs(hud:GetDescendants()) do
+                if d.Name == "Crosshair" and d:IsA("GuiObject") and d.Visible then
+                    crosshair = d
+                    break
+                end
+            end
+        end
+
+        if crosshair and crosshair:IsA("GuiObject") then
+            crosshairCache = crosshair
+            return guiCenterToViewport(crosshair) or fallback
+        end
+
+        return fallback
     end
 
     local function getHumanoid(model)
@@ -119,8 +206,9 @@ return function(Window, scriptInfo)
         if not camera or not part then return nil, false, math.huge end
         local point, onScreen = camera:WorldToViewportPoint(part.Position)
         if point.Z <= 0 then onScreen = false end
-        local center = Vector2.new(camera.ViewportSize.X * 0.5, camera.ViewportSize.Y * 0.5)
-        return Vector2.new(point.X, point.Y), onScreen, (Vector2.new(point.X, point.Y) - center).Magnitude
+        local screen = Vector2.new(point.X, point.Y)
+        local center = getCrosshairCenter()
+        return screen, onScreen, (screen - center).Magnitude
     end
 
     local function buildTarget(entity)
@@ -136,12 +224,15 @@ return function(Window, scriptInfo)
         }
     end
 
+    local targetVisible
+
     local function getBestTarget(fovOverride)
         local best = nil
         local bestDistance = fovOverride or settings.fov
         for _, entity in ipairs(collectEnemyModels()) do
             local target = buildTarget(entity)
-            if target and target.screenDistance < bestDistance then
+            if target and target.screenDistance < bestDistance
+                and (not targetVisible or targetVisible(target)) then
                 best = target
                 bestDistance = target.screenDistance
             end
@@ -155,26 +246,61 @@ return function(Window, scriptInfo)
         local _, onScreen, screenDistance = projectPart(target.part)
         if not onScreen or screenDistance > settings.fov then return nil end
         target.screenDistance = screenDistance
+        if targetVisible and not targetVisible(target) then return nil end
         return target
     end
 
     local function aimAt(target, deltaTime)
         local camera = getCamera()
         if not camera or not target or not target.part then return end
+
+        local screen, onScreen = projectPart(target.part)
+        if not onScreen or not screen then return end
+
+        local crosshair = getCrosshairCenter()
+        local offset = screen - crosshair
+        if offset.Magnitude <= 0.75 then return end
+
         local origin = camera.CFrame.Position
-        if (target.part.Position - origin).Magnitude < 0.01 then return end
-        local goal = CFrame.lookAt(origin, target.part.Position)
+        local targetVector = target.part.Position - origin
+        if targetVector.Magnitude < 0.01 then return end
+
+        -- This game draws its crosshair above the viewport centre. A plain
+        -- CFrame.lookAt() would therefore place the target under screen centre
+        -- instead of under the real crosshair. Build the local ray represented
+        -- by the crosshair and remove that projection offset from the goal.
+        local crosshairRay = camera:ViewportPointToRay(crosshair.X, crosshair.Y)
+        local localCrosshairDir = camera.CFrame:VectorToObjectSpace(crosshairRay.Direction.Unit)
+        local localOffsetRotation = CFrame.lookAt(
+            Vector3.zero,
+            localCrosshairDir,
+            Vector3.yAxis
+        )
+
+        local targetLook = CFrame.lookAt(
+            origin,
+            target.part.Position,
+            camera.CFrame.UpVector
+        )
+        local goal = targetLook * localOffsetRotation:Inverse()
+
         local smooth = math.clamp(settings.aimSmooth, 0, 100) / 100
-        if smooth <= 0.001 then
-            camera.CFrame = goal
-            return
+        local response = 2.5 + (34 * ((1 - smooth) ^ 2))
+        local alpha = math.clamp(
+            1 - math.exp(-response * math.max(deltaTime, 1 / 240)),
+            0,
+            1
+        )
+
+        local adapter = scriptInfo.platformAdapter
+        if adapter and type(adapter.applyAim) == "function" then
+            local ok, handled = pcall(adapter.applyAim, camera, goal, alpha)
+            if ok and handled ~= false then return end
         end
-        local response = 1.5 + (30 * ((1 - smooth) ^ 2))
-        local alpha = 1 - math.exp(-response * math.max(deltaTime, 1 / 240))
-        camera.CFrame = camera.CFrame:Lerp(goal, math.clamp(alpha, 0, 1))
+        camera.CFrame = camera.CFrame:Lerp(goal, alpha)
     end
 
-    local function targetVisible(target)
+    targetVisible = function(target)
         local camera = getCamera()
         if not camera or not target or not target.part then return false end
         local direction = target.part.Position - camera.CFrame.Position
@@ -186,6 +312,43 @@ return function(Window, scriptInfo)
         params.FilterDescendantsInstances = filter
         local result = workspace:Raycast(camera.CFrame.Position, direction, params)
         return result == nil or result.Instance:IsDescendantOf(target.model)
+    end
+
+    local function getCrosshairTarget()
+        local camera = getCamera()
+        if not camera then return nil end
+
+        local center = getCrosshairCenter()
+        local ray = camera:ViewportPointToRay(center.X, center.Y)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.IgnoreWater = true
+        pcall(function() params.RespectCanCollide = false end)
+
+        local filter = {}
+        if localPlayer.Character then table.insert(filter, localPlayer.Character) end
+        table.insert(filter, camera)
+        params.FilterDescendantsInstances = filter
+
+        local result = workspace:Raycast(ray.Origin, ray.Direction * 5000, params)
+        if not result or not result.Instance then return nil end
+
+        for _, entity in ipairs(collectEnemyModels()) do
+            if result.Instance:IsDescendantOf(entity.model) then
+                local part = getAimPart(entity.model)
+                if part then
+                    return {
+                        model = entity.model,
+                        player = entity.player,
+                        part = part,
+                        screenDistance = 0,
+                        hitPart = result.Instance,
+                        hitPosition = result.Position,
+                    }
+                end
+            end
+        end
+        return nil
     end
 
     local function releaseMouse()
@@ -210,8 +373,31 @@ return function(Window, scriptInfo)
     end
 
     local function fireWeaponInput()
-        if type(scriptInfo.platformAdapter.mouse1click) == "function" then
-            local ok = pcall(scriptInfo.platformAdapter.mouse1click)
+        local adapter = scriptInfo.platformAdapter or {}
+        local center = getCrosshairCenter()
+
+        if type(adapter.firePrimary) == "function" then
+            local ok, fired = pcall(adapter.firePrimary, center, 0.018)
+            if ok and fired ~= false then return true end
+        end
+
+        -- Prefer a real Begin -> End pair. Sniper Arena's weapon input observes
+        -- button state transitions; a one-shot click primitive can report
+        -- success without producing the same sequence the weapon controller uses.
+        if type(adapter.mouse1press) == "function"
+            and type(adapter.mouse1release) == "function" then
+            local pressed = pcall(adapter.mouse1press)
+            if pressed then
+                mouseHeld = true
+                task.wait(0.018)
+                pcall(adapter.mouse1release)
+                mouseHeld = false
+                return true
+            end
+        end
+
+        if type(adapter.mouse1click) == "function" then
+            local ok = pcall(adapter.mouse1click)
             if ok then return true end
         end
 
@@ -220,15 +406,23 @@ return function(Window, scriptInfo)
         local ok = pcall(function()
             mouseHeld = true
             VirtualInputManager:SendMouseButtonEvent(
-                camera.ViewportSize.X * 0.5,
-                camera.ViewportSize.Y * 0.5,
+                center.X,
+                center.Y,
                 0,
                 true,
                 game,
                 0
             )
-            task.wait(0.02)
-            releaseMouse()
+            task.wait(0.018)
+            VirtualInputManager:SendMouseButtonEvent(
+                center.X,
+                center.Y,
+                0,
+                false,
+                game,
+                0
+            )
+            mouseHeld = false
         end)
         if not ok then releaseMouse() end
         return ok
@@ -236,23 +430,28 @@ return function(Window, scriptInfo)
 
     local function queueTrigger(target)
         if triggerPending or not settings.triggerBot then return end
-        if not target or target.screenDistance > 20 or not targetVisible(target) then return end
+        if not target or not target.model then return end
+
         local now = os.clock()
         if now - lastTriggerAt < settings.triggerCooldown then return end
 
-        lastTriggerAt = now
         triggerPending = true
         triggerToken = triggerToken + 1
         local token = triggerToken
         local model = target.model
+
         task.delay(settings.triggerDelay, function()
             if token ~= triggerToken then return end
             triggerPending = false
-            if running and settings.triggerBot and modelAlive(model) then
-                local current = buildTarget({model = model, player = Players:GetPlayerFromCharacter(model)})
-                if current and current.screenDistance <= 24 and targetVisible(current) then
-                    fireWeaponInput()
-                end
+            if not (running and settings.triggerBot and modelAlive(model)) then return end
+
+            -- Re-check the exact live ray after the configured delay. A sniper
+            -- shot should never fire from a stale screen-space tolerance.
+            local current = getCrosshairTarget()
+            local confirmed = current and current.model == model
+
+            if confirmed and fireWeaponInput() then
+                lastTriggerAt = os.clock()
             end
         end)
     end
@@ -365,9 +564,8 @@ return function(Window, scriptInfo)
         end
 
         if settings.triggerBot then
-            local triggerTarget = lockedTarget or getBestTarget(20)
+            local triggerTarget = getCrosshairTarget()
             if triggerTarget then
-                triggerTarget = refreshTarget(triggerTarget)
                 queueTrigger(triggerTarget)
             end
         end
@@ -422,27 +620,36 @@ return function(Window, scriptInfo)
         Flag = "SAAimSmoothness",
         Callback = function(value) settings.aimSmooth = value end,
     })
+    local mobilePlatform = scriptInfo.platform == "mobile"
     CombatTab:CreateDropdown({
         Name = "Lock Activation",
-        Options = {"Toggle Key", "Always"},
-        CurrentOption = {"Toggle Key"},
+        Options = mobilePlatform and {"Always"} or {"Always", "Toggle Key"},
+        CurrentOption = {"Always"},
         MultipleOptions = false,
         Flag = "SALockActivation",
         Callback = function(value)
-            settings.aimActivation = type(value) == "table" and value[1] or tostring(value)
+            if mobilePlatform then
+                settings.aimActivation = "Always"
+            else
+                settings.aimActivation = type(value) == "table" and value[1] or tostring(value)
+            end
             lockedTarget = nil
         end,
     })
-    CombatTab:CreateKeybind({
-        Name = "Lock Key (Toggle)",
-        CurrentKeybind = "Q",
-        HoldToInteract = false,
-        Flag = "SALockKey",
-        Callback = function()
-            lockKeyActive = not lockKeyActive
-            lockedTarget = lockKeyActive and getBestTarget() or nil
-        end,
-    })
+    if not mobilePlatform then
+        CombatTab:CreateKeybind({
+            Name = "Lock Key (Toggle)",
+            CurrentKeybind = "Q",
+            HoldToInteract = false,
+            Flag = "SALockKey",
+            Callback = function()
+                lockKeyActive = not lockKeyActive
+                lockedTarget = lockKeyActive and getBestTarget() or nil
+            end,
+        })
+    else
+        CombatTab:CreateLabel("Mobile Aim: active while Auto Lock is enabled")
+    end
     CombatTab:CreateToggle({
         Name = "Team Check",
         CurrentValue = true,
