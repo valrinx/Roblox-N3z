@@ -1,6 +1,6 @@
 -- ============================================================
 -- N3Z WarZPVP shared core
--- v1.7.1 - shared ESP/loot/boss/target/prediction/ballistics logic
+-- v1.7.2 - lazy game-module dependencies for executor compatibility
 -- ============================================================
 
 return function(Window, ctx, platform)
@@ -14,61 +14,120 @@ return function(Window, ctx, platform)
     local GuiService = game:GetService("GuiService")
 
     local localPlayer = Players.LocalPlayer
-    -- Cache the game's own weapon/ballistic helpers once. CurrentWeaponId is
-    -- updated by CombatSettings whenever the equipped weapon changes.
-    local CombatSettings = nil
-    local WarzProjectile = nil
-    pcall(function()
-        local client = localPlayer.PlayerScripts:FindFirstChild("Client")
-        local input = client and client:FindFirstChild("input")
-        local module = input and input:FindFirstChild("CombatSettings")
-        if module and module:IsA("ModuleScript") then
-            CombatSettings = require(module)
+    local lifecycleAlive = true
+
+    -- Some executors can run the Hub but stall when an experience ModuleScript
+    -- is required during module startup. Keep every game-module dependency
+    -- lazy and non-blocking so ESP/UI always finish initializing first.
+    local lazyModules = {}
+
+    local function lazyRequire(key, findModule, validate)
+        local state = lazyModules[key]
+        if not state then
+            state = { value = nil, loading = false, nextRetryAt = 0 }
+            lazyModules[key] = state
         end
-    end)
-    pcall(function()
-        local shared = ReplicatedStorage:FindFirstChild("Shared")
-        local module = shared and shared:FindFirstChild("WarzProjectile")
-        if module and module:IsA("ModuleScript") then
-            WarzProjectile = require(module)
+        if state.value ~= nil then
+            return state.value
         end
-    end)
-    local CombatInput = nil
-    local function getCombatInput()
-        if type(CombatInput) == "table" and type(CombatInput.RequestUseMed) == "function" then
-            return CombatInput
+
+        local now = os.clock()
+        if state.loading or now < state.nextRetryAt then
+            return nil
         end
-        pcall(function()
+
+        state.loading = true
+        state.nextRetryAt = now + 1
+        task.spawn(function()
+            local ok, result = pcall(function()
+                local module = findModule()
+                if not module or not module:IsA("ModuleScript") then
+                    return nil
+                end
+                return require(module)
+            end)
+
+            if lifecycleAlive and ok and result ~= nil
+                and (not validate or validate(result)) then
+                state.value = result
+            end
+            state.loading = false
+        end)
+        return nil
+    end
+
+    local function getCombatSettings()
+        return lazyRequire("CombatSettings", function()
             local client = localPlayer.PlayerScripts:FindFirstChild("Client")
             local input = client and client:FindFirstChild("input")
-            local module = input and input:FindFirstChild("CombatInput")
-            if module and module:IsA("ModuleScript") then
-                local api = require(module)
-                if type(api) == "table" then CombatInput = api end
-            end
+            return input and input:FindFirstChild("CombatSettings")
+        end, function(api)
+            return type(api) == "table"
         end)
-        return CombatInput
+    end
+
+    local function getWarzProjectile()
+        return lazyRequire("WarzProjectile", function()
+            local shared = ReplicatedStorage:FindFirstChild("Shared")
+            return shared and shared:FindFirstChild("WarzProjectile")
+        end, function(api)
+            return type(api) == "table"
+        end)
+    end
+
+    local function getCombatInput()
+        return lazyRequire("CombatInput", function()
+            local client = localPlayer.PlayerScripts:FindFirstChild("Client")
+            local input = client and client:FindFirstChild("input")
+            return input and input:FindFirstChild("CombatInput")
+        end, function(api)
+            return type(api) == "table" and type(api.RequestUseMed) == "function"
+        end)
+    end
+
+    local function getWarzHitboxes()
+        return lazyRequire("WarzHitboxes", function()
+            local shared = ReplicatedStorage:FindFirstChild("Shared")
+            local warz = shared and shared:FindFirstChild("warz")
+            return warz and warz:FindFirstChild("WarzHitboxes")
+        end, function(api)
+            return type(api) == "table" and type(api.DataShapes) == "function"
+        end)
+    end
+
+    local function getSharedConfig()
+        return lazyRequire("SharedConfig", function()
+            local shared = ReplicatedStorage:FindFirstChild("Shared")
+            return shared and shared:FindFirstChild("Config")
+        end, function(api)
+            return type(api) == "table"
+        end)
+    end
+
+    local function getLootHoldModule()
+        return lazyRequire("LootHold", function()
+            local client = localPlayer.PlayerScripts:FindFirstChild("Client")
+            if not client then return nil end
+            for _, child in ipairs(client:GetDescendants()) do
+                if child.Name == "LootHold" and child:IsA("ModuleScript") then
+                    return child
+                end
+            end
+            return nil
+        end, function(api)
+            return type(api) == "table" and type(api.Step) == "function"
+        end)
+    end
+
+    local function peekLazy(key)
+        local state = lazyModules[key]
+        return state and state.value or nil
     end
 
     local camera = Workspace.CurrentCamera
     local dock = (type(ctx) == "table" and type(ctx.dock) == "table" and ctx.dock)
         or (type(Window) == "table" and type(Window.dock) == "table" and Window.dock)
         or nil
-
-    -- Read-only access to WarZ's own current hit-shape solver.
-    -- We only query the currently locked target, never every player per frame.
-    local WarzHitboxes = nil
-    pcall(function()
-        local shared = ReplicatedStorage:FindFirstChild("Shared")
-        local warz = shared and shared:FindFirstChild("warz")
-        local module = warz and warz:FindFirstChild("WarzHitboxes")
-        if module and module:IsA("ModuleScript") then
-            local api = require(module)
-            if type(api) == "table" and type(api.DataShapes) == "function" then
-                WarzHitboxes = api
-            end
-        end
-    end)
 
     -- Clean up previous instance (ghost UI prevention)
     local environment = (type(getgenv) == "function" and getgenv()) or _G
@@ -82,7 +141,7 @@ return function(Window, ctx, platform)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.7.1"
+    environment.RAVEN_WARZPVP_VER = "1.7.2"
 
     local running = true
     local connections = {}
@@ -587,9 +646,10 @@ return function(Window, ctx, platform)
         mode = BONE_GROUPS[mode] and mode or "Auto"
 
         -- WarzHitboxes.DataShapes returns the exact current geometry used by
-        -- the game. Pick the eligible hit-shape center nearest the crosshair.
-        if WarzHitboxes and type(WarzHitboxes.DataShapes) == "function" then
-            local ok, shapes = pcall(WarzHitboxes.DataShapes, character, false)
+        -- the game. Resolve it lazily; bone aim remains the safe fallback.
+        local warzHitboxes = getWarzHitboxes()
+        if warzHitboxes and type(warzHitboxes.DataShapes) == "function" then
+            local ok, shapes = pcall(warzHitboxes.DataShapes, character, false)
             if ok and type(shapes) == "table" then
                 local points = {}
                 for _, shape in ipairs(shapes) do
@@ -1353,14 +1413,15 @@ return function(Window, ctx, platform)
     }
 
     local function getCurrentBallistics()
-        if type(CombatSettings) ~= "table"
-            or type(CombatSettings.BallisticsFor) ~= "function" then
+        local combatSettings = getCombatSettings()
+        if type(combatSettings) ~= "table"
+            or type(combatSettings.BallisticsFor) ~= "function" then
             ballisticCacheWeaponId = nil
             ballisticCache = nil
             return nil
         end
 
-        local weaponId = CombatSettings.CurrentWeaponId
+        local weaponId = combatSettings.CurrentWeaponId
         if type(weaponId) ~= "string" or weaponId == "" then
             ballisticCacheWeaponId = nil
             ballisticCache = nil
@@ -1370,15 +1431,16 @@ return function(Window, ctx, platform)
             return ballisticCache
         end
 
-        local ok, data = pcall(CombatSettings.BallisticsFor)
+        local ok, data = pcall(combatSettings.BallisticsFor)
         if not ok or type(data) ~= "table" then
             ballisticCacheWeaponId = nil
             ballisticCache = nil
             return nil
         end
 
+        local warzProjectile = getWarzProjectile()
         local rawSpeed = tonumber(data.Speed)
-        local scale = type(WarzProjectile) == "table" and tonumber(WarzProjectile.Scale) or 2.687
+        local scale = type(warzProjectile) == "table" and tonumber(warzProjectile.Scale) or 2.687
         local mass = tonumber(data.Mass) or 1
         if not rawSpeed or rawSpeed <= 0 or not scale or scale <= 0 then
             ballisticCacheWeaponId = nil
@@ -1386,7 +1448,7 @@ return function(Window, ctx, platform)
             return nil
         end
 
-        local gravity = type(WarzProjectile) == "table" and WarzProjectile.Gravity
+        local gravity = type(warzProjectile) == "table" and warzProjectile.Gravity
             or Vector3.new(0, -9.81 * scale, 0)
         if typeof(gravity) ~= "Vector3" then
             gravity = Vector3.new(0, -9.81 * scale, 0)
@@ -1400,10 +1462,10 @@ return function(Window, ctx, platform)
             mass = mass,
             immediate = data.Immediate == true,
             gravity = gravity * mass,
-            stepSeconds = type(WarzProjectile) == "table"
-                and tonumber(WarzProjectile.StepSeconds) or (1 / 60),
-            lifetime = type(WarzProjectile) == "table"
-                and tonumber(WarzProjectile.Lifetime) or 5,
+            stepSeconds = type(warzProjectile) == "table"
+                and tonumber(warzProjectile.StepSeconds) or (1 / 60),
+            lifetime = type(warzProjectile) == "table"
+                and tonumber(warzProjectile.Lifetime) or 5,
         }
         return ballisticCache
     end
@@ -1905,20 +1967,14 @@ return function(Window, ctx, platform)
         Flag = "WZP_HealThreshold",
         Callback = function(v) settings.healThreshold = v end,
     })
-    local cachedSharedConfig = nil
     local recoilTime = 0
+    local pickupTime = 0
 
-    -- No Recoil (Tier 2): modify weapon catalog tables directly
-    -- When Recoil <= 0, WarzCamera.ApplyRecoil returns early (no effect). No hooks needed.
-    local function applyNoRecoil()
-        local cs = CombatSettings
-        if type(cs) ~= "table" then
-            local ok, loaded = pcall(require, localPlayer.PlayerScripts.Client.input.CombatSettings)
-            if ok and type(loaded) == "table" then
-                CombatSettings = loaded
-                cs = loaded
-            end
-        end
+    -- No Recoil (Tier 2): modify weapon catalog tables directly.
+    -- Game modules are resolved lazily so an executor-specific require stall
+    -- cannot prevent the WarZ UI/ESP from finishing startup.
+    local function applyNoRecoil(cachedOnly)
+        local cs = cachedOnly and peekLazy("CombatSettings") or getCombatSettings()
         if type(cs) ~= "table" then return end
         local catalog
         if type(cs.GetCatalog) == "function" then
@@ -1946,13 +2002,7 @@ return function(Window, ctx, platform)
                 end
             end
         end
-        if not cachedSharedConfig then
-            local okCfg, loaded = pcall(require, ReplicatedStorage.Shared.Config)
-            if okCfg and type(loaded) == "table" then
-                cachedSharedConfig = loaded
-            end
-        end
-        local Config = cachedSharedConfig
+        local Config = cachedOnly and peekLazy("SharedConfig") or getSharedConfig()
         if Config and type(Config.Shop) == "table" then
             for _, item in pairs(Config.Shop) do
                 if type(item) == "table" then
@@ -1974,47 +2024,35 @@ return function(Window, ctx, platform)
     _G.__WZP_ApplyNoRecoil = applyNoRecoil
 
     trackSection(CombatTab, "No Recoil")
--- Instant Pickup (Tier 2): patch LootHold.Step to commit instantly
-local _origLootHoldStep = nil
-local _lootHoldModule = nil
 
-local function getLootHoldModule()
-    if type(_lootHoldModule) == "table" then return _lootHoldModule end
-    local client = localPlayer.PlayerScripts:FindFirstChild("Client")
-    if not client then return nil end
-    for _, c in ipairs(client:GetDescendants()) do
-        if c.Name == "LootHold" and c:IsA("ModuleScript") then
-            local ok, mod = pcall(require, c)
-            if ok and type(mod) == "table" then
-                _lootHoldModule = mod
-                return mod
-            end
+    -- Instant Pickup (Tier 2): patch LootHold.Step to commit instantly.
+    -- LootHold itself is resolved lazily through the shared resolver above.
+    local _origLootHoldStep = nil
+
+    local function applyInstantPickup()
+        if not settings.instantPickup and _origLootHoldStep == nil then
+            return
         end
-    end
-    return nil
-end
-
-local function applyInstantPickup()
-    local lhMod = getLootHoldModule()
-    if not lhMod then return end
-    if settings.instantPickup then
-        if not _origLootHoldStep then
-            _origLootHoldStep = lhMod.Step
-            lhMod.Step = function(self, uid, target, holding, t)
-                if self.uid and not self.committed and holding then
-                    self.started = t - 2
-                    self.nextUse = t - 1
+        local lhMod = settings.instantPickup
+            and getLootHoldModule()
+            or peekLazy("LootHold")
+        if not lhMod then return end
+        if settings.instantPickup then
+            if not _origLootHoldStep then
+                _origLootHoldStep = lhMod.Step
+                lhMod.Step = function(self, uid, target, holding, t)
+                    if self.uid and not self.committed and holding then
+                        self.started = t - 2
+                        self.nextUse = t - 1
+                    end
+                    return _origLootHoldStep(self, uid, target, holding, t)
                 end
-                return _origLootHoldStep(self, uid, target, holding, t)
             end
-        end
-    else
-        if _origLootHoldStep then
+        elseif _origLootHoldStep then
             lhMod.Step = _origLootHoldStep
             _origLootHoldStep = nil
         end
     end
-end
 
     CombatTab:CreateToggle({
         Name = "No Recoil",
@@ -2085,6 +2123,16 @@ end
             recoilTime = 0
         end
 
+        if settings.instantPickup then
+            pickupTime += dt
+            if pickupTime >= 0.5 then
+                pickupTime = 0
+                pcall(applyInstantPickup)
+            end
+        else
+            pickupTime = 0
+        end
+
         -- Auto Heal (Tier 1): via CombatInput.RequestUseMed() (correct signature)
         if settings.autoHeal then
             pcall(function()
@@ -2117,10 +2165,11 @@ end
     local function destroy()
         if not running then return end
         running = false
+        lifecycleAlive = false
         settings.aimbot = false
         settings.autoHeal = false
         settings.noRecoil = false
-        pcall(applyNoRecoil)
+        pcall(applyNoRecoil, true)
         settings.instantPickup = false
         pcall(applyInstantPickup)
         clearAimLock()
@@ -2159,21 +2208,6 @@ end
             pcall(function() visualBackend.destroy() end)
         end
         bossWasPresent = false
-        pcall(function()
-            local ok, cs = pcall(require, localPlayer.PlayerScripts.Client.input.CombatSettings)
-            if ok and cs and type(cs.GetCatalog) == "function" then
-                local cat = cs.GetCatalog()
-                if cat and cat.Weapons then
-                    for _, w in pairs(cat.Weapons) do
-                        if type(w) == "table" and w._origRecoil ~= nil then
-                            w.Recoil = w._origRecoil
-                            w.Spread = w._origSpread
-                            w.ViewRecoil = w._origViewRecoil
-                        end
-                    end
-                end
-            end
-        end)
         if _G.__WZP_ApplyNoRecoil == applyNoRecoil then
             _G.__WZP_ApplyNoRecoil = nil
         end
