@@ -49,6 +49,14 @@ local N3Z_VERSION = "v2.4.3"
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: {id,name,version,game,placeIds?,gameIds?,file,envKey?,coreFile?,platformFiles?,visualOcclusion?}
 local MODULES = {
+    { id = "hypershot", name = "Hypershot!", configName = "Hypershot", version = "v1.0.0", game = "Hypershot!",
+      placeIds = { 86696142930150 }, gameIds = { 5995470825 },
+      file = "modules/hypershot.lua", envKey = "__N3Z_HYPERSHOT", visualOcclusion = true,
+      coreFile = "modules/hypershot/core.lua",
+      platformFiles = {
+          pc = "modules/hypershot/pc.lua",
+          mobile = "modules/hypershot/mobile.lua",
+      } },
     { id = "warzpvp", name = "WarZPVP", configName = "WarZ", version = "v1.7.0", game = "WarZPVP OPEN BETA",
       placeIds = { 135187059974536 }, file = "modules/warz_pvp.lua", envKey = "__RAVEN_WARZPVP",
       coreFile = "modules/warz_pvp/core.lua",
