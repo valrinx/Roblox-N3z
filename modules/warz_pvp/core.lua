@@ -1,6 +1,6 @@
 -- ============================================================
 -- N3Z WarZPVP shared core
--- v1.7.0 - shared ESP/loot/boss/target/prediction/ballistics logic
+-- v1.7.1 - shared ESP/loot/boss/target/prediction/ballistics logic
 -- ============================================================
 
 return function(Window, ctx, platform)
@@ -82,7 +82,7 @@ return function(Window, ctx, platform)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.7.0"
+    environment.RAVEN_WARZPVP_VER = "1.7.1"
 
     local running = true
     local connections = {}
@@ -2206,6 +2206,7 @@ end
             visualBackend = visualBackend.name,
             aimbot = settings.aimbot,
             aimInputMode = aimStatus.mode,
+            aimBackend = aimStatus.backend,
             aimKey = aimStatus.key,
             aimPosition = settings.aimPosition,
             prediction = {

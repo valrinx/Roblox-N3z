@@ -2,8 +2,87 @@ return {
     id = "pc",
 
     createVisualBackend = function(api)
-        local hasDrawing = type(Drawing) == "table" and type(Drawing.new) == "function"
-        if hasDrawing then
+        local function removeProbe(obj)
+            if not obj then return end
+            pcall(function()
+                if type(obj.Remove) == "function" then
+                    obj:Remove()
+                elseif type(obj.Destroy) == "function" then
+                    obj:Destroy()
+                end
+            end)
+        end
+
+        local function probeDrawing()
+            if type(Drawing) ~= "table" or type(Drawing.new) ~= "function" then
+                return false
+            end
+
+            local probes = {}
+            local specs = {
+                Text = function(obj)
+                    obj.Visible = false
+                    obj.Text = "N3Z"
+                    obj.Size = 13
+                    obj.Position = Vector2.new(4, 4)
+                    obj.Center = true
+                    obj.Outline = true
+                    obj.Color = Color3.new(1, 1, 1)
+                    obj.Transparency = 1
+                    obj.ZIndex = 0
+                    local _ = obj.TextBounds
+                end,
+                Line = function(obj)
+                    obj.Visible = false
+                    obj.From = Vector2.new(0, 0)
+                    obj.To = Vector2.new(2, 2)
+                    obj.Thickness = 1
+                    obj.Color = Color3.new(1, 1, 1)
+                    obj.Transparency = 1
+                    obj.ZIndex = 0
+                end,
+                Square = function(obj)
+                    obj.Visible = false
+                    obj.Position = Vector2.new(0, 0)
+                    obj.Size = Vector2.new(2, 2)
+                    obj.Thickness = 1
+                    obj.Filled = false
+                    obj.Color = Color3.new(1, 1, 1)
+                    obj.Transparency = 1
+                    obj.ZIndex = 0
+                end,
+                Circle = function(obj)
+                    obj.Visible = false
+                    obj.Position = Vector2.new(1, 1)
+                    obj.Radius = 1
+                    obj.Thickness = 1
+                    obj.Filled = false
+                    obj.Color = Color3.new(1, 1, 1)
+                    obj.Transparency = 1
+                    obj.ZIndex = 0
+                end,
+            }
+
+            for _, kind in ipairs({ "Text", "Line", "Square", "Circle" }) do
+                local okNew, obj = pcall(Drawing.new, kind)
+                if not okNew or not obj then
+                    for _, probe in ipairs(probes) do removeProbe(probe) end
+                    return false
+                end
+                table.insert(probes, obj)
+
+                local okProps = pcall(specs[kind], obj)
+                if not okProps then
+                    for _, probe in ipairs(probes) do removeProbe(probe) end
+                    return false
+                end
+            end
+
+            for _, probe in ipairs(probes) do removeProbe(probe) end
+            return true
+        end
+
+        if probeDrawing() then
             return {
                 name = "Drawing",
                 new = function(drawingType)
@@ -58,7 +137,10 @@ return {
         local capturingAimKey = false
         local captureArmedAt = 0
         local aimKeyBtn = nil
-        local hasMouseMove = type(mousemoverel) == "function"
+        local rawMouseMove = nil
+        pcall(function() rawMouseMove = mousemoverel end)
+        local hasMouseMove = type(rawMouseMove) == "function"
+        local aimBackend = hasMouseMove and "mousemoverel" or "camera"
         local AIM_MAX_STEP = 60
 
         local function resolveInputName(input)
@@ -178,7 +260,7 @@ return {
                 api.clearAimLock()
                 return
             end
-            if not aimHeld or not hasMouseMove then
+            if not aimHeld then
                 api.clearAimLock()
                 return
             end
@@ -188,19 +270,31 @@ return {
             target = api.applyAimPrediction(target, api.getAimLockCharacter())
 
             local camera = api.getCamera()
-            local view, onScreen = camera:WorldToViewportPoint(target)
-            if not onScreen or view.Z <= 0 then return end
-
-            local center = camera.ViewportSize / 2
-            local offsetX = view.X - center.X
-            local offsetY = view.Y - center.Y
-            if offsetX * offsetX + offsetY * offsetY <= 4 then return end
+            if not camera then return end
 
             local response = math.clamp(settings.aimResponse, 0.01, 1)
             local alpha = 1 - math.pow(1 - response, (dt or 1 / 60) * 60)
-            local dx = math.clamp(offsetX * alpha, -AIM_MAX_STEP, AIM_MAX_STEP)
-            local dy = math.clamp(offsetY * alpha, -AIM_MAX_STEP, AIM_MAX_STEP)
-            pcall(mousemoverel, dx, dy)
+
+            if hasMouseMove then
+                local view, onScreen = camera:WorldToViewportPoint(target)
+                if not onScreen or view.Z <= 0 then return end
+
+                local center = camera.ViewportSize / 2
+                local offsetX = view.X - center.X
+                local offsetY = view.Y - center.Y
+                if offsetX * offsetX + offsetY * offsetY <= 4 then return end
+
+                local dx = math.clamp(offsetX * alpha, -AIM_MAX_STEP, AIM_MAX_STEP)
+                local dy = math.clamp(offsetY * alpha, -AIM_MAX_STEP, AIM_MAX_STEP)
+                pcall(rawMouseMove, dx, dy)
+                return
+            end
+
+            local current = camera.CFrame
+            local delta = target - current.Position
+            if delta.Magnitude <= 0.01 then return end
+            local desired = CFrame.lookAt(current.Position, target, Vector3.yAxis)
+            camera.CFrame = current:Lerp(desired, math.clamp(alpha, 0, 1))
         end
 
         function controller:release()
@@ -216,6 +310,7 @@ return {
         function controller:status()
             return {
                 mode = "DesktopKey",
+                backend = aimBackend,
                 key = aimKeyName,
                 held = aimHeld,
             }
