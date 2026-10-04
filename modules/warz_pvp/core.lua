@@ -1,6 +1,6 @@
 -- ============================================================
 -- N3Z WarZPVP shared core
--- v1.7.3 - crowded-player ESP performance optimization
+-- v1.7.4 - party-safe aim and rendered weapon icons
 -- ============================================================
 
 return function(Window, ctx, platform)
@@ -141,7 +141,7 @@ return function(Window, ctx, platform)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.7.3"
+    environment.RAVEN_WARZPVP_VER = "1.7.4"
 
     local running = true
     local connections = {}
@@ -250,6 +250,7 @@ return function(Window, ctx, platform)
                 Position = Vector2.zero,
                 Size = Vector2.zero,
                 Text = "",
+                Image = "",
                 Center = false,
                 Outline = false,
                 From = Vector2.zero,
@@ -279,6 +280,19 @@ return function(Window, ctx, platform)
                 label.Parent = gui
                 inst = label
                 state.Size = 14
+            elseif drawingType == "Image" then
+                local image = Instance.new("ImageLabel")
+                image.Name = "NativeImage"
+                image.BackgroundTransparency = 1
+                image.BorderSizePixel = 0
+                image.Image = ""
+                image.ImageColor3 = state.Color
+                image.ImageTransparency = 0
+                image.ScaleType = Enum.ScaleType.Fit
+                image.Visible = false
+                image.ZIndex = 1
+                image.Parent = gui
+                inst = image
             elseif drawingType == "Line" then
                 local frame = Instance.new("Frame")
                 frame.Name = "NativeLine"
@@ -335,6 +349,12 @@ return function(Window, ctx, platform)
                     inst.TextStrokeTransparency = state.Outline and (1 - alpha) or 1
                     inst.AnchorPoint = state.Center and Vector2.new(0.5, 0) or Vector2.new(0, 0)
                     inst.Position = UDim2.fromOffset(state.Position.X, state.Position.Y)
+                elseif drawingType == "Image" then
+                    inst.Image = tostring(state.Image or "")
+                    inst.ImageColor3 = state.Color
+                    inst.ImageTransparency = 1 - alpha
+                    inst.Position = UDim2.fromOffset(state.Position.X, state.Position.Y)
+                    inst.Size = UDim2.fromOffset(math.max(0, state.Size.X), math.max(0, state.Size.Y))
                 elseif drawingType == "Line" then
                     local from = state.From
                     local to = state.To
@@ -435,6 +455,13 @@ return function(Window, ctx, platform)
         return visualBackend.new(drawingType)
     end
 
+    local function safeImage()
+        if type(visualBackend.newImage) == "function" then
+            return visualBackend.newImage()
+        end
+        return nil
+    end
+
     local function getHealthColor(ratio)
         return Color3.fromHSV(math.clamp(ratio, 0, 1) * 0.33, 0.9, 1)
     end
@@ -451,15 +478,76 @@ return function(Window, ctx, platform)
         return type(av) == "string" and av ~= "" and av == bv
     end
 
+    local function isPartyMember(player)
+        return player ~= nil
+            and player ~= localPlayer
+            and sameNonEmptyPlayerAttribute(localPlayer, player, "WarzPartyId")
+    end
+
     local function getPlayerRelationColor(player)
         if not player or player == localPlayer then return nil end
-        if sameNonEmptyPlayerAttribute(localPlayer, player, "WarzPartyId") then
+        if isPartyMember(player) then
             return PARTY_COLOR
         end
         if sameNonEmptyPlayerAttribute(localPlayer, player, "ClanId") then
             return CLAN_COLOR
         end
         return nil
+    end
+
+    local weaponIconCache = {}
+    local weaponIconConfig = nil
+
+    local function rebuildWeaponIconCache(config)
+        table.clear(weaponIconCache)
+        weaponIconConfig = config
+        local shop = type(config) == "table" and config.Shop or nil
+        if type(shop) ~= "table" then return end
+
+        for key, item in pairs(shop) do
+            if type(item) == "table" then
+                local icon = item.StoreIcon
+                if type(icon) == "string" and icon ~= "" then
+                    weaponIconCache[tostring(key)] = icon
+                    if type(item.Id) == "string" and item.Id ~= "" then
+                        weaponIconCache[item.Id] = icon
+                    end
+                    if type(item.FNAME) == "string" and item.FNAME ~= "" then
+                        weaponIconCache[item.FNAME] = icon
+                    end
+                end
+            end
+        end
+    end
+
+    local function getWeaponIconSource(weaponId)
+        if type(weaponId) ~= "string" or weaponId == "" then
+            return nil
+        end
+
+        local cached = weaponIconCache[weaponId]
+        if cached then return cached end
+
+        local config = getSharedConfig()
+        if config and config ~= weaponIconConfig then
+            rebuildWeaponIconCache(config)
+            return weaponIconCache[weaponId]
+        end
+        return nil
+    end
+
+    local function getRenderedWeaponId(character, live)
+        local drift = live and live.Parent
+        local heldModel = drift and drift:FindFirstChild("HeroHeldGunRemote")
+        if heldModel then
+            local catalogId = heldModel:GetAttribute("WarzCatalogId")
+            if type(catalogId) == "string" and catalogId ~= "" then
+                return catalogId
+            end
+        end
+
+        local fallback = character and character:GetAttribute("HeldWeapon")
+        return type(fallback) == "string" and fallback ~= "" and fallback or nil
     end
 
     -- WarZ renders the visible, animated body in
@@ -752,6 +840,8 @@ return function(Window, ctx, platform)
             name = safeDrawing("Text"),
             hpBack = safeDrawing("Square"),
             hpFill = safeDrawing("Square"),
+            weaponIcon = nil,
+            weaponIconSource = nil,
         }
         if e.box then
             e.box.Thickness = 2
@@ -775,6 +865,11 @@ return function(Window, ctx, platform)
             e.hpFill.Filled = true
             e.hpFill.Visible = false
         end
+        if e.weaponIcon then
+            e.weaponIcon.Color = Color3.new(1, 1, 1)
+            e.weaponIcon.Transparency = 1
+            e.weaponIcon.Visible = false
+        end
         e.bones = {}
         e.boneParts = {}
         e.boneNodes = {}
@@ -785,6 +880,17 @@ return function(Window, ctx, platform)
         e.boneReady = false
         espCache[p] = e
         return e
+    end
+
+    local function ensureWeaponIcon(e)
+        if e.weaponIcon then return e.weaponIcon end
+        local icon = safeImage()
+        if not icon then return nil end
+        icon.Color = Color3.new(1, 1, 1)
+        icon.Transparency = 1
+        icon.Visible = false
+        e.weaponIcon = icon
+        return icon
     end
 
     local function ensureSkeletonDrawings(e)
@@ -865,7 +971,7 @@ return function(Window, ctx, platform)
     end
 
     local function hideEntry(e)
-        for _, d in pairs({ e.box, e.name, e.hpBack, e.hpFill }) do
+        for _, d in pairs({ e.box, e.name, e.hpBack, e.hpFill, e.weaponIcon }) do
             if d then pcall(function() d.Visible = false end) end
         end
         for _, line in pairs(e.bones or {}) do
@@ -876,7 +982,7 @@ return function(Window, ctx, platform)
     local function destroyEntry(p)
         local e = espCache[p]
         if not e then return end
-        for _, d in pairs({ e.box, e.name, e.hpBack, e.hpFill }) do
+        for _, d in pairs({ e.box, e.name, e.hpBack, e.hpFill, e.weaponIcon }) do
             if d then pcall(function() d:Remove() end) end
         end
         for _, line in pairs(e.bones or {}) do
@@ -1022,6 +1128,8 @@ return function(Window, ctx, platform)
                                 local h, w = bounds.h, bounds.w
                                 local x0, y0 = bounds.x, bounds.y
                                 local relationColor = getPlayerRelationColor(p)
+                                local weaponId = settings.weaponEsp and getRenderedWeaponId(ch, live) or nil
+                                local weaponIconSource = getWeaponIconSource(weaponId)
 
                                 if settings.boxEsp and e.box then
                                     e.box.Color = relationColor or ESP_COLOR
@@ -1034,11 +1142,9 @@ return function(Window, ctx, platform)
 
                                 if (settings.nameEsp or settings.distanceEsp) and e.name then
                                     local label = p.Name
-                                    if settings.weaponEsp then
-                                        local wpn = ch:GetAttribute("HeldWeapon")
-                                        if type(wpn) == "string" and wpn ~= "" then
-                                            label = label .. " [" .. wpn .. "]"
-                                        end
+                                    if settings.weaponEsp and not weaponIconSource
+                                        and type(weaponId) == "string" and weaponId ~= "" then
+                                        label = label .. " [" .. weaponId .. "]"
                                     end
                                     if settings.distanceEsp then
                                         label = label .. " " .. math.floor(math.sqrt(distanceSq)) .. "m"
@@ -1049,6 +1155,27 @@ return function(Window, ctx, platform)
                                     e.name.Visible = not textOverlapsMenu(e.name, menuRect)
                                 elseif e.name then
                                     e.name.Visible = false
+                                end
+
+                                if settings.weaponEsp and weaponIconSource then
+                                    local weaponIcon = ensureWeaponIcon(e)
+                                    if weaponIcon then
+                                        local iconW = math.clamp(w * 0.9, 38, 72)
+                                        local iconH = math.clamp(iconW * 0.5, 20, 36)
+                                        local iconX = bounds.centerX - iconW * 0.5
+                                        local iconY = y0 + h + 4
+                                        if e.weaponIconSource ~= weaponIconSource then
+                                            e.weaponIconSource = weaponIconSource
+                                            weaponIcon.Image = weaponIconSource
+                                        end
+                                        weaponIcon.Size = Vector2.new(iconW, iconH)
+                                        weaponIcon.Position = Vector2.new(iconX, iconY)
+                                        weaponIcon.Visible = not rectOverlapsMenu(
+                                            iconX, iconY, iconW, iconH, menuRect
+                                        )
+                                    end
+                                elseif e.weaponIcon then
+                                    e.weaponIcon.Visible = false
                                 end
 
                                 if settings.healthEsp and e.hpBack and e.hpFill then
@@ -1717,7 +1844,7 @@ return function(Window, ctx, platform)
         -- Narrow phase: exact WarzHitboxes Chest + LOS for only the closest few.
         local candidates = {}
         for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= localPlayer then
+            if p ~= localPlayer and not isPartyMember(p) then
                 local character = p.Character
                 local point, pixels = validAimPoint(character, settings.aimFov, false)
                 if point and pixels then
@@ -1731,10 +1858,12 @@ return function(Window, ctx, platform)
 
         for i = 1, math.min(4, #candidates) do
             local p = candidates[i].player
-            local character = p.Character
-            local point, pixels = validAimPoint(character, settings.aimFov, true)
-            if point and pixels and canSeeAimPoint(character, point) then
-                return point, p
+            if not isPartyMember(p) then
+                local character = p.Character
+                local point, pixels = validAimPoint(character, settings.aimFov, true)
+                if point and pixels and canSeeAimPoint(character, point) then
+                    return point, p
+                end
             end
         end
         return nil, nil
@@ -1743,14 +1872,18 @@ return function(Window, ctx, platform)
     local function getAimTarget()
         local player = aimLockPlayer
         if player then
-            local character = aimLockCharacter
-            if character and player.Character == character then
-                local point = validAimPoint(character, settings.aimFov * 1.25, true)
-                if point and canSeeAimPoint(character, point) then
-                    return point
+            if isPartyMember(player) then
+                aimLockPlayer, aimLockCharacter = nil, nil
+            else
+                local character = aimLockCharacter
+                if character and player.Character == character then
+                    local point = validAimPoint(character, settings.aimFov * 1.25, true)
+                    if point and canSeeAimPoint(character, point) then
+                        return point
+                    end
                 end
+                aimLockPlayer, aimLockCharacter = nil, nil
             end
-            aimLockPlayer, aimLockCharacter = nil, nil
         end
 
         local best, bestP = scanAimTarget()
@@ -1889,7 +2022,7 @@ return function(Window, ctx, platform)
         Callback = function(v) settings.healthEsp = v end,
     })
     VisualsTab:CreateToggle({
-        Name = "Show Weapon",
+        Name = "Weapon Icon",
         CurrentValue = true,
         Flag = "WZP_WeaponEsp",
         Callback = function(v) settings.weaponEsp = v end,
@@ -2282,6 +2415,8 @@ return function(Window, ctx, platform)
         for p in pairs(espCache) do table.insert(players, p) end
         for _, p in ipairs(players) do destroyEntry(p) end
         table.clear(espCache)
+        table.clear(weaponIconCache)
+        weaponIconConfig = nil
         disconnectLootFolder()
         clearLootCache()
         lootFolder = nil
@@ -2388,6 +2523,9 @@ return function(Window, ctx, platform)
                 local point = getAimTarget()
                 return point and aimLockPlayer and aimLockPlayer.Name or nil
             end,
+            isPartyMember = isPartyMember,
+            weaponIconSource = getWeaponIconSource,
+            renderedWeaponId = getRenderedWeaponId,
             fovVisible = function() return fovCircle and fovCircle.Visible or false end,
             platform = function() return platform.id end,
             visualBackend = function() return visualBackend.name end,

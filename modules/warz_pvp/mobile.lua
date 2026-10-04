@@ -2,7 +2,7 @@ return {
     id = "mobile",
 
     createVisualBackend = function(api)
-        return api.createNativeBackend({
+        local native = api.createNativeBackend({
             name = "NativeGui",
             displayOrder = 998,
             resolveParent = function()
@@ -23,6 +23,10 @@ return {
                 return playerGui
             end,
         })
+        native.newImage = function()
+            return native.new("Image")
+        end
+        return native
     end,
 
     createAimController = function(api)

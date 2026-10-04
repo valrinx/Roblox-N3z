@@ -1,6 +1,6 @@
 -- ============================================================
 -- N3Z WarZPVP platform router
--- v1.7.3 - shared core + explicit PC/Mobile adapters
+-- v1.7.4 - shared core + explicit PC/Mobile adapters
 -- ============================================================
 
 return function(Window, ctx)

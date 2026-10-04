@@ -82,40 +82,61 @@ return {
             return true
         end
 
+        local function resolveParent()
+            local playerGui = api.localPlayer:FindFirstChildOfClass("PlayerGui")
+            if not playerGui then
+                pcall(function()
+                    playerGui = api.localPlayer:WaitForChild("PlayerGui", 2)
+                end)
+            end
+            if playerGui then return playerGui end
+
+            if type(gethui) == "function" then
+                local ok, parent = pcall(gethui)
+                if ok and parent then return parent end
+            end
+
+            local ok, coreGui = pcall(game.GetService, game, "CoreGui")
+            return ok and coreGui or nil
+        end
+
         if probeDrawing() then
+            -- Roblox asset URIs are handled most reliably by ImageLabel across
+            -- executors. Keep high-frequency primitives on Drawing, but use a
+            -- native image layer for weapon icons.
+            local imageBackend = api.createNativeBackend({
+                name = "NativeImage",
+                displayOrder = 20,
+                resolveParent = resolveParent,
+            })
             return {
-                name = "Drawing",
+                name = "Drawing+NativeImage",
                 new = function(drawingType)
                     local ok, obj = pcall(Drawing.new, drawingType)
                     if not ok or not obj then return nil end
                     pcall(function() obj.ZIndex = 0 end)
                     return obj
                 end,
-                destroy = function() end,
+                newImage = function()
+                    return imageBackend and imageBackend.new("Image") or nil
+                end,
+                destroy = function()
+                    if imageBackend and type(imageBackend.destroy) == "function" then
+                        imageBackend.destroy()
+                    end
+                end,
             }
         end
 
-        return api.createNativeBackend({
+        local native = api.createNativeBackend({
             name = "NativeGui",
             displayOrder = 20,
-            resolveParent = function()
-                local playerGui = api.localPlayer:FindFirstChildOfClass("PlayerGui")
-                if not playerGui then
-                    pcall(function()
-                        playerGui = api.localPlayer:WaitForChild("PlayerGui", 2)
-                    end)
-                end
-                if playerGui then return playerGui end
-
-                if type(gethui) == "function" then
-                    local ok, parent = pcall(gethui)
-                    if ok and parent then return parent end
-                end
-
-                local ok, coreGui = pcall(game.GetService, game, "CoreGui")
-                return ok and coreGui or nil
-            end,
+            resolveParent = resolveParent,
         })
+        native.newImage = function()
+            return native.new("Image")
+        end
+        return native
     end,
 
     createAimController = function(api)
