@@ -1,5 +1,5 @@
 -- ============================================================
--- N3Z HUB v2.4.3 - n3z.lua (entrypoint)
+-- N3Z HUB v2.4.4 - n3z.lua (entrypoint)
 -- Native-GUI dock hub. Run:
 --   loadstring(game:HttpGet(
 --     "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/n3z.lua"))()
@@ -40,11 +40,19 @@ end
 
 local isMobile = detectMobilePlatform()
 
-local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/"
+local bootstrapEnv = (type(getgenv) == "function" and getgenv()) or _G
+local sourceRef = "main"
+if type(bootstrapEnv.__N3Z_SOURCE_REF) == "string"
+    and #bootstrapEnv.__N3Z_SOURCE_REF == 40
+    and bootstrapEnv.__N3Z_SOURCE_REF:match("^[%da-fA-F]+$") then
+    sourceRef = bootstrapEnv.__N3Z_SOURCE_REF
+end
+
+local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/" .. sourceRef .. "/"
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
 local HUB_URL = REPO_URL
 
-local N3Z_VERSION = "v2.4.3"
+local N3Z_VERSION = "v2.4.4"
 
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: {id,name,version,game,placeIds?,gameIds?,file,envKey?,coreFile?,platformFiles?,visualOcclusion?}
