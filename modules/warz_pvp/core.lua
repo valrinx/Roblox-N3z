@@ -1,6 +1,6 @@
 -- ============================================================
 -- N3Z WarZPVP shared core
--- v1.7.2 - lazy game-module dependencies for executor compatibility
+-- v1.7.3 - crowded-player ESP performance optimization
 -- ============================================================
 
 return function(Window, ctx, platform)
@@ -141,7 +141,7 @@ return function(Window, ctx, platform)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.7.2"
+    environment.RAVEN_WARZPVP_VER = "1.7.3"
 
     local running = true
     local connections = {}
@@ -667,60 +667,67 @@ return function(Window, ctx, platform)
         return getBoneAimPoint(character, mode)
     end
 
-    local BODY_PARTS = {
-        "Head", "UpperTorso", "LowerTorso", "Torso",
-        "LeftUpperArm", "LeftLowerArm", "LeftHand",
-        "RightUpperArm", "RightLowerArm", "RightHand",
-        "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
-        "RightUpperLeg", "RightLowerLeg", "RightFoot",
-    }
-
-    local function characterScreenBounds(model)
+    -- Lightweight screen bounds. The old path projected every corner of
+    -- every visible body mesh (32+ WorldToViewportPoint calls per player, and
+    -- up to 120 on the fallback character). WarZ's LiveAim already exposes
+    -- Head/Arms/Body/Legs, so a few extremity samples give the same useful ESP
+    -- box at a fraction of the per-frame cost.
+    local function characterScreenBounds(model, live)
         local root = bodyPart(model, "HumanoidRootPart") or bodyPart(model, "Torso")
         if not root then return nil end
-        local rootView, rootOn = camera:WorldToViewportPoint(root.Position)
-        if not rootOn or rootView.Z <= 0 then return nil end
 
         local minX, minY = math.huge, math.huge
         local maxX, maxY = -math.huge, -math.huge
         local points = 0
+
         local function add(position)
+            if typeof(position) ~= "Vector3" then return end
             local v = camera:WorldToViewportPoint(position)
             if v.Z <= 0 then return end
             points += 1
             minX, minY = math.min(minX, v.X), math.min(minY, v.Y)
             maxX, maxY = math.max(maxX, v.X), math.max(maxY, v.Y)
         end
-        local function addPartBounds(part)
-            if not part or not part:IsA("BasePart") then return end
-            local cf, half = part.CFrame, part.Size * 0.5
-            for sx = -1, 1, 2 do
-                for sy = -1, 1, 2 do
-                    for sz = -1, 1, 2 do
-                        add(cf:PointToWorldSpace(Vector3.new(
-                            half.X * sx, half.Y * sy, half.Z * sz
-                        )))
-                    end
-                end
-            end
+
+        local function addVertical(part)
+            if not part or not part:IsA("BasePart") or part.Transparency >= 1 then return end
+            local halfY = part.Size.Y * 0.5
+            add(part.Position + part.CFrame.UpVector * halfY)
+            add(part.Position - part.CFrame.UpVector * halfY)
         end
 
-        -- Match the rendered WarZ body, not the invisible Character T-pose.
-        local _, live = getVisualHead(model)
-        if live then
-            for _, name in ipairs({ "Head", "Body", "Arms", "Legs" }) do
-                local part = live:FindFirstChild(name)
-                if part and part:IsA("BasePart") and part.Transparency < 1 then
-                    addPartBounds(part)
-                end
-            end
+        local function addWidth(part)
+            if not part or not part:IsA("BasePart") or part.Transparency >= 1 then return end
+            local halfX = part.Size.X * 0.5
+            local halfZ = part.Size.Z * 0.5
+            add(part.Position + part.CFrame.RightVector * halfX)
+            add(part.Position - part.CFrame.RightVector * halfX)
+            -- One depth-axis pair keeps the box correct when the target turns
+            -- sideways without paying for all eight 3D corners.
+            add(part.Position + part.CFrame.LookVector * halfZ)
+            add(part.Position - part.CFrame.LookVector * halfZ)
         end
 
-        -- Fallback while LiveAim has not replicated yet.
-        if points == 0 then
-            for _, name in ipairs(BODY_PARTS) do
-                addPartBounds(bodyPart(model, name))
-            end
+        if live and live.Parent then
+            local head = live:FindFirstChild("Head")
+            local body = live:FindFirstChild("Body")
+            local arms = live:FindFirstChild("Arms")
+            local legs = live:FindFirstChild("Legs")
+            addVertical(head)
+            addVertical(legs)
+            addWidth(arms or body)
+        end
+
+        -- Cheap fallback while LiveAim has not replicated yet.
+        if points < 4 then
+            points = 0
+            minX, minY = math.huge, math.huge
+            maxX, maxY = -math.huge, -math.huge
+            local cf = root.CFrame
+            add(root.Position + Vector3.new(0, 3.25, 0))
+            add(root.Position - Vector3.new(0, 3.25, 0))
+            add(root.Position + cf.RightVector * 1.5)
+            add(root.Position - cf.RightVector * 1.5)
         end
 
         if points == 0 then return nil end
@@ -770,8 +777,11 @@ return function(Window, ctx, platform)
         end
         e.bones = {}
         e.boneParts = {}
+        e.boneNodes = {}
         e.boneCharacter = nil
-        e.boneRetryAt = 0
+        e.liveAim = nil
+        e.liveAimRetryAt = 0
+        e.boneResolvedFor = nil
         e.boneReady = false
         espCache[p] = e
         return e
@@ -791,29 +801,67 @@ return function(Window, ctx, platform)
         end
     end
 
-    local function resolveSkeletonParts(e, ch, player)
+    local function resolveLiveAim(e, ch, player)
+        if e.boneCharacter ~= ch then
+            e.boneCharacter = ch
+            e.liveAim = nil
+            e.liveAimRetryAt = 0
+            e.boneResolvedFor = nil
+            e.boneReady = false
+            table.clear(e.boneParts)
+            table.clear(e.boneNodes)
+        end
+
+        local live = e.liveAim
+        if live and live.Parent then
+            return live
+        end
+
         local now = os.clock()
-        local live = getLiveAim(player)
-        if e.boneCharacter == ch and e.liveAim == live and e.boneReady then return end
-        if e.boneCharacter == ch and e.liveAim == live and now < e.boneRetryAt then return end
-
-        e.boneCharacter = ch
+        if now < (e.liveAimRetryAt or 0) then
+            return nil
+        end
+        e.liveAimRetryAt = now + 0.5
+        live = getLiveAim(player)
         e.liveAim = live
-        e.boneRetryAt = now + 0.5
-        table.clear(e.boneParts)
-        e.boneReady = live ~= nil
-        if not live then return end
+        return live
+    end
 
+    local function resolveSkeletonParts(e, ch, player)
+        local live = resolveLiveAim(e, ch, player)
+        if not live then
+            e.boneReady = false
+            return nil
+        end
+        if e.boneResolvedFor == live then
+            return live
+        end
+
+        e.boneResolvedFor = live
+        table.clear(e.boneParts)
+        table.clear(e.boneNodes)
+        e.boneReady = true
+
+        local seen = {}
         for i, segment in ipairs(LIVEAIM_BONES) do
             local a = findLiveBone(live, segment[1])
             local b = findLiveBone(live, segment[2])
             if a and b then
                 e.boneParts[i] = { a, b }
+                if not seen[a] then
+                    seen[a] = true
+                    e.boneNodes[#e.boneNodes + 1] = a
+                end
+                if not seen[b] then
+                    seen[b] = true
+                    e.boneNodes[#e.boneNodes + 1] = b
+                end
             else
                 e.boneParts[i] = false
                 e.boneReady = false
             end
         end
+        return live
     end
 
     local function hideEntry(e)
@@ -921,108 +969,147 @@ return function(Window, ctx, platform)
         return rectOverlapsMenu(x, y, bounds.X, bounds.Y, rect)
     end
 
+    local espFrameBucket = 0
+    local espPerf = {
+        lastMs = 0,
+        avgMs = 0,
+        peakMs = 0,
+        bucketCount = 1,
+        processed = 0,
+    }
+
     local function updatePlayerEsp()
+        local startedAt = os.clock()
         if not settings.espEnabled then
             for _, e in pairs(espCache) do hideEntry(e) end
+            espPerf.lastMs = (os.clock() - startedAt) * 1000
             return
         end
+
+        local players = Players:GetPlayers()
+        local playerCount = math.max(0, #players - (settings.selfEsp and 0 or 1))
+        -- At crowded fights split ESP work across alternating frames. On a
+        -- 60 Hz client every player still refreshes at 30 Hz; at 120 Hz it is
+        -- effectively 60 Hz, while worst-frame cost is roughly halved.
+        local bucketCount = playerCount >= 24 and 2 or 1
+        espFrameBucket = (espFrameBucket % bucketCount) + 1
+        espPerf.bucketCount = bucketCount
+
+        local processed = 0
         local camPos = camera.CFrame.Position
+        local maxDistanceSq = settings.maxDistance * settings.maxDistance
         local menuRect = getMenuPanelRect()
-        for _, p in ipairs(Players:GetPlayers()) do
+
+        for _, p in ipairs(players) do
             if p ~= localPlayer or settings.selfEsp then
-                local e = getEntry(p)
-                local ch = p.Character
-                local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-                if hrp and isAlive(ch) then
-                    local dist = (hrp.Position - camPos).Magnitude
-                    if dist <= settings.maxDistance then
-                        local bounds = characterScreenBounds(ch)
-                        if bounds then
-                            local h, w = bounds.h, bounds.w
-                            local x0, y0 = bounds.x, bounds.y
-                            local relationColor = getPlayerRelationColor(p)
-                            if settings.boxEsp and e.box then
-                                e.box.Color = relationColor or ESP_COLOR
-                                e.box.Size = Vector2.new(w, h)
-                                e.box.Position = Vector2.new(x0, y0)
-                                e.box.Visible = not rectOverlapsMenu(x0, y0, w, h, menuRect)
-                            elseif e.box then
-                                e.box.Visible = false
-                            end
-                            if (settings.nameEsp or settings.distanceEsp) and e.name then
-                                local label = p.Name
-                                if settings.weaponEsp then
-                                    local wpn = ch:GetAttribute("HeldWeapon")
-                                    if type(wpn) == "string" and wpn ~= "" then
-                                        label = label .. " [" .. wpn .. "]"
-                                    end
+                local bucket = (math.abs(p.UserId) % bucketCount) + 1
+                if bucketCount == 1 or bucket == espFrameBucket then
+                    processed += 1
+                    local e = getEntry(p)
+                    local ch = p.Character
+                    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+                    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+                    local alive = ch and ch:GetAttribute("WarzDead") ~= true
+                        and hum ~= nil and hum.Health > 0
+
+                    if hrp and alive then
+                        local delta = hrp.Position - camPos
+                        local distanceSq = delta:Dot(delta)
+                        if distanceSq <= maxDistanceSq then
+                            local live = resolveLiveAim(e, ch, p)
+                            local bounds = characterScreenBounds(ch, live)
+                            if bounds then
+                                local h, w = bounds.h, bounds.w
+                                local x0, y0 = bounds.x, bounds.y
+                                local relationColor = getPlayerRelationColor(p)
+
+                                if settings.boxEsp and e.box then
+                                    e.box.Color = relationColor or ESP_COLOR
+                                    e.box.Size = Vector2.new(w, h)
+                                    e.box.Position = Vector2.new(x0, y0)
+                                    e.box.Visible = not rectOverlapsMenu(x0, y0, w, h, menuRect)
+                                elseif e.box then
+                                    e.box.Visible = false
                                 end
-                                if settings.distanceEsp then
-                                    label = label .. " " .. math.floor(dist) .. "m"
-                                end
-                                e.name.Text = label
-                                e.name.Position = Vector2.new(bounds.centerX, y0 - 18)
-                                e.name.Color = relationColor or Color3.fromRGB(255, 255, 255)
-                                e.name.Visible = not textOverlapsMenu(e.name, menuRect)
-                            elseif e.name then
-                                e.name.Visible = false
-                            end
-                            if settings.healthEsp and e.hpBack and e.hpFill then
-                                local hum = ch:FindFirstChildOfClass("Humanoid")
-                                local ratio = hum and math.clamp(hum.Health / hum.MaxHealth, 0, 1) or 0
-                                local bw = 4
-                                e.hpBack.Size = Vector2.new(bw, h)
-                                e.hpBack.Position = Vector2.new(x0 - bw - 2, y0)
-                                e.hpBack.Visible = not rectOverlapsMenu(x0 - bw - 2, y0, bw, h, menuRect)
-                                local fillH = h * ratio
-                                local fillY = y0 + h * (1 - ratio)
-                                e.hpFill.Size = Vector2.new(bw, fillH)
-                                e.hpFill.Position = Vector2.new(x0 - bw - 2, fillY)
-                                e.hpFill.Color = getHealthColor(ratio)
-                                e.hpFill.Visible = not rectOverlapsMenu(x0 - bw - 2, fillY, bw, fillH, menuRect)
-                            else
-                                if e.hpBack then e.hpBack.Visible = false end
-                                if e.hpFill then e.hpFill.Visible = false end
-                            end
-                            if settings.skeletonEsp then
-                                -- Skeleton follows the visible LiveAim rig (animated).
-                                -- Retry every 0.5s while LiveAim isn't replicated;
-                                -- never draw the invisible Character T-pose.
-                                ensureSkeletonDrawings(e)
-                                resolveSkeletonParts(e, ch, p)
-                                for i = 1, LIVEAIM_BONE_COUNT do
-                                    local ln = e.bones[i]
-                                    local pair = e.boneParts[i]
-                                    if ln then
-                                        ln.Color = relationColor or ESP_COLOR
-                                        if pair and e.liveAim and e.liveAim.Parent then
-                                            local a = boneWorldPosition(pair[1])
-                                            local b = boneWorldPosition(pair[2])
-                                            if a and b then
-                                                local va, ona = camera:WorldToViewportPoint(a)
-                                                local vb, onb = camera:WorldToViewportPoint(b)
-                                                if ona and onb and va.Z > 0 and vb.Z > 0 then
-                                                    local from = Vector2.new(va.X, va.Y)
-                                                    local to = Vector2.new(vb.X, vb.Y)
-                                                    ln.From = from
-                                                    ln.To = to
-                                                    ln.Visible = not segmentOverlapsMenu(from, to, menuRect)
-                                                else
-                                                    ln.Visible = false
-                                                end
-                                            else
-                                                e.boneReady = false
-                                                ln.Visible = false
-                                            end
-                                        else
-                                            ln.Visible = false
+
+                                if (settings.nameEsp or settings.distanceEsp) and e.name then
+                                    local label = p.Name
+                                    if settings.weaponEsp then
+                                        local wpn = ch:GetAttribute("HeldWeapon")
+                                        if type(wpn) == "string" and wpn ~= "" then
+                                            label = label .. " [" .. wpn .. "]"
                                         end
                                     end
+                                    if settings.distanceEsp then
+                                        label = label .. " " .. math.floor(math.sqrt(distanceSq)) .. "m"
+                                    end
+                                    e.name.Text = label
+                                    e.name.Position = Vector2.new(bounds.centerX, y0 - 18)
+                                    e.name.Color = relationColor or Color3.fromRGB(255, 255, 255)
+                                    e.name.Visible = not textOverlapsMenu(e.name, menuRect)
+                                elseif e.name then
+                                    e.name.Visible = false
+                                end
+
+                                if settings.healthEsp and e.hpBack and e.hpFill then
+                                    local ratio = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+                                    local bw = 4
+                                    e.hpBack.Size = Vector2.new(bw, h)
+                                    e.hpBack.Position = Vector2.new(x0 - bw - 2, y0)
+                                    e.hpBack.Visible = not rectOverlapsMenu(x0 - bw - 2, y0, bw, h, menuRect)
+                                    local fillH = h * ratio
+                                    local fillY = y0 + h * (1 - ratio)
+                                    e.hpFill.Size = Vector2.new(bw, fillH)
+                                    e.hpFill.Position = Vector2.new(x0 - bw - 2, fillY)
+                                    e.hpFill.Color = getHealthColor(ratio)
+                                    e.hpFill.Visible = not rectOverlapsMenu(x0 - bw - 2, fillY, bw, fillH, menuRect)
+                                else
+                                    if e.hpBack then e.hpBack.Visible = false end
+                                    if e.hpFill then e.hpFill.Visible = false end
+                                end
+
+                                if settings.skeletonEsp then
+                                    ensureSkeletonDrawings(e)
+                                    resolveSkeletonParts(e, ch, p)
+
+                                    -- Project each unique bone once. The old loop
+                                    -- projected both endpoints for every segment,
+                                    -- repeating neck/spine/pelvis projections many
+                                    -- times for the same player in the same frame.
+                                    local projected = {}
+                                    for _, bone in ipairs(e.boneNodes) do
+                                        local pos = boneWorldPosition(bone)
+                                        if pos then
+                                            local view, onScreen = camera:WorldToViewportPoint(pos)
+                                            if onScreen and view.Z > 0 then
+                                                projected[bone] = Vector2.new(view.X, view.Y)
+                                            end
+                                        end
+                                    end
+
+                                    for i = 1, LIVEAIM_BONE_COUNT do
+                                        local ln = e.bones[i]
+                                        local pair = e.boneParts[i]
+                                        if ln then
+                                            ln.Color = relationColor or ESP_COLOR
+                                            local from = pair and projected[pair[1]]
+                                            local to = pair and projected[pair[2]]
+                                            if from and to then
+                                                ln.From = from
+                                                ln.To = to
+                                                ln.Visible = not segmentOverlapsMenu(from, to, menuRect)
+                                            else
+                                                ln.Visible = false
+                                            end
+                                        end
+                                    end
+                                else
+                                    for _, ln in pairs(e.bones) do
+                                        if ln then ln.Visible = false end
+                                    end
                                 end
                             else
-                                for _, ln in pairs(e.bones) do
-                                    if ln then ln.Visible = false end
-                                end
+                                hideEntry(e)
                             end
                         else
                             hideEntry(e)
@@ -1030,13 +1117,18 @@ return function(Window, ctx, platform)
                     else
                         hideEntry(e)
                     end
-                else
-                    hideEntry(e)
                 end
             elseif espCache[p] then
                 hideEntry(espCache[p])
             end
         end
+
+        local elapsedMs = (os.clock() - startedAt) * 1000
+        espPerf.lastMs = elapsedMs
+        espPerf.avgMs = espPerf.avgMs == 0 and elapsedMs
+            or (espPerf.avgMs * 0.9 + elapsedMs * 0.1)
+        espPerf.peakMs = math.max(espPerf.peakMs * 0.995, elapsedMs)
+        espPerf.processed = processed
     end
 
     -- [[ Loot ESP: read-only labels for drops under Workspace.WarzLoot ]]
@@ -2255,6 +2347,13 @@ return function(Window, ctx, platform)
             aimHeld = aimStatus.held == true,
             target = aimLockPlayer and aimLockPlayer.Name or nil,
             skeleton = {entries = entries, lines = lines, visible = visible, ready = ready},
+            performance = {
+                espLastMs = espPerf.lastMs,
+                espAvgMs = espPerf.avgMs,
+                espPeakMs = espPerf.peakMs,
+                espBuckets = espPerf.bucketCount,
+                espProcessed = espPerf.processed,
+            },
             loot = (function()
                 local n = 0
                 for _ in pairs(lootCache) do n = n + 1 end
