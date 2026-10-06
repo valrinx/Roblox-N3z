@@ -297,7 +297,7 @@ return {
             local alpha = 1 - math.pow(1 - response, (dt or 1 / 60) * 60)
 
             if hasMouseMove then
-                local view, onScreen = camera:WorldToViewportPoint(target)
+                local view, onScreen = camera.WorldToViewportPoint(camera, target)
                 if not onScreen or view.Z <= 0 then return end
 
                 local center = camera.ViewportSize / 2

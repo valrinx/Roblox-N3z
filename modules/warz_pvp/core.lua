@@ -1,6 +1,6 @@
 -- ============================================================
 -- N3Z WarZPVP shared core
--- v1.7.4 - party-safe aim and rendered weapon icons
+-- v1.8.0 - silent aim, safezone protection filter, stamina, loot aura, auto fishing
 -- ============================================================
 
 return function(Window, ctx, platform)
@@ -119,6 +119,26 @@ return function(Window, ctx, platform)
         end)
     end
 
+    local function getFishingModule()
+        return lazyRequire("Fishing", function()
+            local client = localPlayer.PlayerScripts:FindFirstChild("Client")
+            local world = client and client:FindFirstChild("world")
+            return world and world:FindFirstChild("Fishing")
+        end, function(api)
+            return type(api) == "table" and type(api.Press) == "function"
+        end)
+    end
+
+    local function getLootPickupModule()
+        return lazyRequire("LootPickup", function()
+            local client = localPlayer.PlayerScripts:FindFirstChild("Client")
+            local world = client and client:FindFirstChild("world")
+            return world and world:FindFirstChild("LootPickup")
+        end, function(api)
+            return type(api) == "table" and type(api.SetTouchHeld) == "function"
+        end)
+    end
+
     local function peekLazy(key)
         local state = lazyModules[key]
         return state and state.value or nil
@@ -141,7 +161,7 @@ return function(Window, ctx, platform)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.7.4"
+    environment.RAVEN_WARZPVP_VER = "1.8.1"
 
     local running = true
     local connections = {}
@@ -169,11 +189,21 @@ return function(Window, ctx, platform)
         aimPosition = "Auto",
         aimResponse = 0.35,
         aimPrediction = true,
+        vulnerabilityCheck = true,
         autoHeal = false,
         healThreshold = 50,
         healCooldown = 0,
         noRecoil = false,
         instantPickup = false,
+        silentAim = false,
+        silentAimFov = 120,
+        silentFov = 120,
+        silentAimBone = "Head",
+        silentBone = "Head",
+        infiniteStamina = false,
+        lootAura = false,
+        lootAuraRange = 10.5,
+        autoFishing = false,
     }
 
     -- Track every section we create so destroy() can remove them from the
@@ -484,13 +514,28 @@ return function(Window, ctx, platform)
             and sameNonEmptyPlayerAttribute(localPlayer, player, "WarzPartyId")
     end
 
-    local function getPlayerRelationColor(player)
+    local function isPlayerVulnerable(player, character)
+        if not player then return false end
+        if player:GetAttribute("CSGO_Dead") == true then return false end
+        if character and character:GetAttribute("WarzDead") == true then return false end
+        if not settings.vulnerabilityCheck then return true end
+        if player:GetAttribute("WarzSaveZone") == true then return false end
+        if character and character:GetAttribute("WarzSaveZone") == true then return false end
+        local protectUntil = tonumber(player:GetAttribute("WarzProtectUntil")) or 0
+        if protectUntil > Workspace.GetServerTimeNow(Workspace) then return false end
+        return true
+    end
+
+    local function getPlayerRelationColor(player, character)
         if not player or player == localPlayer then return nil end
         if isPartyMember(player) then
             return PARTY_COLOR
         end
         if sameNonEmptyPlayerAttribute(localPlayer, player, "ClanId") then
             return CLAN_COLOR
+        end
+        if not isPlayerVulnerable(player, character) then
+            return Color3.fromRGB(130, 190, 255)
         end
         return nil
     end
@@ -677,7 +722,7 @@ return function(Window, ctx, platform)
         for _, item in ipairs(points) do
             local point, name = item.point, item.name
             if typeof(point) == "Vector3" then
-                local view, on = camera:WorldToViewportPoint(point)
+                local view, on = camera.WorldToViewportPoint(camera, point)
                 if on and view.Z > 0 then
                     local pixels = (Vector2.new(view.X, view.Y) - center).Magnitude
                     if pixels < bestPixels then
@@ -721,6 +766,7 @@ return function(Window, ctx, platform)
         local fallback = bodyPart(character, "UpperTorso")
             or bodyPart(character, "Torso")
             or bodyPart(character, "Head")
+            or bodyPart(character, "HumanoidRootPart")
         return fallback and fallback.Position or nil, fallback and fallback.Name or nil
     end
 
@@ -759,75 +805,37 @@ return function(Window, ctx, platform)
     -- every visible body mesh (32+ WorldToViewportPoint calls per player, and
     -- up to 120 on the fallback character). WarZ's LiveAim already exposes
     -- Head/Arms/Body/Legs, so a few extremity samples give the same useful ESP
-    -- box at a fraction of the per-frame cost.
-    local function characterScreenBounds(model, live)
+    -- Highly optimized 2-point screen bounds. Eliminates 8-point extremity projections
+    -- and closure allocations per player per frame. Standard WarZPVP character proportions:
+    -- height ~5.8 studs, width ~0.58 ratio.
+    local function characterScreenBounds(model)
         local root = bodyPart(model, "HumanoidRootPart") or bodyPart(model, "Torso")
         if not root then return nil end
 
-        local minX, minY = math.huge, math.huge
-        local maxX, maxY = -math.huge, -math.huge
-        local points = 0
+        local rootPos = root.Position
+        local topPos = rootPos + Vector3.new(0, 2.7, 0)
+        local botPos = rootPos - Vector3.new(0, 3.1, 0)
 
-        local function add(position)
-            if typeof(position) ~= "Vector3" then return end
-            local v = camera:WorldToViewportPoint(position)
-            if v.Z <= 0 then return end
-            points += 1
-            minX, minY = math.min(minX, v.X), math.min(minY, v.Y)
-            maxX, maxY = math.max(maxX, v.X), math.max(maxY, v.Y)
-        end
+        local topView = camera.WorldToViewportPoint(camera, topPos)
+        if topView.Z <= 0 then return nil end
+        local botView = camera.WorldToViewportPoint(camera, botPos)
+        if botView.Z <= 0 then return nil end
 
-        local function addVertical(part)
-            if not part or not part:IsA("BasePart") or part.Transparency >= 1 then return end
-            local halfY = part.Size.Y * 0.5
-            add(part.Position + part.CFrame.UpVector * halfY)
-            add(part.Position - part.CFrame.UpVector * halfY)
-        end
+        local h = math.abs(botView.Y - topView.Y)
+        local w = h * 0.58
+        local centerY = (topView.Y + botView.Y) * 0.5
+        local centerX = (topView.X + botView.X) * 0.5
+        local minX = centerX - w * 0.5
+        local minY = centerY - h * 0.5
 
-        local function addWidth(part)
-            if not part or not part:IsA("BasePart") or part.Transparency >= 1 then return end
-            local halfX = part.Size.X * 0.5
-            local halfZ = part.Size.Z * 0.5
-            add(part.Position + part.CFrame.RightVector * halfX)
-            add(part.Position - part.CFrame.RightVector * halfX)
-            -- One depth-axis pair keeps the box correct when the target turns
-            -- sideways without paying for all eight 3D corners.
-            add(part.Position + part.CFrame.LookVector * halfZ)
-            add(part.Position - part.CFrame.LookVector * halfZ)
-        end
-
-        if live and live.Parent then
-            local head = live:FindFirstChild("Head")
-            local body = live:FindFirstChild("Body")
-            local arms = live:FindFirstChild("Arms")
-            local legs = live:FindFirstChild("Legs")
-            addVertical(head)
-            addVertical(legs)
-            addWidth(arms or body)
-        end
-
-        -- Cheap fallback while LiveAim has not replicated yet.
-        if points < 4 then
-            points = 0
-            minX, minY = math.huge, math.huge
-            maxX, maxY = -math.huge, -math.huge
-            local cf = root.CFrame
-            add(root.Position + Vector3.new(0, 3.25, 0))
-            add(root.Position - Vector3.new(0, 3.25, 0))
-            add(root.Position + cf.RightVector * 1.5)
-            add(root.Position - cf.RightVector * 1.5)
-        end
-
-        if points == 0 then return nil end
-        local w, h = maxX - minX, maxY - minY
         local vs = camera.ViewportSize
-        if w < 2 or h < 4 or w > vs.X * 2 or h > vs.Y * 2
-            or maxX < 0 or minX > vs.X or maxY < 0 or minY > vs.Y then
+        if h < 4 or w < 2 or h > vs.Y * 2 or w > vs.X * 2
+            or minX + w < 0 or minX > vs.X or minY + h < 0 or minY > vs.Y then
             return nil
         end
         return {
             x = minX, y = minY, w = w, h = h,
-            centerX = (minX + maxX) * 0.5,
+            centerX = centerX,
         }
     end
 
@@ -998,30 +1006,14 @@ return function(Window, ctx, platform)
         return hum ~= nil and hum.Health > 0
     end
 
+    local menuOpen = false
+    local cachedMenuRect = nil
+
     -- Drawing API may render above ScreenGui on some executors. Instead of
     -- hiding all ESP while N3Z is open, clip only drawings that overlap the
-    -- visible panel rectangle.
+    -- visible panel rectangle. Cached once per frame in updateMenuState().
     local function getMenuPanelRect()
-        if dock and type(dock.IsPanelOpen) == "function" then
-            local okOpen, open = pcall(function() return dock:IsPanelOpen() end)
-            if okOpen and open and dock._panel then
-                local okRect, pos, size = pcall(function()
-                    return dock._panel.AbsolutePosition, dock._panel.AbsoluteSize
-                end)
-                if okRect and typeof(pos) == "Vector2" and typeof(size) == "Vector2" then
-                    return { x = pos.X, y = pos.Y, w = size.X, h = size.Y }
-                end
-            end
-        end
-
-        -- Fallback for older DrawingUI-style windows.
-        local ok, visible, pos, size = pcall(function()
-            return Window.visible, Window.pos, Window.size
-        end)
-        if ok and visible == true and typeof(pos) == "Vector2" and typeof(size) == "Vector2" then
-            return { x = pos.X, y = pos.Y, w = size.X, h = size.Y }
-        end
-        return nil
+        return cachedMenuRect
     end
 
     local function rectOverlapsMenu(x, y, w, h, rect)
@@ -1063,14 +1055,13 @@ return function(Window, ctx, platform)
 
     local function textOverlapsMenu(d, rect)
         if not d or not rect then return false end
-        local ok, pos, bounds, centered = pcall(function()
-            return d.Position, d.TextBounds, d.Center
-        end)
-        if not ok or typeof(pos) ~= "Vector2" then return false end
-        if typeof(bounds) ~= "Vector2" then
+        local pos = d.Position
+        if not pos then return false end
+        local bounds = d.TextBounds
+        if not bounds then
             return pointInMenu(pos, rect)
         end
-        local x = pos.X - ((centered == true) and bounds.X * 0.5 or 0)
+        local x = pos.X - ((d.Center == true) and bounds.X * 0.5 or 0)
         local y = pos.Y
         return rectOverlapsMenu(x, y, bounds.X, bounds.Y, rect)
     end
@@ -1084,7 +1075,7 @@ return function(Window, ctx, platform)
         processed = 0,
     }
 
-    local function updatePlayerEsp()
+    local function updatePlayerEsp(playersList)
         local startedAt = os.clock()
         if not settings.espEnabled then
             for _, e in pairs(espCache) do hideEntry(e) end
@@ -1092,7 +1083,7 @@ return function(Window, ctx, platform)
             return
         end
 
-        local players = Players:GetPlayers()
+        local players = playersList or Players:GetPlayers()
         local playerCount = math.max(0, #players - (settings.selfEsp and 0 or 1))
         -- At crowded fights split ESP work across alternating frames. On a
         -- 60 Hz client every player still refreshes at 30 Hz; at 120 Hz it is
@@ -1103,8 +1094,10 @@ return function(Window, ctx, platform)
 
         local processed = 0
         local camPos = camera.CFrame.Position
+        local camLook = camera.CFrame.LookVector
         local maxDistanceSq = settings.maxDistance * settings.maxDistance
-        local menuRect = getMenuPanelRect()
+        local menuRect = cachedMenuRect
+        local serverTime = Workspace.GetServerTimeNow(Workspace)
 
         for _, p in ipairs(players) do
             if p ~= localPlayer or settings.selfEsp then
@@ -1120,120 +1113,130 @@ return function(Window, ctx, platform)
 
                     if hrp and alive then
                         local delta = hrp.Position - camPos
-                        local distanceSq = delta:Dot(delta)
-                        if distanceSq <= maxDistanceSq then
-                            local live = resolveLiveAim(e, ch, p)
-                            local bounds = characterScreenBounds(ch, live)
-                            if bounds then
-                                local h, w = bounds.h, bounds.w
-                                local x0, y0 = bounds.x, bounds.y
-                                local relationColor = getPlayerRelationColor(p)
-                                local weaponId = settings.weaponEsp and getRenderedWeaponId(ch, live) or nil
-                                local weaponIconSource = getWeaponIconSource(weaponId)
+                        -- Frustum check: dot product with look vector. If behind the camera, skip completely.
+                        if camLook:Dot(delta) > -5 then
+                            local distanceSq = delta:Dot(delta)
+                            if distanceSq <= maxDistanceSq then
+                                local bounds = characterScreenBounds(ch)
+                                if bounds then
+                                    local h, w = bounds.h, bounds.w
+                                    local x0, y0 = bounds.x, bounds.y
+                                    local relationColor = getPlayerRelationColor(p, ch)
+                                    local live = (settings.skeletonEsp or settings.weaponEsp) and resolveLiveAim(e, ch, p) or nil
+                                    local weaponId = settings.weaponEsp and getRenderedWeaponId(ch, live) or nil
+                                    local weaponIconSource = getWeaponIconSource(weaponId)
 
-                                if settings.boxEsp and e.box then
-                                    e.box.Color = relationColor or ESP_COLOR
-                                    e.box.Size = Vector2.new(w, h)
-                                    e.box.Position = Vector2.new(x0, y0)
-                                    e.box.Visible = not rectOverlapsMenu(x0, y0, w, h, menuRect)
-                                elseif e.box then
-                                    e.box.Visible = false
-                                end
-
-                                if (settings.nameEsp or settings.distanceEsp) and e.name then
-                                    local label = p.Name
-                                    if settings.weaponEsp and not weaponIconSource
-                                        and type(weaponId) == "string" and weaponId ~= "" then
-                                        label = label .. " [" .. weaponId .. "]"
+                                    if settings.boxEsp and e.box then
+                                        e.box.Color = relationColor or ESP_COLOR
+                                        e.box.Size = Vector2.new(w, h)
+                                        e.box.Position = Vector2.new(x0, y0)
+                                        e.box.Visible = not rectOverlapsMenu(x0, y0, w, h, menuRect)
+                                    elseif e.box then
+                                        e.box.Visible = false
                                     end
-                                    if settings.distanceEsp then
-                                        label = label .. " " .. math.floor(math.sqrt(distanceSq)) .. "m"
-                                    end
-                                    e.name.Text = label
-                                    e.name.Position = Vector2.new(bounds.centerX, y0 - 18)
-                                    e.name.Color = relationColor or Color3.fromRGB(255, 255, 255)
-                                    e.name.Visible = not textOverlapsMenu(e.name, menuRect)
-                                elseif e.name then
-                                    e.name.Visible = false
-                                end
 
-                                if settings.weaponEsp and weaponIconSource then
-                                    local weaponIcon = ensureWeaponIcon(e)
-                                    if weaponIcon then
-                                        local iconW = math.clamp(w * 0.9, 38, 72)
-                                        local iconH = math.clamp(iconW * 0.5, 20, 36)
-                                        local iconX = bounds.centerX - iconW * 0.5
-                                        local iconY = y0 + h + 4
-                                        if e.weaponIconSource ~= weaponIconSource then
-                                            e.weaponIconSource = weaponIconSource
-                                            weaponIcon.Image = weaponIconSource
+                                    if (settings.nameEsp or settings.distanceEsp) and e.name then
+                                        local label = p.Name
+                                        local isSafe = p:GetAttribute("WarzSaveZone") == true or (ch and ch:GetAttribute("WarzSaveZone") == true)
+                                        local protectUntil = tonumber(p:GetAttribute("WarzProtectUntil")) or 0
+                                        local isProtected = protectUntil > serverTime
+                                        if isSafe then
+                                            label = label .. " [SAFE]"
+                                        elseif isProtected then
+                                            label = label .. " [PROT]"
                                         end
-                                        weaponIcon.Size = Vector2.new(iconW, iconH)
-                                        weaponIcon.Position = Vector2.new(iconX, iconY)
-                                        weaponIcon.Visible = not rectOverlapsMenu(
-                                            iconX, iconY, iconW, iconH, menuRect
-                                        )
+                                        if settings.weaponEsp and not weaponIconSource
+                                            and type(weaponId) == "string" and weaponId ~= "" then
+                                            label = label .. " [" .. weaponId .. "]"
+                                        end
+                                        if settings.distanceEsp then
+                                            label = label .. " " .. math.floor(math.sqrt(distanceSq)) .. "m"
+                                        end
+                                        e.name.Text = label
+                                        e.name.Position = Vector2.new(bounds.centerX, y0 - 18)
+                                        e.name.Color = relationColor or Color3.fromRGB(255, 255, 255)
+                                        e.name.Visible = not textOverlapsMenu(e.name, menuRect)
+                                    elseif e.name then
+                                        e.name.Visible = false
                                     end
-                                elseif e.weaponIcon then
-                                    e.weaponIcon.Visible = false
-                                end
 
-                                if settings.healthEsp and e.hpBack and e.hpFill then
-                                    local ratio = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
-                                    local bw = 4
-                                    e.hpBack.Size = Vector2.new(bw, h)
-                                    e.hpBack.Position = Vector2.new(x0 - bw - 2, y0)
-                                    e.hpBack.Visible = not rectOverlapsMenu(x0 - bw - 2, y0, bw, h, menuRect)
-                                    local fillH = h * ratio
-                                    local fillY = y0 + h * (1 - ratio)
-                                    e.hpFill.Size = Vector2.new(bw, fillH)
-                                    e.hpFill.Position = Vector2.new(x0 - bw - 2, fillY)
-                                    e.hpFill.Color = getHealthColor(ratio)
-                                    e.hpFill.Visible = not rectOverlapsMenu(x0 - bw - 2, fillY, bw, fillH, menuRect)
-                                else
-                                    if e.hpBack then e.hpBack.Visible = false end
-                                    if e.hpFill then e.hpFill.Visible = false end
-                                end
+                                    if settings.weaponEsp and weaponIconSource then
+                                        local weaponIcon = ensureWeaponIcon(e)
+                                        if weaponIcon then
+                                            local iconW = math.clamp(w * 0.9, 38, 72)
+                                            local iconH = math.clamp(iconW * 0.5, 20, 36)
+                                            local iconX = bounds.centerX - iconW * 0.5
+                                            local iconY = y0 + h + 4
+                                            if e.weaponIconSource ~= weaponIconSource then
+                                                e.weaponIconSource = weaponIconSource
+                                                weaponIcon.Image = weaponIconSource
+                                            end
+                                            weaponIcon.Size = Vector2.new(iconW, iconH)
+                                            weaponIcon.Position = Vector2.new(iconX, iconY)
+                                            weaponIcon.Visible = not rectOverlapsMenu(
+                                                iconX, iconY, iconW, iconH, menuRect
+                                            )
+                                        end
+                                    elseif e.weaponIcon then
+                                        e.weaponIcon.Visible = false
+                                    end
 
-                                if settings.skeletonEsp then
-                                    ensureSkeletonDrawings(e)
-                                    resolveSkeletonParts(e, ch, p)
+                                    if settings.healthEsp and e.hpBack and e.hpFill then
+                                        local ratio = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+                                        local bw = 4
+                                        e.hpBack.Size = Vector2.new(bw, h)
+                                        e.hpBack.Position = Vector2.new(x0 - bw - 2, y0)
+                                        e.hpBack.Visible = not rectOverlapsMenu(x0 - bw - 2, y0, bw, h, menuRect)
+                                        local fillH = h * ratio
+                                        local fillY = y0 + h * (1 - ratio)
+                                        e.hpFill.Size = Vector2.new(bw, fillH)
+                                        e.hpFill.Position = Vector2.new(x0 - bw - 2, fillY)
+                                        e.hpFill.Color = getHealthColor(ratio)
+                                        e.hpFill.Visible = not rectOverlapsMenu(x0 - bw - 2, fillY, bw, fillH, menuRect)
+                                    else
+                                        if e.hpBack then e.hpBack.Visible = false end
+                                        if e.hpFill then e.hpFill.Visible = false end
+                                    end
 
-                                    -- Project each unique bone once. The old loop
-                                    -- projected both endpoints for every segment,
-                                    -- repeating neck/spine/pelvis projections many
-                                    -- times for the same player in the same frame.
-                                    local projected = {}
-                                    for _, bone in ipairs(e.boneNodes) do
-                                        local pos = boneWorldPosition(bone)
-                                        if pos then
-                                            local view, onScreen = camera:WorldToViewportPoint(pos)
-                                            if onScreen and view.Z > 0 then
-                                                projected[bone] = Vector2.new(view.X, view.Y)
+                                    if settings.skeletonEsp and distanceSq <= 160000 then
+                                        ensureSkeletonDrawings(e)
+                                        resolveSkeletonParts(e, ch, p)
+
+                                        -- Project each unique bone once.
+                                        local projected = {}
+                                        for _, bone in ipairs(e.boneNodes) do
+                                            local pos = boneWorldPosition(bone)
+                                            if pos then
+                                                local view, onScreen = camera.WorldToViewportPoint(camera, pos)
+                                                if onScreen and view.Z > 0 then
+                                                    projected[bone] = Vector2.new(view.X, view.Y)
+                                                end
                                             end
                                         end
-                                    end
 
-                                    for i = 1, LIVEAIM_BONE_COUNT do
-                                        local ln = e.bones[i]
-                                        local pair = e.boneParts[i]
-                                        if ln then
-                                            ln.Color = relationColor or ESP_COLOR
-                                            local from = pair and projected[pair[1]]
-                                            local to = pair and projected[pair[2]]
-                                            if from and to then
-                                                ln.From = from
-                                                ln.To = to
-                                                ln.Visible = not segmentOverlapsMenu(from, to, menuRect)
-                                            else
-                                                ln.Visible = false
+                                        for i = 1, LIVEAIM_BONE_COUNT do
+                                            local ln = e.bones[i]
+                                            local pair = e.boneParts[i]
+                                            if ln then
+                                                ln.Color = relationColor or ESP_COLOR
+                                                local from = pair and projected[pair[1]]
+                                                local to = pair and projected[pair[2]]
+                                                if from and to then
+                                                    ln.From = from
+                                                    ln.To = to
+                                                    ln.Visible = not segmentOverlapsMenu(from, to, menuRect)
+                                                else
+                                                    ln.Visible = false
+                                                end
                                             end
+                                        end
+                                    else
+                                        for _, ln in pairs(e.bones) do
+                                            if ln then ln.Visible = false end
                                         end
                                     end
                                 else
-                                    for _, ln in pairs(e.bones) do
-                                        if ln then ln.Visible = false end
-                                    end
+                                    hideEntry(e)
                                 end
                             else
                                 hideEntry(e)
@@ -1418,8 +1421,13 @@ return function(Window, ctx, platform)
         end
     end
 
+    local lastLootSync = 0
     local function updateLootEsp()
-        syncLootFolder()
+        local now = os.clock()
+        if now - lastLootSync >= 2.0 then
+            lastLootSync = now
+            syncLootFolder()
+        end
 
         if not settings.lootEsp then
             for _, entry in pairs(lootCache) do
@@ -1432,9 +1440,10 @@ return function(Window, ctx, platform)
         if not cam then return end
 
         local camPos = cam.CFrame.Position
+        local camLook = cam.CFrame.LookVector
         local maxDistance = settings.lootMaxDistance
         local maxDistanceSq = maxDistance * maxDistance
-        local menuRect = getMenuPanelRect()
+        local menuRect = cachedMenuRect
 
         for model, entry in pairs(lootCache) do
             if model.Parent ~= lootFolder or not lootCategoryAllowed(entry.category) then
@@ -1449,19 +1458,23 @@ return function(Window, ctx, platform)
                 local apos = lootAnchorPos(anchor)
                 if apos then
                     local delta = apos - camPos
-                    local distanceSq = delta:Dot(delta)
-                    if distanceSq <= maxDistanceSq then
-                        local viewport, onScreen = cam:WorldToViewportPoint(apos)
-                        if onScreen and viewport.Z > 0 then
-                            local text = ensureLootDrawing(entry)
-                            if text then
-                                local roundedDistance = math.floor(math.sqrt(distanceSq) + 0.5)
-                                if entry.lastDistance ~= roundedDistance then
-                                    entry.lastDistance = roundedDistance
-                                    text.Text = entry.labelPrefix .. roundedDistance .. "m"
+                    if camLook:Dot(delta) > 0 then
+                        local distanceSq = delta:Dot(delta)
+                        if distanceSq <= maxDistanceSq then
+                            local viewport, onScreen = cam.WorldToViewportPoint(cam, apos)
+                            if onScreen and viewport.Z > 0 then
+                                local text = ensureLootDrawing(entry)
+                                if text then
+                                    local roundedDistance = math.floor(math.sqrt(distanceSq) + 0.5)
+                                    if entry.lastDistance ~= roundedDistance then
+                                        entry.lastDistance = roundedDistance
+                                        text.Text = entry.labelPrefix .. roundedDistance .. "m"
+                                    end
+                                    text.Position = Vector2.new(viewport.X, viewport.Y)
+                                    text.Visible = not textOverlapsMenu(text, menuRect)
                                 end
-                                text.Position = Vector2.new(viewport.X, viewport.Y)
-                                text.Visible = not textOverlapsMenu(text, menuRect)
+                            else
+                                hideLootEntry(entry)
                             end
                         else
                             hideLootEntry(entry)
@@ -1802,23 +1815,46 @@ return function(Window, ctx, platform)
             * (0.5 * travelTime * (travelTime + ballistics.stepSeconds))
         return point + targetVelocity * travelTime - gravityTravel
     end
+    local aimRayParams = RaycastParams.new()
+    aimRayParams.FilterType = Enum.RaycastFilterType.Exclude
+    aimRayParams.IgnoreWater = true
+    local lastExcludeUpdate = 0
+    local cachedExclude = {}
+
+    local function updateAimRayExclude()
+        local now = os.clock()
+        if now - lastExcludeUpdate < 1.0 and #cachedExclude > 0 then return end
+        lastExcludeUpdate = now
+        table.clear(cachedExclude)
+        if localPlayer.Character then table.insert(cachedExclude, localPlayer.Character) end
+        local hvl = Workspace:FindFirstChild("HeroVisualsLocal")
+        if hvl then
+            local myDrift = hvl:FindFirstChild("Drift_" .. localPlayer.Name)
+            if myDrift then
+                table.insert(cachedExclude, myDrift)
+            else
+                table.insert(cachedExclude, hvl)
+            end
+        end
+        aimRayParams.FilterDescendantsInstances = cachedExclude
+    end
+
     local function canSeeAimPoint(character, point)
         local origin = camera.CFrame.Position
         local direction = point - origin
         if direction.Magnitude < 0.01 then return false end
 
-        local params = RaycastParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        params.FilterDescendantsInstances = localPlayer.Character and { localPlayer.Character } or {}
-        params.IgnoreWater = true
+        updateAimRayExclude()
 
-        local hit = Workspace:Raycast(origin, direction, params)
+        local hit = Workspace.Raycast(Workspace, origin, direction, aimRayParams)
         if not hit then return true end
         if hit.Instance:IsDescendantOf(character) then return true end
+        local hvl = Workspace:FindFirstChild("HeroVisualsLocal")
+        if hvl and hit.Instance:IsDescendantOf(hvl) then return true end
 
         -- CanQuery is disabled on WarZ character/LiveAim parts, so an obstacle
         -- very near the target point should not incorrectly invalidate the lock.
-        return (hit.Position - origin).Magnitude >= direction.Magnitude - 0.15
+        return (hit.Position - origin).Magnitude >= direction.Magnitude - 1.2
     end
 
     local function validAimPoint(character, maxFov, exact)
@@ -1831,7 +1867,7 @@ return function(Window, ctx, platform)
             return nil, nil
         end
 
-        local view, on = camera:WorldToViewportPoint(point)
+        local view, on = camera.WorldToViewportPoint(camera, point)
         if not on or view.Z <= 0 then return nil, nil end
         local center = camera.ViewportSize / 2
         local pixels = (Vector2.new(view.X, view.Y) - center).Magnitude
@@ -1839,40 +1875,33 @@ return function(Window, ctx, platform)
         return point, pixels
     end
 
-    local function scanAimTarget()
-        -- Broad phase: cheap animated-bone screen distance for all players.
-        -- Narrow phase: exact WarzHitboxes Chest + LOS for only the closest few.
-        local candidates = {}
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p ~= localPlayer and not isPartyMember(p) then
-                local character = p.Character
-                local point, pixels = validAimPoint(character, settings.aimFov, false)
-                if point and pixels then
-                    table.insert(candidates, { player = p, pixels = pixels })
-                end
-            end
-        end
-        table.sort(candidates, function(a, b)
-            return a.pixels < b.pixels
-        end)
+    local function scanAimTarget(playersList)
+        local players = playersList or Players:GetPlayers()
+        local bestPoint, bestPlayer = nil, nil
+        local bestPixels = settings.aimFov
 
-        for i = 1, math.min(4, #candidates) do
-            local p = candidates[i].player
-            if not isPartyMember(p) then
-                local character = p.Character
-                local point, pixels = validAimPoint(character, settings.aimFov, true)
-                if point and pixels and canSeeAimPoint(character, point) then
-                    return point, p
+        -- Single-pass O(N) search with zero candidate table allocations
+        for _, p in ipairs(players) do
+            local character = p.Character
+            if p ~= localPlayer and not isPartyMember(p) and isPlayerVulnerable(p, character) then
+                local point, pixels = validAimPoint(character, bestPixels, false)
+                if point and pixels and pixels < bestPixels then
+                    local exactPoint, exactPixels = validAimPoint(character, settings.aimFov, true)
+                    if exactPoint and exactPixels and canSeeAimPoint(character, exactPoint) then
+                        bestPixels = exactPixels
+                        bestPoint = exactPoint
+                        bestPlayer = p
+                    end
                 end
             end
         end
-        return nil, nil
+        return bestPoint, bestPlayer
     end
 
-    local function getAimTarget()
+    local function getAimTarget(playersList)
         local player = aimLockPlayer
         if player then
-            if isPartyMember(player) then
+            if isPartyMember(player) or not isPlayerVulnerable(player, aimLockCharacter) then
                 aimLockPlayer, aimLockCharacter = nil, nil
             else
                 local character = aimLockCharacter
@@ -1886,10 +1915,71 @@ return function(Window, ctx, platform)
             end
         end
 
-        local best, bestP = scanAimTarget()
+        local best, bestP = scanAimTarget(playersList)
         aimLockPlayer = bestP
         aimLockCharacter = bestP and bestP.Character or nil
         return best
+    end
+
+    local function getSilentAimPoint(character, boneName)
+        if not character then return nil end
+        boneName = boneName or settings.silentAimBone or settings.silentBone or "Head"
+        if boneName == "Head" then
+            local bHead = character:FindFirstChild("WarzHitboxes") and character.WarzHitboxes:FindFirstChild("Bip01_Head")
+            if bHead and bHead:IsA("BasePart") then return bHead.Position end
+            local head = character:FindFirstChild("Head")
+            if head and head:IsA("BasePart") then return head.Position end
+        elseif boneName == "Chest" then
+            local chest = character:FindFirstChild("WarzHitboxes") and character.WarzHitboxes:FindFirstChild("Chest")
+            if chest and chest:IsA("BasePart") then return chest.Position end
+            local ut = character:FindFirstChild("UpperTorso") or character:FindFirstChild("Torso")
+            if ut and ut:IsA("BasePart") then return ut.Position end
+        else
+            local spine = character:FindFirstChild("WarzHitboxes") and character.WarzHitboxes:FindFirstChild("Bip01_Spine1")
+            if spine and spine:IsA("BasePart") then return spine.Position end
+            local lt = character:FindFirstChild("LowerTorso") or character:FindFirstChild("Torso")
+            if lt and lt:IsA("BasePart") then return lt.Position end
+        end
+        local hrp = character:FindFirstChild("HumanoidRootPart")
+        return hrp and hrp.Position or nil
+    end
+
+    local function getSilentAimTarget(playersList)
+        local bestPoint = nil
+        local bestDist = math.huge
+        local center = camera.ViewportSize / 2
+        local maxFov = settings.silentAimFov or settings.silentFov or 120
+        local camPos = camera.CFrame.Position
+        local camLook = camera.CFrame.LookVector
+        local players = playersList or Players:GetPlayers()
+
+        for _, p in ipairs(players) do
+            local ch = p.Character
+            if p ~= localPlayer and not isPartyMember(p) and isPlayerVulnerable(p, ch) and isAlive(ch) then
+                local hrp = ch:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local delta = hrp.Position - camPos
+                    -- Frustum filter & distance filter (within 500 studs: 250000 studs^2)
+                    if camLook:Dot(delta) > -5 and delta:Dot(delta) <= 250000 then
+                        local rawPoint = getSilentAimPoint(ch, settings.silentAimBone or settings.silentBone)
+                        if rawPoint then
+                            local point = settings.aimPrediction and applyAimPrediction(rawPoint, ch) or rawPoint
+                            local view, on = camera.WorldToViewportPoint(camera, point)
+                            if on and view.Z > 0 then
+                                local pxDist = (Vector2.new(view.X, view.Y) - center).Magnitude
+                                if pxDist <= maxFov and pxDist < bestDist then
+                                    if canSeeAimPoint(ch, point) then
+                                        bestDist = pxDist
+                                        bestPoint = point
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return bestPoint
     end
 
     local fovCircle = safeDrawing("Circle")
@@ -1901,20 +1991,50 @@ return function(Window, ctx, platform)
         fovCircle.Color = Color3.fromRGB(255, 255, 255)
     end
 
+    local silentFovCircle = safeDrawing("Circle")
+    if silentFovCircle then
+        silentFovCircle.Visible = false
+        silentFovCircle.Thickness = 1
+        silentFovCircle.Filled = false
+        silentFovCircle.Transparency = 0.8
+        silentFovCircle.Color = Color3.fromRGB(255, 75, 75)
+    end
+
     local function updateFovCircle()
-        if not fovCircle then return end
-        if settings.aimbot then
-            local vs = camera.ViewportSize
-            local center = Vector2.new(vs.X / 2, vs.Y / 2)
-            local radius = settings.aimFov
-            fovCircle.Position = center
-            fovCircle.Radius = radius
-            local menuRect = getMenuPanelRect()
-            fovCircle.Visible = not rectOverlapsMenu(
-                center.X - radius, center.Y - radius, radius * 2, radius * 2, menuRect
-            )
-        else
-            fovCircle.Visible = false
+        if not settings.aimbot and not settings.silentAim then
+            if fovCircle and fovCircle.Visible then fovCircle.Visible = false end
+            if silentFovCircle and silentFovCircle.Visible then silentFovCircle.Visible = false end
+            return
+        end
+
+        local menuRect = cachedMenuRect
+        local vs = camera.ViewportSize
+        local center = Vector2.new(vs.X / 2, vs.Y / 2)
+
+        if fovCircle then
+            if settings.aimbot then
+                local radius = settings.aimFov
+                fovCircle.Position = center
+                fovCircle.Radius = radius
+                fovCircle.Visible = not rectOverlapsMenu(
+                    center.X - radius, center.Y - radius, radius * 2, radius * 2, menuRect
+                )
+            else
+                fovCircle.Visible = false
+            end
+        end
+
+        if silentFovCircle then
+            if settings.silentAim then
+                local radius = settings.silentAimFov
+                silentFovCircle.Position = center
+                silentFovCircle.Radius = radius
+                silentFovCircle.Visible = not rectOverlapsMenu(
+                    center.X - radius, center.Y - radius, radius * 2, radius * 2, menuRect
+                )
+            else
+                silentFovCircle.Visible = false
+            end
         end
     end
 
@@ -1923,7 +2043,6 @@ return function(Window, ctx, platform)
     -- reached the game. While the menu is open and the cursor is over it,
     -- sink MB1/MB2/Touch at high priority via ContextActionService.
     local inputBlockBound = false
-    local menuOpen = false
 
     local function isMenuPanelOpen()
         if dock and type(dock.IsPanelOpen) == "function" then
@@ -1970,6 +2089,23 @@ return function(Window, ctx, platform)
                     pcall(function() aimController:release() end)
                 end
             end
+        end
+
+        if open then
+            if dock and dock._panel then
+                local p = dock._panel
+                local pos = p.AbsolutePosition
+                local size = p.AbsoluteSize
+                if pos and size then
+                    cachedMenuRect = { x = pos.X, y = pos.Y, w = size.X, h = size.Y }
+                end
+            elseif Window and Window.visible and Window.pos and Window.size then
+                cachedMenuRect = { x = Window.pos.X, y = Window.pos.Y, w = Window.size.X, h = Window.size.Y }
+            else
+                cachedMenuRect = nil
+            end
+        else
+            cachedMenuRect = nil
         end
 
         -- Dock has its own generic blocker; keep this module-level sink as a
@@ -2071,6 +2207,21 @@ return function(Window, ctx, platform)
         CurrentOption = "All",
         Flag = "WZP_LootCategory",
         Callback = function(v) settings.lootCategory = v end,
+    })
+    VisualsTab:CreateToggle({
+        Name = "Loot Aura",
+        CurrentValue = false,
+        Flag = "WZP_LootAura",
+        Callback = function(v) settings.lootAura = v end,
+    })
+    VisualsTab:CreateSlider({
+        Name = "Loot Aura Range",
+        Range = { 5, 20 },
+        Increment = 1,
+        Suffix = " studs",
+        CurrentValue = 12,
+        Flag = "WZP_LootAuraRange",
+        Callback = function(v) settings.lootAuraRange = v end,
     })
 
     trackSection(VisualsTab, "Boss ESP")
@@ -2307,6 +2458,159 @@ return function(Window, ctx, platform)
         end
     end)
 
+    trackSection(CombatTab, "Silent Aim")
+    CombatTab:CreateToggle({
+        Name = "Silent Aim",
+        CurrentValue = false,
+        Flag = "WZP_SilentAim",
+        Callback = function(v) settings.silentAim = v end,
+    })
+    CombatTab:CreateSlider({
+        Name = "Silent FOV",
+        Range = { 20, 300 },
+        Increment = 10,
+        Suffix = " px",
+        CurrentValue = 120,
+        Flag = "WZP_SilentFov",
+        Callback = function(v)
+            settings.silentAimFov = v
+            settings.silentFov = v
+        end,
+    })
+    CombatTab:CreateDropdown({
+        Name = "Silent Target Bone",
+        Options = { "Head", "Chest", "Spine" },
+        CurrentOption = "Head",
+        Flag = "WZP_SilentBone",
+        Callback = function(v)
+            settings.silentAimBone = v
+            settings.silentBone = v
+        end,
+    })
+
+    trackSection(CombatTab, "Stamina")
+    CombatTab:CreateToggle({
+        Name = "Infinite Stamina",
+        CurrentValue = false,
+        Flag = "WZP_InfiniteStamina",
+        Callback = function(v) settings.infiniteStamina = v end,
+    })
+
+    trackSection(CombatTab, "Auto Fishing")
+    CombatTab:CreateToggle({
+        Name = "Auto Fishing",
+        CurrentValue = false,
+        Flag = "WZP_AutoFishing",
+        Callback = function(v) settings.autoFishing = v end,
+    })
+
+    -- Silent Aim metamethod hook (FireRequest)
+    local activeSilentTarget = nil
+    local oldNamecall = nil
+    if type(hookmetamethod) == "function" and type(getnamecallmethod) == "function" then
+        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+            local method = getnamecallmethod()
+            if running and settings.silentAim and not checkcaller() and method == "FireServer" then
+                if self and self.Name == "FireRequest" then
+                    local targetPoint = activeSilentTarget
+                    if targetPoint then
+                        local args = { ... }
+                        local origin = args[4] or (camera and camera.CFrame.Position)
+                        if origin and typeof(origin) == "Vector3" then
+                            args[1] = (targetPoint - origin).Unit
+                            return oldNamecall(self, unpack(args))
+                        end
+                    end
+                end
+            end
+            return oldNamecall(self, ...)
+        end)
+    end
+
+    -- Loot Aura implementation (Dual: Native TouchHeld auto-hold + 360-degree Aura vacuum)
+    local lootAuraTime = 0
+    local lootAuraSeq = 0
+    local lootAuraRecent = {}
+    local function updateLootAura(dt)
+        local lpMod = peekLazy("LootPickup") or getLootPickupModule()
+        if not settings.lootAura then
+            if lpMod and type(lpMod.SetTouchHeld) == "function" and lpMod.IsTouchHeld() then
+                pcall(lpMod.SetTouchHeld, false)
+            end
+            return
+        end
+
+        -- 1. Enable game native touch-hold pickup for currently aimed / close items
+        if lpMod and type(lpMod.SetTouchHeld) == "function" and not lpMod.IsTouchHeld() then
+            pcall(lpMod.SetTouchHeld, true)
+        end
+
+        lootAuraTime += dt
+        if lootAuraTime < 0.15 then return end
+        lootAuraTime = 0
+
+        local char = localPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local warzLoot = Workspace:FindFirstChild("WarzLoot")
+        if not warzLoot then return end
+        local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
+        local pickupRemote = remotesFolder and remotesFolder:FindFirstChild("PickupLoot")
+        if not pickupRemote then return end
+
+        local myPos = hrp.Position
+        local maxRange = math.min(settings.lootAuraRange or 10.5, 10.8)
+        local now = os.clock()
+
+        for uid, t in pairs(lootAuraRecent) do
+            if now - t > 2.5 then lootAuraRecent[uid] = nil end
+        end
+
+        for _, item in ipairs(warzLoot:GetChildren()) do
+            local uid = item:GetAttribute("LootUid")
+            if uid and not lootAuraRecent[uid] then
+                local pos = nil
+                if item:IsA("Model") then
+                    local p = item.PrimaryPart or item:FindFirstChildWhichIsA("BasePart", true)
+                    pos = p and p.Position
+                elseif item:IsA("BasePart") then
+                    pos = item.Position
+                end
+
+                if pos then
+                    local delta = pos - myPos
+                    local flatDist = Vector3.new(delta.X, 0, delta.Z).Magnitude
+                    if flatDist <= maxRange and math.abs(delta.Y) < 7.5 then
+                        lootAuraRecent[uid] = now
+                        lootAuraSeq = (lootAuraSeq % 9999) + 1
+                        local s = lootAuraSeq
+                        local isInstant = settings.instantPickup == true
+                        task.spawn(function()
+                            pcall(pickupRemote.FireServer, pickupRemote, uid, "prep", s)
+                            task.wait(isInstant and 0.06 or 1.05)
+                            pcall(pickupRemote.FireServer, pickupRemote, uid, "use", s)
+                        end)
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    -- Auto Fishing implementation
+    local autoFishCastTimer = 0
+    local function updateAutoFishing(dt)
+        if not settings.autoFishing then return end
+        autoFishCastTimer += dt
+        if autoFishCastTimer >= 1.5 then
+            autoFishCastTimer = 0
+            local fm = getFishingModule()
+            if fm and type(fm.IsActive) == "function" and not fm.IsActive() then
+                pcall(fm.Press)
+            end
+        end
+    end
+
     -- [[ Connections ]]
     -- Refresh aim/UI every frame; cached loot labels update at 60 Hz so they track the camera smoothly.
     -- Do not hold a stale CurrentCamera across death or camera replacement.
@@ -2321,12 +2625,14 @@ return function(Window, ctx, platform)
         local panelOpen = false
         pcall(function() panelOpen = updateMenuState() end)
 
+        local currentPlayers = Players:GetPlayers()
+
         -- Keep ESP active while the menu is open. Each Drawing primitive
         -- clips itself against the panel rectangle, so visuals outside the menu
         -- remain visible instead of disappearing globally.
-        pcall(updatePlayerEsp)
-        if lootTime >= 1 / 60 then
-            lootTime = math.max(0, lootTime - 1 / 60)
+        pcall(updatePlayerEsp, currentPlayers)
+        if lootTime >= 1 / 30 then
+            lootTime = 0
             pcall(updateLootEsp)
         end
         if bossTime >= 1 / 12 then
@@ -2335,12 +2641,18 @@ return function(Window, ctx, platform)
         end
         pcall(updateFovCircle)
         pcall(updateAimbot, dt)
+        if settings.silentAim then
+            local ok, tPoint = pcall(getSilentAimTarget, currentPlayers)
+            activeSilentTarget = ok and tPoint or nil
+        else
+            activeSilentTarget = nil
+        end
 
-        -- Catalog edits persist; refresh at 2 Hz to catch weapon/config reloads
+        -- Catalog edits persist; refresh at 0.2 Hz (every 5.0s) to catch weapon/config reloads
         -- without scanning every weapon on every render frame.
         if settings.noRecoil then
             recoilTime += dt
-            if recoilTime >= 0.5 then
+            if recoilTime >= 5.0 then
                 recoilTime = 0
                 pcall(applyNoRecoil)
             end
@@ -2350,7 +2662,7 @@ return function(Window, ctx, platform)
 
         if settings.instantPickup then
             pickupTime += dt
-            if pickupTime >= 0.5 then
+            if pickupTime >= 5.0 then
                 pickupTime = 0
                 pcall(applyInstantPickup)
             end
@@ -2380,7 +2692,80 @@ return function(Window, ctx, platform)
                 end
             end)
         end
+
+        -- Infinite Stamina & No Sprint Lock: only set if changed to avoid listener loops
+        if settings.infiniteStamina then
+            pcall(function()
+                if localPlayer:GetAttribute("CSGO_Stamina") ~= 100 then
+                    localPlayer:SetAttribute("CSGO_Stamina", 100)
+                end
+                if localPlayer:GetAttribute("CSGO_SprintLock") ~= false then
+                    localPlayer:SetAttribute("CSGO_SprintLock", false)
+                end
+                if localPlayer:GetAttribute("CSGO_SprintPenalty") ~= 0 then
+                    localPlayer:SetAttribute("CSGO_SprintPenalty", 0)
+                end
+                if localPlayer:GetAttribute("WarzServerStamina") ~= 100 then
+                    localPlayer:SetAttribute("WarzServerStamina", 100)
+                end
+            end)
+        end
+
+        -- Loot Aura (Auto Pickup Nearby Items)
+        pcall(updateLootAura, elapsed)
+
+        -- Auto Fishing
+        pcall(updateAutoFishing, elapsed)
     end))
+
+    table.insert(connections, localPlayer:GetAttributeChangedSignal("CSGO_Stamina"):Connect(function()
+        if running and settings.infiniteStamina then
+            localPlayer:SetAttribute("CSGO_Stamina", 100)
+        end
+    end))
+    table.insert(connections, localPlayer:GetAttributeChangedSignal("CSGO_SprintLock"):Connect(function()
+        if running and settings.infiniteStamina then
+            localPlayer:SetAttribute("CSGO_SprintLock", false)
+        end
+    end))
+
+    local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
+    local fishingStateRemote = remotesFolder and remotesFolder:FindFirstChild("FishingState")
+    if fishingStateRemote then
+        table.insert(connections, fishingStateRemote.OnClientEvent:Connect(function(state)
+            if not running or not settings.autoFishing then return end
+            if type(state) ~= "table" or type(state.phase) ~= "string" then return end
+            local fm = getFishingModule()
+            if not fm then return end
+
+            if state.phase == "reel" then
+                local biteAt = state.biteAt or Workspace.GetServerTimeNow(Workspace)
+                local speed = state.speed or 1
+                local center = state.zoneCenter or 0.5
+                local width = state.zoneWidth or 0.3
+                task.spawn(function()
+                    while running and settings.autoFishing do
+                        local t = Workspace.GetServerTimeNow(Workspace)
+                        local pos = (t - biteAt) * speed % 2
+                        if pos < 0 then pos = pos + 2 end
+                        if pos >= 1 then pos = 2 - pos end
+                        if math.abs(pos - center) <= (width * 0.45) then
+                            pcall(fm.Press)
+                            break
+                        end
+                        task.wait(0.015)
+                    end
+                end)
+            elseif state.phase == "result" then
+                task.delay(2.6, function()
+                    if running and settings.autoFishing then
+                        pcall(fm.Press)
+                    end
+                end)
+            end
+        end))
+    end
+
     table.insert(connections, Players.PlayerRemoving:Connect(function(p)
         if p == aimLockPlayer then aimLockPlayer, aimLockCharacter = nil, nil end
         destroyEntry(p)
@@ -2392,6 +2777,16 @@ return function(Window, ctx, platform)
         running = false
         lifecycleAlive = false
         settings.aimbot = false
+        settings.silentAim = false
+        settings.infiniteStamina = false
+        settings.lootAura = false
+        pcall(function()
+            local lpMod = peekLazy("LootPickup")
+            if lpMod and type(lpMod.SetTouchHeld) == "function" then
+                lpMod.SetTouchHeld(false)
+            end
+        end)
+        settings.autoFishing = false
         settings.autoHeal = false
         settings.noRecoil = false
         pcall(applyNoRecoil, true)
@@ -2410,6 +2805,10 @@ return function(Window, ctx, platform)
         if fovCircle ~= nil then
             pcall(function() fovCircle:Remove() end)
             fovCircle = nil
+        end
+        if silentFovCircle ~= nil then
+            pcall(function() silentFovCircle:Remove() end)
+            silentFovCircle = nil
         end
         local players = {}
         for p in pairs(espCache) do table.insert(players, p) end
@@ -2466,6 +2865,10 @@ return function(Window, ctx, platform)
             platform = platform.id,
             visualBackend = visualBackend.name,
             aimbot = settings.aimbot,
+            silentAim = settings.silentAim,
+            infiniteStamina = settings.infiniteStamina,
+            lootAura = settings.lootAura,
+            autoFishing = settings.autoFishing,
             aimInputMode = aimStatus.mode,
             aimBackend = aimStatus.backend,
             aimKey = aimStatus.key,
