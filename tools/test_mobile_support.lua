@@ -264,7 +264,7 @@ return function(sources)
         "WZP_LootAuraRange", "WZP_BossEsp", "WZP_BossAlert", "WZP_Aimbot",
         "WZP_AimPrediction", "WZP_AimPosition", "WZP_AimMaxDist", "WZP_AimFov",
         "WZP_AimSmooth", "WZP_AutoHeal", "WZP_HealThreshold", "WZP_NoRecoil",
-        "WZP_InstantPickup", "WZP_SilentAim", "WZP_SilentFov", "WZP_SilentBone",
+        "WZP_InstantPickup", "WZP_SilentAim", "WZP_SilentFov", "WZP_SilentBone", "WZP_SilentHitChance",
         "WZP_InfiniteStamina", "WZP_AutoFishing",
     }
     for _, layout in ipairs({ "pc", "mobile" }) do
@@ -297,13 +297,18 @@ return function(sources)
                             return compile(sources[layout], layout .. "-adapter-test")
                         end,
                     })
-                    expect(env.RAVEN_WARZPVP_VER, "1.8.2", "shared runtime version")
+                    expect(env.RAVEN_WARZPVP_VER, "1.8.3", "shared runtime version")
                     for _, flag in ipairs(commonFlags) do
                         assert(Window.itemsByFlag[flag], layout .. " missing control: " .. flag)
                     end
                     expect(Window.flags.WZP_Aimbot, false, "initial aimbot")
                     expect(Window.flags.WZP_AutoHeal, false, "initial auto heal")
                     expect(Window.flags.WZP_LootAura, false, "initial loot aura")
+                    expect(Window.flags.WZP_SilentBone, "Auto", "initial Silent Aim position")
+                    expect(Window.flags.WZP_SilentHitChance, 100, "initial Silent Aim chance")
+                    local status = handle.GetStatus()
+                    expect(status.silentAimPosition, "Auto", "Silent Aim runtime position")
+                    expect(status.silentAimHitChance, 100, "Silent Aim runtime chance")
                 end)
                 if handle then handle.Destroy() end
                 assert(ok, err)

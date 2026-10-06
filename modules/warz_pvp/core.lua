@@ -1,6 +1,6 @@
 -- ============================================================
 -- N3Z WarZPVP shared core
--- v1.8.2 - shared features with PC/Mobile adapters
+-- v1.8.3 - Silent Aim Auto position and per-shot hit chance
 -- ============================================================
 
 return function(Window, ctx, platform)
@@ -161,7 +161,7 @@ return function(Window, ctx, platform)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.8.2"
+    environment.RAVEN_WARZPVP_VER = "1.8.3"
 
     local running = true
     local connections = {}
@@ -198,8 +198,9 @@ return function(Window, ctx, platform)
         silentAim = false,
         silentAimFov = 120,
         silentFov = 120,
-        silentAimBone = "Head",
-        silentBone = "Head",
+        silentAimBone = "Auto",
+        silentAimHitChance = 100,
+        silentBone = "Auto",
         infiniteStamina = false,
         lootAura = false,
         lootAuraRange = 10.5,
@@ -776,7 +777,7 @@ return function(Window, ctx, platform)
         return group ~= nil and group[name] == true
     end
 
-    local function getExactAimPoint(character, mode)
+    local function getExactAimPoint(character, mode, requireDataShapes)
         mode = BONE_GROUPS[mode] and mode or "Auto"
 
         -- WarzHitboxes.DataShapes returns the exact current geometry used by
@@ -798,6 +799,7 @@ return function(Window, ctx, platform)
                 if point then return point, name end
             end
         end
+        if requireDataShapes and character:GetAttribute("WarzDataHitboxes") == true then return nil end
         return getBoneAimPoint(character, mode)
     end
 
@@ -1923,7 +1925,10 @@ return function(Window, ctx, platform)
 
     local function getSilentAimPoint(character, boneName)
         if not character then return nil end
-        boneName = boneName or settings.silentAimBone or settings.silentBone or "Head"
+        boneName = boneName or settings.silentAimBone or settings.silentBone or "Auto"
+        if boneName == "Auto" then
+            return getExactAimPoint(character, "Auto", true)
+        end
         local hitboxes = getWarzHitboxes()
         if hitboxes then
             local shapeName = boneName == "Head" and "Bip01_Head"
@@ -2491,6 +2496,17 @@ return function(Window, ctx, platform)
         end,
     })
     CombatTab:CreateSlider({
+        Name = "Silent Hit Chance",
+        Range = { 0, 100 },
+        Increment = 1,
+        Suffix = " %",
+        CurrentValue = 100,
+        Flag = "WZP_SilentHitChance",
+        Callback = function(v)
+            settings.silentAimHitChance = math.clamp(tonumber(v) or 100, 0, 100)
+        end,
+    })
+    CombatTab:CreateSlider({
         Name = "Silent FOV",
         Range = { 20, 300 },
         Increment = 10,
@@ -2503,9 +2519,9 @@ return function(Window, ctx, platform)
         end,
     })
     CombatTab:CreateDropdown({
-        Name = "Silent Target Bone",
-        Options = { "Head", "Chest", "Spine" },
-        CurrentOption = "Head",
+        Name = "Silent Aim Position",
+        Options = { "Auto", "Head", "Chest", "Spine" },
+        CurrentOption = "Auto",
         Flag = "WZP_SilentBone",
         Callback = function(v)
             settings.silentAimBone = v
@@ -2537,6 +2553,7 @@ return function(Window, ctx, platform)
         and type(hookmetamethod) == "function" and type(getnamecallmethod) == "function"
         and type(checkcaller) == "function" then
         local fireServer = fireRequest.FireServer
+        local silentAimRandom = Random.new()
         oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
             local method = getnamecallmethod()
             if running and settings.silentAim and self == fireRequest
@@ -2544,7 +2561,9 @@ return function(Window, ctx, platform)
                 camera = Workspace.CurrentCamera or camera
                 local args = table.pack(...)
                 local origin = args[4] or (camera and camera.CFrame.Position)
-                if typeof(origin) == "Vector3" then
+                local chance = math.clamp(tonumber(settings.silentAimHitChance) or 100, 0, 100)
+                if typeof(origin) == "Vector3" and (chance >= 100
+                    or (chance > 0 and silentAimRandom:NextNumber(0, 100) < chance)) then
                     -- Read animated hitboxes at shot time; a render-frame cache can be stale.
                     local ok, targetPoint = pcall(getSilentAimTarget, nil, origin)
                     if ok and typeof(targetPoint) == "Vector3" then
@@ -2899,6 +2918,8 @@ return function(Window, ctx, platform)
             visualBackend = visualBackend.name,
             aimbot = settings.aimbot,
             silentAim = settings.silentAim,
+            silentAimHitChance = settings.silentAimHitChance,
+            silentAimPosition = settings.silentAimBone,
             infiniteStamina = settings.infiniteStamina,
             lootAura = settings.lootAura,
             autoFishing = settings.autoFishing,

@@ -20,8 +20,11 @@ core = (root / "modules/warz_pvp/core.lua").read_text(encoding="utf-8")
 selection = section(core, "    local function getSilentAimPoint", "    local fovCircle =")
 hook = section(core, "    -- Silent Aim metamethod hook", "    -- Loot Aura implementation")
 prediction = section(core, "    local function applyAimPrediction", "    local aimRayParams =")
+geometry = section(core, "    local AIM_POSITION_OPTIONS", "    -- Lightweight screen bounds.")
+ballistics = section(core, "    local ballisticCacheWeaponId", "    local function targetLinearVelocity")
 toggle_start = core.index('    trackSection(CombatTab, "Silent Aim")')
 toggle = section(core[toggle_start:], "    CombatTab:CreateToggle({", "    CombatTab:CreateSlider({")
+controls = section(core[toggle_start:], "    CombatTab:CreateToggle({", '    trackSection(CombatTab, "Stamina")')
 
 
 def fixture(body, dependencies, returns):
@@ -30,12 +33,15 @@ def fixture(body, dependencies, returns):
 
 
 sources = {
+    "controls": fixture(controls, "settings CombatTab getWarzHitboxes getCurrentBallistics", "true"),
+    "ballistics": fixture(ballistics, "getCombatSettings getWarzProjectile", "getCurrentBallistics"),
     "toggle": fixture(toggle, "settings CombatTab getWarzHitboxes getCurrentBallistics", "true"),
-    "selection": fixture(selection, "Players localPlayer camera settings getWarzHitboxes "
+    "selection": fixture(geometry + "\n" + selection, "Players localPlayer camera settings getWarzHitboxes "
+        "getLiveAim findLiveBone boneWorldPosition bodyPart "
         "isPartyMember isPlayerVulnerable isAlive canSeeAimPoint applyAimPrediction",
         "{point = getSilentAimPoint, target = getSilentAimTarget}"),
     "hook": fixture(hook, "running settings camera game ReplicatedStorage hookmetamethod "
-        "getnamecallmethod setnamecallmethod checkcaller getSilentAimTarget Workspace", "true"),
+        "getnamecallmethod setnamecallmethod checkcaller getSilentAimTarget Workspace Random", "true"),
     "prediction": fixture(prediction, "settings camera predictionState getCurrentBallistics "
         "targetLinearVelocity solveBallisticTime", "applyAimPrediction"),
 }

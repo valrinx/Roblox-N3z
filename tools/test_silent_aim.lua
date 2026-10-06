@@ -15,6 +15,8 @@ return function(sources)
     local makeHook = assert(loadstring(sources.hook, "@silent-hook-test"))()
     local makePrediction = assert(loadstring(sources.prediction, "@silent-prediction-test"))()
     local makeToggle = assert(loadstring(sources.toggle, "@silent-toggle-test"))()
+    local makeControls = assert(loadstring(sources.controls, "@silent-controls-test"))()
+    local makeBallistics = assert(loadstring(sources.ballistics, "@silent-ballistics-test"))()
 
     local function withTargets(callback)
         local models, players, shapes, predictions, sightChecks = {}, {}, {}, {}, {}
@@ -45,7 +47,10 @@ return function(sources)
             end }
         local settings = { silentAimBone = "Head", silentAimFov = 20, aimPrediction = true }
         local deps = {
-            Players = { GetPlayers = function() return players end }, localPlayer = {}, camera = camera, settings = settings,
+            Players = { GetPlayers = function() return players end,
+                GetPlayerFromCharacter = function() return nil end }, localPlayer = {}, camera = camera, settings = settings,
+            getLiveAim = function() return nil end,
+            bodyPart = function(character, name) return character:FindFirstChild(name) end,
             getWarzHitboxes = function() return { DataShapes = function(character) return shapes[character] end } end,
             isPartyMember = function(player) return player.party == true end,
             isPlayerVulnerable = function(player) return player.protected ~= true end,
@@ -79,6 +84,64 @@ return function(sources)
             near(api.point(p.Character, "Chest"), Vector3.new(0, -2, -100), "incorrect chest center")
             near(api.point(p.Character, "Spine"), Vector3.new(0, -3, -100), "incorrect spine center")
         end)
+    end)
+    test("Auto chooses the real hitbox nearest the FOV center like Aimbot", function()
+        withTargets(function(f)
+            local p = f.add(0)
+            f.shapes[p.Character][1].cf = CFrame.new(15, 0, -100)
+            near(f.api().point(p.Character, "Auto"), Vector3.new(0, -2, -100), "Auto did not select the chest nearest center")
+        end)
+    end)
+    test("Auto waits for data hitboxes instead of aiming at offset legacy parts", function()
+        withTargets(function(f)
+            local p = f.add(0)
+            f.deps.getWarzHitboxes = function() return nil end
+            expect(f.api().point(p.Character, "Auto"), nil, "unready Auto used legacy geometry")
+        end)
+    end)
+    test("Auto does not redirect to a data hitbox behind the camera", function()
+        withTargets(function(f)
+            local p = f.add(0)
+            for _, shape in ipairs(f.shapes[p.Character]) do shape.cf = CFrame.new(0, 0, 100) end
+            expect(f.api().point(p.Character, "Auto"), nil, "Auto selected a hitbox behind camera")
+        end)
+    end)
+    test("Silent controls expose hit chance and default to Auto", function()
+        local controls, settings = {}, {}
+        local function capture(_, spec) controls[spec.Flag] = spec end
+        makeControls({ settings = settings, CombatTab = { CreateToggle = capture, CreateSlider = capture,
+            CreateDropdown = capture }, getWarzHitboxes = function() end, getCurrentBallistics = function() end })
+        local chance = assert(controls.WZP_SilentHitChance, "hit chance control missing")
+        expect(chance.Range[1], 0, "minimum hit chance")
+        expect(chance.Range[2], 100, "maximum hit chance")
+        expect(chance.CurrentValue, 100, "initial hit chance")
+        chance.Callback(73)
+        expect(settings.silentAimHitChance, 73, "chance callback")
+        local position = controls.WZP_SilentBone
+        expect(position.CurrentOption, "Auto", "default position")
+        assert(table.find(position.Options, "Auto"), "Auto option missing")
+        position.Callback("Auto")
+        expect(settings.silentAimBone, "Auto", "Auto callback")
+    end)
+    test("ballistics follow rifle, SMG and sniper changes without reusing the previous gun", function()
+        local data = {
+            HoneyBadger = { Speed = 500, Mass = 1, Immediate = false },
+            UZI = { Speed = 500, Mass = 1, Immediate = false },
+            AW_CITYSS2FTK = { Speed = 800, Mass = 2.6, Immediate = false },
+        }
+        local cs = { CurrentWeaponId = "HoneyBadger" }
+        cs.BallisticsFor = function() return data[cs.CurrentWeaponId] end
+        local get = makeBallistics({ getCombatSettings = function() return cs end,
+            getWarzProjectile = function() return { Scale = 2.687, Gravity = Vector3.new(0,-26.360,0),
+                StepSeconds = 1/60, Lifetime = 5 } end })
+        for _, id in ipairs({"HoneyBadger", "UZI", "AW_CITYSS2FTK", "HoneyBadger"}) do
+            cs.CurrentWeaponId = id
+            local b = get()
+            expect(b.weaponId, id, "weapon cache")
+            expect(b.rawSpeed, data[id].Speed, "raw speed")
+            assert(math.abs(b.speed - (id == "AW_CITYSS2FTK" and 2149.6 or 1343.5)) < 0.0001, "projectile speed")
+            expect(b.mass, id == "AW_CITYSS2FTK" and 2.6 or 1, "projectile mass")
+        end
     end)
     test("data-hitbox characters are not redirected to an inaccurate legacy point while loading", function()
         withTargets(function(f)
@@ -149,8 +212,9 @@ return function(sources)
     local function withHook(callback)
         -- Keep the transport local; real Vector3/CFrame namecalls below still
         -- exercise the executor context that the previous fixture missed.
-        local installed, sent, sentMethod, transport, targetCalls
+        local installed, sent, sentMethod, transport, targetCalls, roll, rollCount
         targetCalls = 0
+        roll, rollCount = 49, 0
         local remote = { Name = "FireRequest", IsA = function(_, class) return class == "RemoteEvent" end,
             FireServer = function(_, ...)
                 sent, sentMethod, transport = table.pack(...), "FireServer", "direct"
@@ -175,6 +239,11 @@ return function(sources)
             end,
             getnamecallmethod = function() return "FireServer" end, checkcaller = function() return false end,
             setnamecallmethod = setnamecallmethod,
+            Random = { new = function() return { NextNumber = function(_, low, high)
+                expect(low, 0, "chance lower bound"); expect(high, 100, "chance upper bound")
+                rollCount += 1
+                return roll
+            end } end },
             getSilentAimTarget = function(_, origin)
                 targetCalls = targetCalls + 1
                 return point
@@ -186,10 +255,49 @@ return function(sources)
             invoke = function(...) assert(installed, "hook not installed"); installed(remote, ...) end,
             point = function(value) point = value end, sent = function() return sent end,
             method = function() return sentMethod end, transport = function() return transport end,
+            roll = function(value) roll = value end, rolls = function() return rollCount end,
             calls = function() return targetCalls end,
             installed = function() return type(installed) == "function" end })
         assert(ok, err)
     end
+    test("zero percent leaves shots untouched without selecting a target", function()
+        withHook(function(f)
+            f.deps.settings.silentAimHitChance = 0
+            f.install()
+            f.invoke(Vector3.new(0,0,-1),0.25,nil,Vector3.zero,nil,nil,"gun-root",nil)
+            near(f.sent()[1], Vector3.new(0,0,-1), "zero chance changed direction")
+            expect(f.calls(), 0, "zero chance selected a target")
+            expect(f.rolls(), 0, "zero chance consumed randomness")
+            expect(f.sent().n, 8, "skipped argument count")
+        end)
+    end)
+    test("one hundred percent redirects every eligible shot without sampling", function()
+        withHook(function(f)
+            f.deps.settings.silentAimHitChance = 100
+            f.roll(100)
+            f.install()
+            f.invoke(Vector3.new(0,0,-1),0.25,{},Vector3.zero)
+            near(f.sent()[1], Vector3.new(10,0,-100).Unit, "full chance failed to redirect")
+            expect(f.calls(), 1, "full chance target selection")
+            expect(f.rolls(), 0, "full chance consumed randomness")
+        end)
+    end)
+    test("partial hit chance samples once per shot and preserves skipped requests", function()
+        withHook(function(f)
+            f.deps.settings.silentAimHitChance = 50
+            f.install()
+            f.roll(49.99)
+            f.invoke(Vector3.new(0,0,-1),0.25,{},Vector3.zero)
+            near(f.sent()[1], Vector3.new(10,0,-100).Unit, "roll below threshold was skipped")
+            f.roll(50)
+            f.invoke(Vector3.new(0,0,-1),0.33,nil,Vector3.zero,nil,nil,"gun-root",nil)
+            near(f.sent()[1], Vector3.new(0,0,-1), "roll at threshold redirected")
+            expect(f.calls(), 1, "skipped shot selected a target")
+            expect(f.rolls(), 2, "chance was not sampled once per shot")
+            expect(f.sent().n, 8, "skipped shot argument count")
+            expect(f.sent()[2], 0.33, "skipped shot spread seed")
+        end)
+    end)
     for _, outcome in ipairs({ "point", "missing", "error" }) do
         test("shot forwarding restores FireServer after nested namecalls: " .. outcome, function()
             withHook(function(f)
