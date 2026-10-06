@@ -20,6 +20,7 @@ return function(sources)
 
     local function withTargets(callback)
         local models, players, shapes, predictions, sightChecks = {}, {}, {}, {}, {}
+        local shapeCalls = 0
         local function add(x)
             local model = Instance.new("Model")
             model:SetAttribute("WarzDataHitboxes", true)
@@ -51,7 +52,10 @@ return function(sources)
                 GetPlayerFromCharacter = function() return nil end }, localPlayer = {}, camera = camera, settings = settings,
             getLiveAim = function() return nil end,
             bodyPart = function(character, name) return character:FindFirstChild(name) end,
-            getWarzHitboxes = function() return { DataShapes = function(character) return shapes[character] end } end,
+            getWarzHitboxes = function() return { DataShapes = function(character)
+                shapeCalls += 1
+                return shapes[character]
+            end } end,
             isPartyMember = function(player) return player.party == true end,
             isPlayerVulnerable = function(player) return player.protected ~= true end,
             isAlive = function(character) return character:GetAttribute("Dead") ~= true end,
@@ -66,6 +70,7 @@ return function(sources)
         }
         local ok, err = pcall(callback, { add = add, deps = deps, settings = settings,
             shapes = shapes, predictions = predictions, sightChecks = sightChecks,
+            shapeCalls = function() return shapeCalls end,
             api = function() return makeSelection(deps) end })
         for _, model in ipairs(models) do model:Destroy() end
         assert(ok, err)
@@ -104,6 +109,17 @@ return function(sources)
             local p = f.add(0)
             for _, shape in ipairs(f.shapes[p.Character]) do shape.cf = CFrame.new(0, 0, 100) end
             expect(f.api().point(p.Character, "Auto"), nil, "Auto selected a hitbox behind camera")
+        end)
+    end)
+    test("shared exact selection keeps fixed body groups while Auto can select any shape", function()
+        withTargets(function(f)
+            local p = f.add(0)
+            f.shapes[p.Character][1].cf = CFrame.new(15,0,-100)
+            table.insert(f.shapes[p.Character], {name="Bip01_L_Foot",cf=CFrame.new(0,0,-100)})
+            local api=f.api()
+            near(api.exact(p.Character,"Head",true),Vector3.new(15,0,-100),"Head selected another group")
+            near(api.exact(p.Character,"Body",true),Vector3.new(0,-2,-100),"Body selected another group")
+            near(api.exact(p.Character,"Auto",true),Vector3.new(0,0,-100),"Auto omitted the nearest limb")
         end)
     end)
     test("Silent controls expose hit chance and default to Auto", function()
@@ -195,6 +211,78 @@ return function(sources)
             f.add(1).protected = true
             f.add(2).Character:SetAttribute("Dead", true)
             expect(f.api().target(), nil, "ineligible target selected")
+        end)
+    end)
+    test("players wholly outside Silent FOV do not trigger expensive hitbox generation", function()
+        withTargets(function(f)
+            f.add(200)
+            expect(f.api().target(), nil, "outside target selected")
+            expect(f.shapeCalls(), 0, "outside character generated hitboxes")
+        end)
+    end)
+    test("broad filtering preserves a limb inside FOV when the root is outside", function()
+        withTargets(function(f)
+            local p = f.add(30)
+            f.shapes[p.Character][1].cf = CFrame.new(19,0,-100)
+            near(f.api().target(), Vector3.new(119,0,-100), "edge hitbox was rejected by root filtering")
+        end)
+    end)
+    test("offscreen roots can still have an eligible hitbox at the viewport edge", function()
+        withTargets(function(f)
+            local p = f.add(58)
+            f.settings.silentAimFov = 50
+            f.shapes[p.Character][1].cf = CFrame.new(48,0,-100)
+            near(f.api().target(), Vector3.new(148,0,-100), "viewport-edge hitbox was rejected")
+        end)
+    end)
+    test("broad filtering does not reject close targets intersecting the camera plane", function()
+        withTargets(function(f)
+            local p = f.add(0)
+            p.Character.HumanoidRootPart.Position = Vector3.new(0,0,-5)
+            f.shapes[p.Character][1].cf = CFrame.new(0,0,-3)
+            near(f.api().target(), Vector3.new(100,0,-3), "close hitbox was rejected")
+        end)
+    end)
+    test("candidates unable to beat the current target avoid hitbox generation", function()
+        withTargets(function(f)
+            f.add(0); f.add(15)
+            near(f.api().target(), Vector3.new(100,0,-100), "nearest hitbox changed")
+            expect(f.shapeCalls(), 1, "inferior candidate generated hitboxes")
+        end)
+    end)
+    test("legacy custom rigs bypass the WarZ root-envelope assumption", function()
+        withTargets(function(f)
+            local p=f.add(200)
+            p.Character:SetAttribute("WarzDataHitboxes",false)
+            f.shapes[p.Character][1].cf=CFrame.new(0,0,-100)
+            near(f.api().target(),Vector3.new(100,0,-100),"custom rig hitbox was culled")
+        end)
+    end)
+    test("perspective filtering preserves in-FOV hitboxes across near and distant roots", function()
+        withTargets(function(f)
+            local p=f.add(0)
+            local camera=workspace.CurrentCamera
+            f.deps.camera=camera
+            f.settings.aimPrediction=false
+            local api=f.api()
+            local frame=camera.CFrame
+            for _,depth in ipairs({15,30,100,300})do
+                for _,x in ipairs({-30,-15,-5,0,5,15,30})do
+                    local rootPoint=frame.Position+frame.LookVector*depth+frame.RightVector*x
+                    p.Character.HumanoidRootPart.Position=rootPoint
+                    local shift=x<0 and 8 or -8
+                    local point=rootPoint+frame.RightVector*shift
+                    f.shapes[p.Character][1].cf=CFrame.new(point)
+                    local view,on=camera:WorldToViewportPoint(point)
+                    local pixels=(Vector2.new(view.X,view.Y)-camera.ViewportSize/2).Magnitude
+                    local result=api.target()
+                    if on and view.Z>0 and pixels<=f.settings.silentAimFov then
+                        near(result,point,"perspective filtering dropped an eligible hitbox")
+                    else
+                        expect(result,nil,"outside-FOV hitbox selected")
+                    end
+                end
+            end
         end)
     end)
     test("prediction measures travel from the supplied firing origin", function()

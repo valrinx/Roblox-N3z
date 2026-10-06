@@ -1,6 +1,6 @@
 -- ============================================================
 -- N3Z WarZPVP shared core
--- v1.8.3 - Silent Aim Auto position and per-shot hit chance
+-- v1.8.4 - reduce Silent Aim hitbox work outside the FOV
 -- ============================================================
 
 return function(Window, ctx, platform)
@@ -161,7 +161,7 @@ return function(Window, ctx, platform)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.8.3"
+    environment.RAVEN_WARZPVP_VER = "1.8.4"
 
     local running = true
     local connections = {}
@@ -717,11 +717,21 @@ return function(Window, ctx, platform)
         },
     }
 
-    local function closestScreenPoint(points)
+    local function shapeAllowed(mode, name)
+        if mode == "Auto" then return true end
+        local group = SHAPE_GROUPS[mode]
+        return group ~= nil and group[name] == true
+    end
+
+    local function closestScreenPoint(points, shapeMode)
         local center = camera.ViewportSize / 2
         local bestPoint, bestName, bestPixels = nil, nil, math.huge
         for _, item in ipairs(points) do
             local point, name = item.point, item.name
+            if shapeMode then
+                point = shapeAllowed(shapeMode, name) and typeof(item.cf) == "CFrame"
+                    and item.cf.Position or nil
+            end
             if typeof(point) == "Vector3" then
                 local view, on = camera.WorldToViewportPoint(camera, point)
                 if on and view.Z > 0 then
@@ -771,12 +781,6 @@ return function(Window, ctx, platform)
         return fallback and fallback.Position or nil, fallback and fallback.Name or nil
     end
 
-    local function shapeAllowed(mode, name)
-        if mode == "Auto" then return true end
-        local group = SHAPE_GROUPS[mode]
-        return group ~= nil and group[name] == true
-    end
-
     local function getExactAimPoint(character, mode, requireDataShapes)
         mode = BONE_GROUPS[mode] and mode or "Auto"
 
@@ -786,16 +790,7 @@ return function(Window, ctx, platform)
         if warzHitboxes and type(warzHitboxes.DataShapes) == "function" then
             local ok, shapes = pcall(warzHitboxes.DataShapes, character, false)
             if ok and type(shapes) == "table" then
-                local points = {}
-                for _, shape in ipairs(shapes) do
-                    if shapeAllowed(mode, shape.name) and typeof(shape.cf) == "CFrame" then
-                        table.insert(points, {
-                            point = shape.cf.Position,
-                            name = shape.name,
-                        })
-                    end
-                end
-                local point, name = closestScreenPoint(points)
+                local point, name = closestScreenPoint(shapes, mode)
                 if point then return point, name end
             end
         end
@@ -1964,6 +1959,29 @@ return function(Window, ctx, platform)
         return hrp and hrp.Position or nil
     end
 
+    local function silentCandidateMinimumSquared(character, root, center, limit)
+        -- WarZ data rigs are about 6 studs tall. A 12-stud root envelope
+        -- conservatively includes animated limbs; legacy/custom rigs bypass it.
+        if character:GetAttribute("WarzDataHitboxes") ~= true then return 0 end
+        local radius = 12
+        local view = camera.WorldToViewportPoint(camera, root.Position)
+        if view.Z <= radius then return 0 end
+        local dx, dy = math.abs(view.X - center.X), math.abs(view.Y - center.Y)
+        if dx * dx + dy * dy <= limit * limit then return 0 end
+
+        -- Project the envelope's near face to bound perspective expansion.
+        -- An offscreen root can still have a visible limb inside the FOV.
+        local frame = camera.CFrame
+        local nearPoint = root.Position - frame.LookVector * radius
+        local nearView = camera.WorldToViewportPoint(camera, nearPoint)
+        local cornerView = camera.WorldToViewportPoint(camera,
+            nearPoint + frame.RightVector * radius + frame.UpVector * radius)
+        local padX = math.abs(nearView.X - view.X) + math.abs(cornerView.X - nearView.X)
+        local padY = math.abs(nearView.Y - view.Y) + math.abs(cornerView.Y - nearView.Y)
+        local minX, minY = math.max(0, dx - padX), math.max(0, dy - padY)
+        return minX * minX + minY * minY
+    end
+
     local function getSilentAimTarget(playersList, shotOrigin)
         if not camera then return nil end
         local bestPoint, bestCharacter = nil, nil
@@ -1975,6 +1993,7 @@ return function(Window, ctx, platform)
         local players = playersList or Players:GetPlayers()
 
         for _, p in ipairs(players) do
+            if bestDist == 0 then break end
             local ch = p.Character
             if p ~= localPlayer and not isPartyMember(p) and isPlayerVulnerable(p, ch) and isAlive(ch) then
                 local hrp = ch:FindFirstChild("HumanoidRootPart")
@@ -1982,7 +2001,11 @@ return function(Window, ctx, platform)
                     local delta = hrp.Position - camPos
                     -- Frustum filter & distance filter (within 500 studs: 250000 studs^2)
                     if camLook:Dot(delta) > -5 and delta:Dot(delta) <= 250000 then
-                        local rawPoint = getSilentAimPoint(ch, settings.silentAimBone or settings.silentBone)
+                        local minimum = silentCandidateMinimumSquared(ch, hrp, center, math.min(maxFov, bestDist))
+                        local rawPoint
+                        if minimum <= maxFov * maxFov and minimum < bestDist * bestDist then
+                            rawPoint = getSilentAimPoint(ch, settings.silentAimBone or settings.silentBone)
+                        end
                         if rawPoint then
                             local view, on = camera.WorldToViewportPoint(camera, rawPoint)
                             if on and view.Z > 0 then

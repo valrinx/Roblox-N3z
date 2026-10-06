@@ -297,7 +297,7 @@ return function(sources)
                             return compile(sources[layout], layout .. "-adapter-test")
                         end,
                     })
-                    expect(env.RAVEN_WARZPVP_VER, "1.8.3", "shared runtime version")
+                    expect(env.RAVEN_WARZPVP_VER, "1.8.4", "shared runtime version")
                     for _, flag in ipairs(commonFlags) do
                         assert(Window.itemsByFlag[flag], layout .. " missing control: " .. flag)
                     end

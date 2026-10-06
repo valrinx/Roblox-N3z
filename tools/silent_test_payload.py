@@ -39,7 +39,7 @@ sources = {
     "selection": fixture(geometry + "\n" + selection, "Players localPlayer camera settings getWarzHitboxes "
         "getLiveAim findLiveBone boneWorldPosition bodyPart "
         "isPartyMember isPlayerVulnerable isAlive canSeeAimPoint applyAimPrediction",
-        "{point = getSilentAimPoint, target = getSilentAimTarget}"),
+        "{point = getSilentAimPoint, target = getSilentAimTarget, exact = getExactAimPoint}"),
     "hook": fixture(hook, "running settings camera game ReplicatedStorage hookmetamethod "
         "getnamecallmethod setnamecallmethod checkcaller getSilentAimTarget Workspace Random", "true"),
     "prediction": fixture(prediction, "settings camera predictionState getCurrentBallistics "
