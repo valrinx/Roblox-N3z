@@ -65,7 +65,7 @@ local MODULES = {
           pc = "modules/hypershot/pc.lua",
           mobile = "modules/hypershot/mobile.lua",
       } },
-    { id = "warzpvp", name = "WarZPVP", configName = "WarZ", version = "v1.8.5", game = "WarZPVP OPEN BETA",
+    { id = "warzpvp", name = "WarZPVP", configName = "WarZ", version = "v1.8.6", game = "WarZPVP OPEN BETA",
       placeIds = { 135187059974536 }, file = "modules/warz_pvp.lua", envKey = "__RAVEN_WARZPVP",
       coreFile = "modules/warz_pvp/core.lua",
       platformFiles = {

@@ -1,4 +1,4 @@
--- N3Z WarZPVP v1.8.5 - Mobile adapter
+-- N3Z WarZPVP v1.8.6 - Mobile adapter
 return {
     id = "mobile",
 

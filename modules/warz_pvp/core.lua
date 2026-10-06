@@ -1,6 +1,6 @@
 -- ============================================================
 -- N3Z WarZPVP shared core
--- v1.8.5 - adjustable No Recoil strength from 0 to 100 percent
+-- v1.8.6 - reduce ESP/support work and reuse the Silent Aim hook on reload
 -- ============================================================
 
 return function(Window, ctx, platform)
@@ -161,10 +161,22 @@ return function(Window, ctx, platform)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.8.5"
+    environment.RAVEN_WARZPVP_VER = "1.8.6"
 
     local running = true
     local connections = {}
+    -- Keep one dense roster for ESP and aim scans; joins/leaves update it in place.
+    local playerList = Players:GetPlayers()
+    local function getPlayers()
+        return playerList
+    end
+    table.insert(connections, Players.PlayerAdded:Connect(function(player)
+        if not table.find(playerList, player) then playerList[#playerList + 1] = player end
+    end))
+    table.insert(connections, Players.PlayerRemoving:Connect(function(player)
+        local index = table.find(playerList, player)
+        if index then table.remove(playerList, index) end
+    end))
     local uiSections = {} -- sections this module created (for clean reload)
     local espCache = {}
 
@@ -366,57 +378,65 @@ return function(Window, ctx, platform)
             local removed = false
             local proxy = {}
 
-            local function apply()
+            local function apply(key)
                 if removed or not inst or not inst.Parent then return end
+                local all = key == nil
                 local alpha = math.clamp(tonumber(state.Transparency) or 1, 0, 1)
-                inst.Visible = state.Visible == true
-                inst.ZIndex = math.max(1, math.floor(tonumber(state.ZIndex) or 0) + 1)
+                if all or key == "Visible" then inst.Visible = state.Visible == true end
+                if all or key == "ZIndex" then
+                    inst.ZIndex = math.max(1, math.floor(tonumber(state.ZIndex) or 0) + 1)
+                end
 
                 if drawingType == "Text" then
-                    inst.Text = tostring(state.Text or "")
-                    inst.TextSize = math.max(1, tonumber(state.Size) or 14)
-                    inst.TextColor3 = state.Color
-                    inst.TextTransparency = 1 - alpha
-                    inst.TextStrokeColor3 = Color3.new(0, 0, 0)
-                    inst.TextStrokeTransparency = state.Outline and (1 - alpha) or 1
-                    inst.AnchorPoint = state.Center and Vector2.new(0.5, 0) or Vector2.new(0, 0)
-                    inst.Position = UDim2.fromOffset(state.Position.X, state.Position.Y)
+                    if all or key == "Text" then inst.Text = tostring(state.Text or "") end
+                    if all or key == "Size" then inst.TextSize = math.max(1, tonumber(state.Size) or 14) end
+                    if all or key == "Color" then inst.TextColor3 = state.Color end
+                    if all or key == "Transparency" then inst.TextTransparency = 1 - alpha end
+                    if all then inst.TextStrokeColor3 = Color3.new(0, 0, 0) end
+                    if all or key == "Outline" or key == "Transparency" then
+                        inst.TextStrokeTransparency = state.Outline and (1 - alpha) or 1
+                    end
+                    if all or key == "Center" then
+                        inst.AnchorPoint = state.Center and Vector2.new(0.5, 0) or Vector2.zero
+                    end
+                    if all or key == "Position" then inst.Position = UDim2.fromOffset(state.Position.X, state.Position.Y) end
                 elseif drawingType == "Image" then
-                    inst.Image = tostring(state.Image or "")
-                    inst.ImageColor3 = state.Color
-                    inst.ImageTransparency = 1 - alpha
-                    inst.Position = UDim2.fromOffset(state.Position.X, state.Position.Y)
-                    inst.Size = UDim2.fromOffset(math.max(0, state.Size.X), math.max(0, state.Size.Y))
+                    if all or key == "Image" then inst.Image = tostring(state.Image or "") end
+                    if all or key == "Color" then inst.ImageColor3 = state.Color end
+                    if all or key == "Transparency" then inst.ImageTransparency = 1 - alpha end
+                    if all or key == "Position" then inst.Position = UDim2.fromOffset(state.Position.X, state.Position.Y) end
+                    if all or key == "Size" then inst.Size = UDim2.fromOffset(math.max(0, state.Size.X), math.max(0, state.Size.Y)) end
                 elseif drawingType == "Line" then
-                    local from = state.From
-                    local to = state.To
-                    local delta = to - from
-                    local length = delta.Magnitude
-                    inst.Position = UDim2.fromOffset((from.X + to.X) * 0.5, (from.Y + to.Y) * 0.5)
-                    inst.Size = UDim2.fromOffset(math.max(0.01, length), math.max(1, tonumber(state.Thickness) or 1))
-                    inst.Rotation = math.deg(math.atan2(delta.Y, delta.X))
-                    inst.BackgroundColor3 = state.Color
-                    inst.BackgroundTransparency = 1 - alpha
+                    if all or key == "From" or key == "To" or key == "Thickness" then
+                        local from, to = state.From, state.To
+                        local delta = to - from
+                        inst.Size = UDim2.fromOffset(math.max(0.01, delta.Magnitude), math.max(1, tonumber(state.Thickness) or 1))
+                        if all or key ~= "Thickness" then
+                            inst.Position = UDim2.fromOffset((from.X + to.X) * 0.5, (from.Y + to.Y) * 0.5)
+                            inst.Rotation = math.deg(math.atan2(delta.Y, delta.X))
+                        end
+                    end
+                    if all or key == "Color" then inst.BackgroundColor3 = state.Color end
+                    if all or key == "Transparency" then inst.BackgroundTransparency = 1 - alpha end
                 elseif drawingType == "Square" then
-                    inst.AnchorPoint = Vector2.zero
-                    inst.Position = UDim2.fromOffset(state.Position.X, state.Position.Y)
-                    inst.Size = UDim2.fromOffset(math.max(0, state.Size.X), math.max(0, state.Size.Y))
-                    inst.BackgroundColor3 = state.Color
-                    inst.BackgroundTransparency = state.Filled and (1 - alpha) or 1
-                    stroke.Enabled = not state.Filled
-                    stroke.Color = state.Color
-                    stroke.Thickness = math.max(1, tonumber(state.Thickness) or 1)
-                    stroke.Transparency = 1 - alpha
+                    if all then inst.AnchorPoint = Vector2.zero end
+                    if all or key == "Position" then inst.Position = UDim2.fromOffset(state.Position.X, state.Position.Y) end
+                    if all or key == "Size" then inst.Size = UDim2.fromOffset(math.max(0, state.Size.X), math.max(0, state.Size.Y)) end
                 elseif drawingType == "Circle" then
-                    local diameter = math.max(0, (tonumber(state.Radius) or 0) * 2)
-                    inst.Position = UDim2.fromOffset(state.Position.X, state.Position.Y)
-                    inst.Size = UDim2.fromOffset(diameter, diameter)
-                    inst.BackgroundColor3 = state.Color
-                    inst.BackgroundTransparency = state.Filled and (1 - alpha) or 1
-                    stroke.Enabled = not state.Filled
-                    stroke.Color = state.Color
-                    stroke.Thickness = math.max(1, tonumber(state.Thickness) or 1)
-                    stroke.Transparency = 1 - alpha
+                    if all or key == "Position" then inst.Position = UDim2.fromOffset(state.Position.X, state.Position.Y) end
+                    if all or key == "Radius" then
+                        local diameter = math.max(0, (tonumber(state.Radius) or 0) * 2)
+                        inst.Size = UDim2.fromOffset(diameter, diameter)
+                    end
+                end
+                if drawingType == "Square" or drawingType == "Circle" then
+                    if all or key == "Color" then inst.BackgroundColor3 = state.Color; stroke.Color = state.Color end
+                    if all or key == "Filled" or key == "Transparency" then
+                        inst.BackgroundTransparency = state.Filled and (1 - alpha) or 1
+                    end
+                    if all or key == "Filled" then stroke.Enabled = not state.Filled end
+                    if all or key == "Thickness" then stroke.Thickness = math.max(1, tonumber(state.Thickness) or 1) end
+                    if all or key == "Transparency" then stroke.Transparency = 1 - alpha end
                 end
             end
 
@@ -441,8 +461,9 @@ return function(Window, ctx, platform)
             end
 
             function mt.__newindex(_, key, value)
+                if removed or state[key] == value then return end
                 state[key] = value
-                apply()
+                apply(key)
             end
 
             setmetatable(proxy, mt)
@@ -483,13 +504,38 @@ return function(Window, ctx, platform)
     assert(type(visualBackend) == "table" and type(visualBackend.new) == "function",
         "WarZ: invalid visual backend")
 
+    local function cacheVisualProperties(drawable)
+        if not drawable then return nil end
+        local cached, removed = {}, false
+        local function remove()
+            if removed then return end
+            drawable:Remove()
+            removed = true
+            table.clear(cached)
+            drawable = nil
+        end
+        return setmetatable({}, {
+            __index = function(_, key)
+                if key == "Remove" then return remove end
+                local value = cached[key]
+                if value ~= nil then return value end
+                return drawable and drawable[key]
+            end,
+            __newindex = function(_, key, value)
+                if removed or cached[key] == value then return end
+                drawable[key] = value
+                cached[key] = value
+            end,
+        })
+    end
+
     local function safeDrawing(drawingType)
-        return visualBackend.new(drawingType)
+        return cacheVisualProperties(visualBackend.new(drawingType))
     end
 
     local function safeImage()
         if type(visualBackend.newImage) == "function" then
-            return visualBackend.newImage()
+            return cacheVisualProperties(visualBackend.newImage())
         end
         return nil
     end
@@ -848,6 +894,7 @@ return function(Window, ctx, platform)
             hpFill = safeDrawing("Square"),
             weaponIcon = nil,
             weaponIconSource = nil,
+            hidden = true,
         }
         if e.box then
             e.box.Thickness = 2
@@ -879,6 +926,7 @@ return function(Window, ctx, platform)
         e.bones = {}
         e.boneParts = {}
         e.boneNodes = {}
+        e.boneProjected = {}
         e.boneCharacter = nil
         e.liveAim = nil
         e.liveAimRetryAt = 0
@@ -976,13 +1024,20 @@ return function(Window, ctx, platform)
         return live
     end
 
+    local function hideDrawing(drawable)
+        if drawable then drawable.Visible = false end
+    end
     local function hideEntry(e)
-        for _, d in pairs({ e.box, e.name, e.hpBack, e.hpFill, e.weaponIcon }) do
-            if d then pcall(function() d.Visible = false end) end
+        if e.hidden then return end
+        local hidden = pcall(hideDrawing, e.box)
+        if not pcall(hideDrawing, e.name) then hidden = false end
+        if not pcall(hideDrawing, e.hpBack) then hidden = false end
+        if not pcall(hideDrawing, e.hpFill) then hidden = false end
+        if not pcall(hideDrawing, e.weaponIcon) then hidden = false end
+        for _, line in pairs(e.bones) do
+            if not pcall(hideDrawing, line) then hidden = false end
         end
-        for _, line in pairs(e.bones or {}) do
-            if line then pcall(function() line.Visible = false end) end
-        end
+        e.hidden = hidden
     end
 
     local function destroyEntry(p)
@@ -1081,7 +1136,7 @@ return function(Window, ctx, platform)
             return
         end
 
-        local players = playersList or Players:GetPlayers()
+        local players = playersList or getPlayers()
         local playerCount = math.max(0, #players - (settings.selfEsp and 0 or 1))
         -- At crowded fights split ESP work across alternating frames. On a
         -- 60 Hz client every player still refreshes at 30 Hz; at 120 Hz it is
@@ -1117,6 +1172,7 @@ return function(Window, ctx, platform)
                             if distanceSq <= maxDistanceSq then
                                 local bounds = characterScreenBounds(ch)
                                 if bounds then
+                                    e.hidden = false
                                     local h, w = bounds.h, bounds.w
                                     local x0, y0 = bounds.x, bounds.y
                                     local relationColor = getPlayerRelationColor(p, ch)
@@ -1201,7 +1257,8 @@ return function(Window, ctx, platform)
                                         resolveSkeletonParts(e, ch, p)
 
                                         -- Project each unique bone once.
-                                        local projected = {}
+                                        local projected = e.boneProjected
+                                        table.clear(projected)
                                         for _, bone in ipairs(e.boneNodes) do
                                             local pos = boneWorldPosition(bone)
                                             if pos then
@@ -1874,7 +1931,7 @@ return function(Window, ctx, platform)
     end
 
     local function scanAimTarget(playersList)
-        local players = playersList or Players:GetPlayers()
+        local players = playersList or getPlayers()
         local bestPoint, bestPlayer = nil, nil
         local bestPixels = settings.aimFov
 
@@ -1991,7 +2048,7 @@ return function(Window, ctx, platform)
         local maxFov = settings.silentAimFov or settings.silentFov or 120
         local camPos = camera.CFrame.Position
         local camLook = camera.CFrame.LookVector
-        local players = playersList or Players:GetPlayers()
+        local players = playersList or getPlayers()
 
         for _, p in ipairs(players) do
             if bestDist == 0 then break end
@@ -2171,6 +2228,54 @@ return function(Window, ctx, platform)
         if aimController and type(aimController.update) == "function" then
             aimController:update(dt)
         end
+    end
+
+    -- Low-frequency support work; aim/ESP keep their render-frame updates.
+    local healPollTime, staminaPollTime = 0.1, 0
+    local function updateAutoHeal(dt)
+        if not settings.autoHeal then healPollTime = 0.1; return end
+        healPollTime += dt
+        if healPollTime + 1e-6 < 0.1 then return end
+        healPollTime = 0
+        local char = localPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 or hum.Health > settings.healThreshold then return end
+        local now = os.clock()
+        if now - settings.healCooldown < 0.5 then return end
+        local cd = tonumber(localPlayer:GetAttribute("WarzMedCdLeft")) or 0
+        if cd > 0.05 then return end
+        local ci = getCombatInput()
+        if ci and type(ci.RequestUseMed) == "function" and pcall(ci.RequestUseMed) then
+            settings.healCooldown = now
+        end
+    end
+
+    local staminaValues = {
+        CSGO_Stamina = 100, CSGO_SprintLock = false,
+        CSGO_SprintPenalty = 0, WarzServerStamina = 100,
+    }
+    local staminaApplying = false
+    local function enforceStamina()
+        if not running or not settings.infiniteStamina or staminaApplying then return end
+        staminaApplying = true
+        pcall(function()
+            for attribute, value in pairs(staminaValues) do
+                if localPlayer:GetAttribute(attribute) ~= value then
+                    localPlayer:SetAttribute(attribute, value)
+                end
+            end
+        end)
+        staminaApplying = false
+    end
+    for attribute in pairs(staminaValues) do
+        table.insert(connections, localPlayer:GetAttributeChangedSignal(attribute):Connect(enforceStamina))
+    end
+    local function updateStamina(dt)
+        if not settings.infiniteStamina then staminaPollTime = 0; return end
+        staminaPollTime += dt
+        if staminaPollTime + 1e-6 < 1 then return end
+        staminaPollTime = 0
+        enforceStamina()
     end
 
     -- [[ UI ]]
@@ -2578,7 +2683,10 @@ return function(Window, ctx, platform)
         Name = "Infinite Stamina",
         CurrentValue = false,
         Flag = "WZP_InfiniteStamina",
-        Callback = function(v) settings.infiniteStamina = v end,
+        Callback = function(v)
+            settings.infiniteStamina = v
+            if v then enforceStamina() end
+        end,
     })
 
     trackSection(CombatTab, "Auto Fishing")
@@ -2591,6 +2699,7 @@ return function(Window, ctx, platform)
 
     -- Silent Aim metamethod hook (FireRequest)
     local oldNamecall = nil
+    local silentAimHookState, silentAimDispatch
     local fireRemotes = ReplicatedStorage:FindFirstChild("Remotes")
     local fireRequest = fireRemotes and fireRemotes:FindFirstChild("FireRequest")
     if fireRequest and fireRequest:IsA("RemoteEvent")
@@ -2598,7 +2707,21 @@ return function(Window, ctx, platform)
         and type(checkcaller) == "function" then
         local fireServer = fireRequest.FireServer
         local silentAimRandom = Random.new()
-        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+        local state = environment.__RAVEN_WARZPVP_NAMECALL
+        if type(state) ~= "table" or state.game ~= game or type(state.original) ~= "function" then
+            state = { game = game }
+            -- The persistent hook captures only this slot. Reload replaces its
+            -- dispatch function instead of chaining another hook/old module.
+            state.original = hookmetamethod(game, "__namecall", function(self, ...)
+                local dispatch = state.dispatch
+                if dispatch then return dispatch(self, ...) end
+                return state.original(self, ...)
+            end)
+            environment.__RAVEN_WARZPVP_NAMECALL = state
+        end
+        oldNamecall = state.original
+        silentAimHookState = state
+        silentAimDispatch = function(self, ...)
             local method = getnamecallmethod()
             if running and settings.silentAim and self == fireRequest
                 and method == "FireServer" and not checkcaller() then
@@ -2626,7 +2749,13 @@ return function(Window, ctx, platform)
                 return fireServer(self, table.unpack(args, 1, args.n))
             end
             return oldNamecall(self, ...)
-        end)
+        end
+        state.dispatch = silentAimDispatch
+    end
+    local function releaseSilentAimHook()
+        if silentAimHookState and silentAimHookState.dispatch == silentAimDispatch then
+            silentAimHookState.dispatch = nil
+        end
     end
 
     -- Loot Aura implementation (Dual: Native TouchHeld auto-hold + 360-degree Aura vacuum)
@@ -2727,7 +2856,7 @@ return function(Window, ctx, platform)
         local panelOpen = false
         pcall(function() panelOpen = updateMenuState() end)
 
-        local currentPlayers = Players:GetPlayers()
+        local currentPlayers = getPlayers()
 
         -- Keep ESP active while the menu is open. Each Drawing primitive
         -- clips itself against the panel rectangle, so visuals outside the menu
@@ -2766,63 +2895,14 @@ return function(Window, ctx, platform)
             pickupTime = 0
         end
 
-        -- Auto Heal (Tier 1): via CombatInput.RequestUseMed() (correct signature)
-        if settings.autoHeal then
-            pcall(function()
-                local char = localPlayer.Character
-                local hum = char and char:FindFirstChildOfClass("Humanoid")
-                if hum and hum.Health > 0 and hum.Health <= settings.healThreshold then
-                    local now = os.clock()
-                    if now - settings.healCooldown >= 0.5 then
-                        local cd = tonumber(localPlayer:GetAttribute("WarzMedCdLeft")) or 0
-                        if cd <= 0.05 then
-                            local ci = getCombatInput()
-                            if ci and type(ci.RequestUseMed) == "function" then
-                                local okUse = pcall(ci.RequestUseMed)
-                                if okUse then
-                                    settings.healCooldown = now
-                                end
-                            end
-                        end
-                    end
-                end
-            end)
-        end
-
-        -- Infinite Stamina & No Sprint Lock: only set if changed to avoid listener loops
-        if settings.infiniteStamina then
-            pcall(function()
-                if localPlayer:GetAttribute("CSGO_Stamina") ~= 100 then
-                    localPlayer:SetAttribute("CSGO_Stamina", 100)
-                end
-                if localPlayer:GetAttribute("CSGO_SprintLock") ~= false then
-                    localPlayer:SetAttribute("CSGO_SprintLock", false)
-                end
-                if localPlayer:GetAttribute("CSGO_SprintPenalty") ~= 0 then
-                    localPlayer:SetAttribute("CSGO_SprintPenalty", 0)
-                end
-                if localPlayer:GetAttribute("WarzServerStamina") ~= 100 then
-                    localPlayer:SetAttribute("WarzServerStamina", 100)
-                end
-            end)
-        end
+        pcall(updateAutoHeal, elapsed)
+        pcall(updateStamina, elapsed)
 
         -- Loot Aura (Auto Pickup Nearby Items)
         pcall(updateLootAura, elapsed)
 
         -- Auto Fishing
         pcall(updateAutoFishing, elapsed)
-    end))
-
-    table.insert(connections, localPlayer:GetAttributeChangedSignal("CSGO_Stamina"):Connect(function()
-        if running and settings.infiniteStamina then
-            localPlayer:SetAttribute("CSGO_Stamina", 100)
-        end
-    end))
-    table.insert(connections, localPlayer:GetAttributeChangedSignal("CSGO_SprintLock"):Connect(function()
-        if running and settings.infiniteStamina then
-            localPlayer:SetAttribute("CSGO_SprintLock", false)
-        end
     end))
 
     local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
@@ -2874,6 +2954,7 @@ return function(Window, ctx, platform)
         lifecycleAlive = false
         settings.aimbot = false
         settings.silentAim = false
+        releaseSilentAimHook()
         settings.infiniteStamina = false
         settings.lootAura = false
         pcall(function()

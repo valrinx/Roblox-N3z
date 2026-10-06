@@ -36,12 +36,12 @@ sources = {
     "controls": fixture(controls, "settings CombatTab getWarzHitboxes getCurrentBallistics", "true"),
     "ballistics": fixture(ballistics, "getCombatSettings getWarzProjectile", "getCurrentBallistics"),
     "toggle": fixture(toggle, "settings CombatTab getWarzHitboxes getCurrentBallistics", "true"),
-    "selection": fixture(geometry + "\n" + selection, "Players localPlayer camera settings getWarzHitboxes "
+    "selection": fixture(geometry + "\n" + selection, "Players getPlayers localPlayer camera settings getWarzHitboxes "
         "getLiveAim findLiveBone boneWorldPosition bodyPart "
         "isPartyMember isPlayerVulnerable isAlive canSeeAimPoint applyAimPrediction",
         "{point = getSilentAimPoint, target = getSilentAimTarget, exact = getExactAimPoint}"),
-    "hook": fixture(hook, "running settings camera game ReplicatedStorage hookmetamethod "
-        "getnamecallmethod setnamecallmethod checkcaller getSilentAimTarget Workspace Random", "true"),
+    "hook": fixture(hook, "running settings camera game environment ReplicatedStorage hookmetamethod "
+        "getnamecallmethod setnamecallmethod checkcaller getSilentAimTarget Workspace Random", "releaseSilentAimHook"),
     "prediction": fixture(prediction, "settings camera predictionState getCurrentBallistics "
         "targetLinearVelocity solveBallisticTime", "applyAimPrediction"),
 }

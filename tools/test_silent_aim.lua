@@ -50,6 +50,7 @@ return function(sources)
         local deps = {
             Players = { GetPlayers = function() return players end,
                 GetPlayerFromCharacter = function() return nil end }, localPlayer = {}, camera = camera, settings = settings,
+            getPlayers = function() return players end,
             getLiveAim = function() return nil end,
             bodyPart = function(character, name) return character:FindFirstChild(name) end,
             getWarzHitboxes = function() return { DataShapes = function(character)
@@ -301,6 +302,7 @@ return function(sources)
         -- Keep the transport local; real Vector3/CFrame namecalls below still
         -- exercise the executor context that the previous fixture missed.
         local installed, sent, sentMethod, transport, targetCalls, roll, rollCount
+        local installations = 0
         targetCalls = 0
         roll, rollCount = 49, 0
         local remote = { Name = "FireRequest", IsA = function(_, class) return class == "RemoteEvent" end,
@@ -314,12 +316,13 @@ return function(sources)
         local point = Vector3.new(10, 0, -100)
         local deps
         deps = {
-            running = true, settings = { silentAim = true }, camera = { CFrame = CFrame.new() }, game = {},
+            running = true, settings = { silentAim = true }, camera = { CFrame = CFrame.new() }, game = {}, environment = {},
             ReplicatedStorage = { FindFirstChild = function(_, name)
                 expect(name, "Remotes", "remote folder")
                 return folder
             end },
             hookmetamethod = function(_, _, fn)
+                installations += 1
                 installed = fn
                 return function(_, ...)
                     sent, sentMethod, transport = table.pack(...), deps.getnamecallmethod(), "namecall"
@@ -345,6 +348,7 @@ return function(sources)
             method = function() return sentMethod end, transport = function() return transport end,
             roll = function(value) roll = value end, rolls = function() return rollCount end,
             calls = function() return targetCalls end,
+            installations = function() return installations end,
             installed = function() return type(installed) == "function" end })
         assert(ok, err)
     end
@@ -465,6 +469,31 @@ return function(sources)
             f.deps.checkcaller = nil
             f.install()
             expect(f.installed(), false, "unsupported hook installed")
+        end)
+    end)
+    test("reload reuses one namecall hook and selects only the latest target", function()
+        withHook(function(f)
+            f.install()
+            f.deps.getSilentAimTarget = function() return Vector3.new(40,0,-100) end
+            f.install(); f.install()
+            expect(f.installations(), 1, "namecall hooks accumulated on reload")
+            f.invoke(Vector3.new(0,0,-1),0.25,{},Vector3.zero)
+            near(f.sent()[1],Vector3.new(40,0,-100).Unit,"reload kept the old selector")
+            expect(f.calls(),0,"inactive selector still ran")
+        end)
+    end)
+    test("unload detaches selection and an old unload cannot detach the new module", function()
+        withHook(function(f)
+            local oldRelease = f.install(); local release = f.install()
+            assert(type(release) == "function", "hook release missing")
+            oldRelease()
+            f.invoke(Vector3.new(0,0,-1),0.25,{},Vector3.zero)
+            near(f.sent()[1],Vector3.new(10,0,-100).Unit,"old unload detached active selection")
+            release()
+            f.invoke(Vector3.new(0,0,-1),0.33,nil,Vector3.zero,nil,nil,"root",nil)
+            near(f.sent()[1],Vector3.new(0,0,-1),"unloaded hook redirected")
+            expect(f.sent().n,8,"unloaded forwarding lost nil arguments")
+            expect(f.calls(),1,"unloaded selector still ran")
         end)
     end)
     local passed = 0
