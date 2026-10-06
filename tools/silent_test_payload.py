@@ -35,7 +35,7 @@ sources = {
         "isPartyMember isPlayerVulnerable isAlive canSeeAimPoint applyAimPrediction",
         "{point = getSilentAimPoint, target = getSilentAimTarget}"),
     "hook": fixture(hook, "running settings camera game ReplicatedStorage hookmetamethod "
-        "getnamecallmethod checkcaller getSilentAimTarget Workspace", "true"),
+        "getnamecallmethod setnamecallmethod checkcaller getSilentAimTarget Workspace", "true"),
     "prediction": fixture(prediction, "settings camera predictionState getCurrentBallistics "
         "targetLinearVelocity solveBallisticTime", "applyAimPrediction"),
 }

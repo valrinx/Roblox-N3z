@@ -147,12 +147,21 @@ return function(sources)
     end)
 
     local function withHook(callback)
-        local folder, remote = Instance.new("Folder"), Instance.new("RemoteEvent")
-        remote.Name, remote.Parent = "FireRequest", folder
-        local installed, sent, targetCalls
+        -- Keep the transport local; real Vector3/CFrame namecalls below still
+        -- exercise the executor context that the previous fixture missed.
+        local installed, sent, sentMethod, transport, targetCalls
         targetCalls = 0
+        local remote = { Name = "FireRequest", IsA = function(_, class) return class == "RemoteEvent" end,
+            FireServer = function(_, ...)
+                sent, sentMethod, transport = table.pack(...), "FireServer", "direct"
+            end }
+        local folder = { FindFirstChild = function(_, name)
+            expect(name, "FireRequest", "fire remote")
+            return remote
+        end }
         local point = Vector3.new(10, 0, -100)
-        local deps = {
+        local deps
+        deps = {
             running = true, settings = { silentAim = true }, camera = { CFrame = CFrame.new() }, game = {},
             ReplicatedStorage = { FindFirstChild = function(_, name)
                 expect(name, "Remotes", "remote folder")
@@ -160,9 +169,12 @@ return function(sources)
             end },
             hookmetamethod = function(_, _, fn)
                 installed = fn
-                return function(_, ...) sent = table.pack(...) end
+                return function(_, ...)
+                    sent, sentMethod, transport = table.pack(...), deps.getnamecallmethod(), "namecall"
+                end
             end,
             getnamecallmethod = function() return "FireServer" end, checkcaller = function() return false end,
+            setnamecallmethod = setnamecallmethod,
             getSilentAimTarget = function(_, origin)
                 targetCalls = targetCalls + 1
                 return point
@@ -173,11 +185,48 @@ return function(sources)
             install = function() return makeHook(deps) end,
             invoke = function(...) assert(installed, "hook not installed"); installed(remote, ...) end,
             point = function(value) point = value end, sent = function() return sent end,
+            method = function() return sentMethod end, transport = function() return transport end,
             calls = function() return targetCalls end,
             installed = function() return type(installed) == "function" end })
-        folder:Destroy()
         assert(ok, err)
     end
+    for _, outcome in ipairs({ "point", "missing", "error" }) do
+        test("shot forwarding restores FireServer after nested namecalls: " .. outcome, function()
+            withHook(function(f)
+                f.deps.getnamecallmethod = getnamecallmethod
+                f.deps.getSilentAimTarget = function()
+                    Vector3.one:Dot(Vector3.one)
+                    CFrame.new():ToObjectSpace(CFrame.new())
+                    if outcome == "error" then error("target disappeared") end
+                    return outcome == "point" and Vector3.new(10, 0, -100) or nil
+                end
+                f.install()
+                setnamecallmethod("FireServer")
+                f.invoke(Vector3.new(0, 0, -1), 0.25, {}, Vector3.zero)
+                expect(f.method(), "FireServer", "nested math method reached the firing remote")
+                near(f.sent()[1], outcome == "point" and Vector3.new(10, 0, -100).Unit
+                    or Vector3.new(0, 0, -1), "incorrect forwarded direction")
+            end)
+        end)
+    end
+    test("executor without a namecall setter forwards through the bound FireServer method", function()
+        withHook(function(f)
+            f.deps.setnamecallmethod = nil
+            f.deps.getnamecallmethod = getnamecallmethod
+            f.deps.getSilentAimTarget = function()
+                Vector3.one:Dot(Vector3.one)
+                return Vector3.new(10, 0, -100)
+            end
+            f.install()
+            setnamecallmethod("FireServer")
+            f.invoke(Vector3.new(0, 0, -1), 0.25, nil, Vector3.zero, nil, nil, "gun-root", nil)
+            expect(f.method(), "FireServer", "incorrect remote method")
+            near(f.sent()[1], Vector3.new(10, 0, -100).Unit, "incorrect shot direction")
+            expect(f.transport(), "direct", "unsupported namecall restoration path used")
+            expect(f.sent().n, 8, "remote argument count")
+            expect(f.sent()[7], "gun-root", "gun root")
+        end)
+    end)
     test("each shot resolves the latest target without waiting for a render frame", function()
         withHook(function(f)
             f.install()

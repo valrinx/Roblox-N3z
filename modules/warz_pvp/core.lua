@@ -2536,6 +2536,7 @@ return function(Window, ctx, platform)
     if fireRequest and fireRequest:IsA("RemoteEvent")
         and type(hookmetamethod) == "function" and type(getnamecallmethod) == "function"
         and type(checkcaller) == "function" then
+        local fireServer = fireRequest.FireServer
         oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
             local method = getnamecallmethod()
             if running and settings.silentAim and self == fireRequest
@@ -2550,10 +2551,16 @@ return function(Window, ctx, platform)
                         local direction = targetPoint - origin
                         if direction.Magnitude > 0.001 and direction.Magnitude < math.huge then
                             args[1] = direction.Unit
-                            return oldNamecall(self, table.unpack(args, 1, args.n))
                         end
                     end
                 end
+                -- DataShapes and ballistic math issue nested namecalls. Restore
+                -- the firing method even when selection fails or finds no target.
+                if type(setnamecallmethod) == "function" then
+                    setnamecallmethod(method)
+                    return oldNamecall(self, table.unpack(args, 1, args.n))
+                end
+                return fireServer(self, table.unpack(args, 1, args.n))
             end
             return oldNamecall(self, ...)
         end)
