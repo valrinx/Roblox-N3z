@@ -263,7 +263,7 @@ return function(sources)
         "WZP_LootEsp", "WZP_LootMaxDistance", "WZP_LootCategory", "WZP_LootAura",
         "WZP_LootAuraRange", "WZP_BossEsp", "WZP_BossAlert", "WZP_Aimbot",
         "WZP_AimPrediction", "WZP_AimPosition", "WZP_AimMaxDist", "WZP_AimFov",
-        "WZP_AimSmooth", "WZP_AutoHeal", "WZP_HealThreshold", "WZP_NoRecoil",
+        "WZP_AimSmooth", "WZP_AutoHeal", "WZP_HealThreshold", "WZP_NoRecoil", "WZP_NoRecoilStrength",
         "WZP_InstantPickup", "WZP_SilentAim", "WZP_SilentFov", "WZP_SilentBone", "WZP_SilentHitChance",
         "WZP_InfiniteStamina", "WZP_AutoFishing",
     }
@@ -274,6 +274,14 @@ return function(sources)
                 local realGame = game
                 local sandbox = setmetatable({
                     getgenv = function() return env end, _G = {}, hookmetamethod = false,
+                    require = function(module)
+                        -- Keep full-core initialization from patching the live player's weapon tables.
+                        if module.Name == "CombatSettings" then
+                            return { GetCatalog = function() return { Weapons = {} } end }
+                        end
+                        if module.Name == "Config" then return { Shop = {} } end
+                        return require(module)
+                    end,
                     game = { GetService = function(_, name)
                         if name == "RunService" then return { RenderStepped = signal() } end
                         if name == "UserInputService" then return input end
@@ -297,7 +305,7 @@ return function(sources)
                             return compile(sources[layout], layout .. "-adapter-test")
                         end,
                     })
-                    expect(env.RAVEN_WARZPVP_VER, "1.8.4", "shared runtime version")
+                    expect(env.RAVEN_WARZPVP_VER, "1.8.5", "shared runtime version")
                     for _, flag in ipairs(commonFlags) do
                         assert(Window.itemsByFlag[flag], layout .. " missing control: " .. flag)
                     end
@@ -306,9 +314,13 @@ return function(sources)
                     expect(Window.flags.WZP_LootAura, false, "initial loot aura")
                     expect(Window.flags.WZP_SilentBone, "Auto", "initial Silent Aim position")
                     expect(Window.flags.WZP_SilentHitChance, 100, "initial Silent Aim chance")
+                    expect(Window.flags.WZP_NoRecoil, false, "initial No Recoil toggle")
+                    expect(Window.flags.WZP_NoRecoilStrength, 100, "initial No Recoil strength")
                     local status = handle.GetStatus()
                     expect(status.silentAimPosition, "Auto", "Silent Aim runtime position")
                     expect(status.silentAimHitChance, 100, "Silent Aim runtime chance")
+                    expect(status.noRecoil, false, "No Recoil runtime toggle")
+                    expect(status.noRecoilStrength, 100, "No Recoil runtime strength")
                 end)
                 if handle then handle.Destroy() end
                 assert(ok, err)

@@ -1,6 +1,6 @@
 -- ============================================================
 -- N3Z WarZPVP shared core
--- v1.8.4 - reduce Silent Aim hitbox work outside the FOV
+-- v1.8.5 - adjustable No Recoil strength from 0 to 100 percent
 -- ============================================================
 
 return function(Window, ctx, platform)
@@ -161,7 +161,7 @@ return function(Window, ctx, platform)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.8.4"
+    environment.RAVEN_WARZPVP_VER = "1.8.5"
 
     local running = true
     local connections = {}
@@ -194,6 +194,7 @@ return function(Window, ctx, platform)
         healThreshold = 50,
         healCooldown = 0,
         noRecoil = false,
+        noRecoilStrength = 100,
         instantPickup = false,
         silentAim = false,
         silentAimFov = 120,
@@ -2397,10 +2398,16 @@ return function(Window, ctx, platform)
     -- Game modules are resolved lazily so an executor-specific require stall
     -- cannot prevent the WarZ UI/ESP from finishing startup.
     local function applyNoRecoil(cachedOnly)
-        local cs = cachedOnly and peekLazy("CombatSettings") or getCombatSettings()
-        if type(cs) ~= "table" then return end
+        local remaining = settings.noRecoil
+            and (1 - math.clamp(tonumber(settings.noRecoilStrength) or 100, 0, 100) / 100) or 1
+        local cs, Config
+        if cachedOnly then
+            cs, Config = peekLazy("CombatSettings"), peekLazy("SharedConfig")
+        else
+            cs, Config = getCombatSettings(), getSharedConfig()
+        end
         local catalog
-        if type(cs.GetCatalog) == "function" then
+        if type(cs) == "table" and type(cs.GetCatalog) == "function" then
             local ok2, cat = pcall(cs.GetCatalog)
             if ok2 then catalog = cat end
         end
@@ -2409,15 +2416,13 @@ return function(Window, ctx, platform)
                 if type(weapon) == "table" then
                     if weapon._origRecoil == nil then
                         weapon._origRecoil = weapon.Recoil or 9
+                    end
+                    if weapon._origViewRecoil == nil then
                         weapon._origViewRecoil = weapon.ViewRecoil or 0.38
                     end
-                    if settings.noRecoil then
-                        weapon.Recoil = 0
-                        weapon.ViewRecoil = 0
-                    else
-                        weapon.Recoil = weapon._origRecoil
-                        weapon.ViewRecoil = weapon._origViewRecoil
-                    end
+                    -- Always scale the backup; periodic refreshes must not compound.
+                    weapon.Recoil = weapon._origRecoil * remaining
+                    weapon.ViewRecoil = weapon._origViewRecoil * remaining
                     -- Ensure Spread stays at its original legit value for server-authoritative hits
                     if weapon._origSpread ~= nil then
                         weapon.Spread = weapon._origSpread
@@ -2425,17 +2430,20 @@ return function(Window, ctx, platform)
                 end
             end
         end
-        local Config = cachedOnly and peekLazy("SharedConfig") or getSharedConfig()
-        if Config and type(Config.Shop) == "table" then
+        if type(Config) == "table" and type(Config.Shop) == "table" then
             for _, item in pairs(Config.Shop) do
                 if type(item) == "table" then
                     if item.Recoil ~= nil and item._origRecoil == nil then
                         item._origRecoil = item.Recoil
                     end
-                    if settings.noRecoil and item.Recoil ~= nil then
-                        item.Recoil = 0
-                    elseif not settings.noRecoil and item._origRecoil ~= nil then
-                        item.Recoil = item._origRecoil
+                    if item.ViewRecoil ~= nil and item._origViewRecoil == nil then
+                        item._origViewRecoil = item.ViewRecoil
+                    end
+                    if item._origRecoil ~= nil then
+                        item.Recoil = item._origRecoil * remaining
+                    end
+                    if item._origViewRecoil ~= nil then
+                        item.ViewRecoil = item._origViewRecoil * remaining
                     end
                     if item._origSpread ~= nil then
                         item.Spread = item._origSpread
@@ -2483,6 +2491,19 @@ return function(Window, ctx, platform)
         Flag = "WZP_NoRecoil",
         Callback = function(v)
             settings.noRecoil = v
+            recoilTime = 0
+            pcall(applyNoRecoil)
+        end,
+    })
+    CombatTab:CreateSlider({
+        Name = "No Recoil Strength",
+        Range = { 0, 100 },
+        Increment = 1,
+        Suffix = " %",
+        CurrentValue = 100,
+        Flag = "WZP_NoRecoilStrength",
+        Callback = function(v)
+            settings.noRecoilStrength = math.clamp(tonumber(v) or 100, 0, 100)
             recoilTime = 0
             pcall(applyNoRecoil)
         end,
@@ -2940,6 +2961,8 @@ return function(Window, ctx, platform)
             platform = platform.id,
             visualBackend = visualBackend.name,
             aimbot = settings.aimbot,
+            noRecoil = settings.noRecoil,
+            noRecoilStrength = settings.noRecoilStrength,
             silentAim = settings.silentAim,
             silentAimHitChance = settings.silentAimHitChance,
             silentAimPosition = settings.silentAimBone,
