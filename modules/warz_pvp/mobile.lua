@@ -1,3 +1,4 @@
+-- N3Z WarZPVP v1.8.2 - Mobile adapter
 return {
     id = "mobile",
 
@@ -32,14 +33,22 @@ return {
     createAimController = function(api)
         local settings = api.settings
         local UserInputService = api.UserInputService
-        local GuiService = api.GuiService
-
         local aimHeld = false
-        local aimTouch = nil
+        local aimTouches = {}
+        local touchCount = 0
         local graceUntil = 0
+        local destroyed = false
         local fireTokens = {
-            "fire", "shoot", "attack", "trigger", "bullet", "ammo",
+            "fire", "shoot", "attack", "trigger",
         }
+
+        local function releaseInput()
+            aimHeld = false
+            table.clear(aimTouches)
+            touchCount = 0
+            graceUntil = 0
+            api.clearAimLock()
+        end
 
         local function touchLooksLikeFire(input)
             if input.UserInputType ~= Enum.UserInputType.Touch then
@@ -48,13 +57,18 @@ return {
 
             local pos = input.Position
             local okGui, guiObjects = pcall(function()
-                return GuiService:GetGuiObjectsAtPosition(pos.X, pos.Y)
+                local playerGui = api.localPlayer:FindFirstChildOfClass("PlayerGui")
+                return playerGui and playerGui:GetGuiObjectsAtPosition(pos.X, pos.Y)
             end)
             if okGui and type(guiObjects) == "table" then
                 for _, guiObject in ipairs(guiObjects) do
+                    local overControl = false
                     local current = guiObject
                     for _ = 1, 5 do
                         if not current then break end
+                        if current:IsA("GuiButton") or current:IsA("TextBox") then
+                            overControl = true
+                        end
                         local blob = string.lower(tostring(current.Name or ""))
                         if current:IsA("TextButton") or current:IsA("TextLabel") then
                             blob = blob .. " " .. string.lower(tostring(current.Text or ""))
@@ -66,6 +80,9 @@ return {
                         end
                         current = current.Parent
                     end
+                    -- The first foreground control owns this touch, even if a
+                    -- fire button is underneath it in the hit-test results.
+                    if overControl then return false end
                 end
             end
 
@@ -84,34 +101,30 @@ return {
         api.CombatTab:CreateLabel("Mobile Aim: fire-touch")
 
         api.connect(UserInputService.InputBegan:Connect(function(input)
-            if api.isMenuOpen() or not settings.aimbot then return end
+            if destroyed or api.isMenuOpen() or not settings.aimbot then return end
             if not touchLooksLikeFire(input) then return end
+            if not aimTouches[input] then
+                aimTouches[input] = true
+                touchCount = touchCount + 1
+            end
             aimHeld = true
-            aimTouch = input
             graceUntil = os.clock() + 0.16
         end))
 
         api.connect(UserInputService.InputEnded:Connect(function(input)
-            if aimTouch ~= input then return end
-            aimHeld = false
-            aimTouch = nil
-            graceUntil = os.clock() + 0.10
+            if not aimTouches[input] then return end
+            aimTouches[input] = nil
+            touchCount = touchCount - 1
+            aimHeld = touchCount > 0
+            if not aimHeld then graceUntil = os.clock() + 0.10 end
         end))
+        api.connect(UserInputService.WindowFocusReleased:Connect(releaseInput))
 
         local controller = {}
 
         function controller:update(dt)
-            if not settings.aimbot then
-                aimHeld = false
-                aimTouch = nil
-                graceUntil = 0
-                api.clearAimLock()
-                return
-            end
-            if api.isMenuOpen() then
-                aimHeld = false
-                aimTouch = nil
-                api.clearAimLock()
+            if destroyed or not settings.aimbot or api.isMenuOpen() then
+                releaseInput()
                 return
             end
             if not aimHeld and os.clock() > graceUntil then
@@ -124,6 +137,7 @@ return {
             target = api.applyAimPrediction(target, api.getAimLockCharacter())
 
             local camera = api.getCamera()
+            if not camera then return end
             local current = camera.CFrame
             local delta = target - current.Position
             if delta.Magnitude <= 0.01 then return end
@@ -135,19 +149,18 @@ return {
         end
 
         function controller:release()
-            aimHeld = false
-            aimTouch = nil
-            graceUntil = 0
-            api.clearAimLock()
+            releaseInput()
         end
 
         function controller:destroy()
+            destroyed = true
             self:release()
         end
 
         function controller:status()
             return {
                 mode = "FireTouch",
+                backend = "camera",
                 key = nil,
                 held = aimHeld or os.clock() <= graceUntil,
             }

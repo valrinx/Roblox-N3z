@@ -1,5 +1,5 @@
 -- ============================================================
--- N3Z HUB v2.4.0 · n3z-compat.lua
+-- N3Z HUB v2.4.6 · n3z-compat.lua
 -- DrawingUI-style Window adapter over the native dock.
 -- ============================================================
 

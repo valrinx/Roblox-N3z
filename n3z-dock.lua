@@ -1,5 +1,5 @@
 -- ============================================================
--- N3Z HUB · dock.lua
+-- N3Z HUB v2.4.6 · dock.lua
 -- Native-GUI bottom dock for N3z Hub. No Drawing API.
 -- Returns the Dock class. n3z.lua loads this via loadstring.
 --
@@ -64,7 +64,7 @@ local LAYOUTS = {
         barH = 62, barCorner = 20,
         tabH = 46, tabFont = 11, tabPad = 15,
         indH = 46, indCorner = 14,
-        showAvatar = false,
+        showAvatar = true,
         rowPadL = 12, rowPadT = 13, rowCorner = 14,
         nameFont = 14, nameH = 18, descFont = 11,
         tglW = 52, tglH = 30, knob = 24, tglOnX = 37, tglOffX = 15,
@@ -135,6 +135,45 @@ local function label(text, size, color, font)
     l.TextXAlignment = Enum.TextXAlignment.Left
     l.TextTruncate = Enum.TextTruncate.AtEnd
     return l
+end
+
+local function createAvatar(parent)
+    local spacer = Instance.new("Frame")
+    spacer.Name = "AvatarGap"
+    spacer.BackgroundTransparency = 1
+    spacer.Size = UDim2.new(0, 2, 0, 1)
+    spacer.LayoutOrder = 3
+    spacer.Parent = parent
+
+    local avWrap = Instance.new("Frame")
+    avWrap.Name = "Avatar"
+    avWrap.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    avWrap.BorderSizePixel = 0
+    avWrap.Size = UDim2.new(0, 38, 0, 38)
+    avWrap.LayoutOrder = 4
+    avWrap.Parent = parent
+    cornerRound(avWrap)
+    local grad = Instance.new("UIGradient")
+    grad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, C.accent),
+        ColorSequenceKeypoint.new(1, C.accent2),
+    })
+    grad.Rotation = 135
+    grad.Parent = avWrap
+    glow(avWrap, C.accent, 8, 0.85, true)
+    local av = Instance.new("ImageLabel")
+    av.Name = "AvatarImage"
+    av.BackgroundColor3 = C.panelBg
+    av.BorderSizePixel = 0
+    av.AnchorPoint = Vector2.new(0.5, 0.5)
+    av.Position = UDim2.new(0.5, 0, 0.5, 0)
+    av.Size = UDim2.new(0, 34, 0, 34)
+    -- Show the running player's headshot before the async lookup finishes.
+    av.Image = "rbxthumb://type=AvatarHeadShot&id=" .. tostring(localPlayer.UserId)
+        .. "&w=150&h=150"
+    av.Parent = avWrap
+    cornerRound(av)
+    return av
 end
 
 local function getGuiParent()
@@ -527,8 +566,8 @@ function Dock.new(opts)
     bar.BackgroundTransparency = 0.04
     bar.Active = true
     if self._isMobile then
-        bar.AutomaticSize = Enum.AutomaticSize.X
-        bar.Size = UDim2.new(0, 0, 0, L.barH)
+        bar.AutomaticSize = Enum.AutomaticSize.None
+        bar.Size = UDim2.new(0, L.panelW, 0, L.barH)
     else
         bar.AutomaticSize = Enum.AutomaticSize.None
         bar.Size = UDim2.new(0, L.barW or L.panelW, 0, L.barH)
@@ -578,6 +617,7 @@ function Dock.new(opts)
             L.contentH = contentH
             L.tabPad = tabPad
             L.tabFont = tabFont
+            bar.Size = UDim2.new(0, panelW, 0, L.barH)
             panel.Size = UDim2.new(0, panelW, 0, 0)
             content.Size = UDim2.new(1, 0, 0, contentH)
 
@@ -696,6 +736,15 @@ function Dock.new(opts)
             end
             local pos = pointerPos(input)
             if not insideBar(pos) then return end
+            local mobileScroll = self._mobileTabsScroll
+            if self._isMobile and t == Enum.UserInputType.Touch
+                and mobileScroll and mobileScroll.ScrollingEnabled then
+                local scrollPos, scrollSize = mobileScroll.AbsolutePosition, mobileScroll.AbsoluteSize
+                if pos.X >= scrollPos.X and pos.X <= scrollPos.X + scrollSize.X
+                    and pos.Y >= scrollPos.Y and pos.Y <= scrollPos.Y + scrollSize.Y then
+                    return
+                end
+            end
 
             dragging = true
             dragMoved = false
@@ -815,8 +864,9 @@ function Dock.new(opts)
             local drawRight = drawLeft + btn.AbsoluteSize.X
             -- PC primary tabs: clip the indicator to the primary viewport so a
             -- partially scrolled tab never paints under the Logo / SETTINGS.
-            if not self._isMobile and self._primaryScroll and btn.Parent == self._primaryScroll then
-                local ps = self._primaryScroll
+            local navigationScroll = self._isMobile and self._mobileTabsScroll or self._primaryScroll
+            if navigationScroll and btn.Parent == navigationScroll then
+                local ps = navigationScroll
                 local psLeft = ps.AbsolutePosition.X
                 local psRight = psLeft + ps.AbsoluteSize.X
                 drawLeft = math.max(drawLeft, psLeft)
@@ -851,11 +901,21 @@ function Dock.new(opts)
     end))
 
     if self._isMobile then
-        -- Mobile tabs row: unchanged flat row
-        local tabsRow = Instance.new("Frame")
+        -- Touch navigation scrolls within the bar; the avatar stays pinned right.
+        local tabsRow = Instance.new("ScrollingFrame")
         tabsRow.Name = "TabsRow"
         tabsRow.BackgroundTransparency = 1
-        tabsRow.AutomaticSize = Enum.AutomaticSize.XY
+        tabsRow.BorderSizePixel = 0
+        tabsRow.AnchorPoint = Vector2.new(0, 0.5)
+        tabsRow.Position = UDim2.new(0, 0, 0.5, 0)
+        tabsRow.Size = UDim2.new(1, -50, 0, L.tabH)
+        tabsRow.ScrollingDirection = Enum.ScrollingDirection.X
+        tabsRow.AutomaticCanvasSize = Enum.AutomaticSize.None
+        tabsRow.CanvasSize = UDim2.new(0, 0, 0, 0)
+        tabsRow.ScrollBarThickness = 0
+        tabsRow.ScrollBarImageColor3 = C.accent
+        tabsRow.ScrollingEnabled = false
+        tabsRow.ClipsDescendants = true
         tabsRow.ZIndex = 1
         tabsRow.Parent = bar
         local tabsLayout = Instance.new("UIListLayout")
@@ -865,6 +925,41 @@ function Dock.new(opts)
         tabsLayout.SortOrder = Enum.SortOrder.LayoutOrder
         tabsLayout.Parent = tabsRow
         self._tabsRow = tabsRow
+        self._mobileTabsScroll = tabsRow
+
+        local function clampMobileScroll()
+            if self._dead or not tabsRow.Parent then return end
+            local contentW = math.ceil(tabsLayout.AbsoluteContentSize.X)
+            local maxScroll = math.max(0, contentW - math.floor(tabsRow.AbsoluteSize.X))
+            tabsRow.CanvasSize = UDim2.new(0, contentW, 0, 0)
+            tabsRow.ScrollingEnabled = maxScroll > 1
+            tabsRow.ScrollBarThickness = maxScroll > 1 and 2 or 0
+            tabsRow.CanvasPosition = maxScroll > 1
+                and Vector2.new(math.clamp(tabsRow.CanvasPosition.X, 0, maxScroll), 0)
+                or Vector2.zero
+        end
+        conn(tabsLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(clampMobileScroll))
+        conn(tabsRow:GetPropertyChangedSignal("AbsoluteSize"):Connect(clampMobileScroll))
+        conn(tabsRow:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+            clampMobileScroll()
+            pinIndicator(false)
+        end))
+
+        local avatarZone = Instance.new("Frame")
+        avatarZone.Name = "MobileAvatarZone"
+        avatarZone.BackgroundTransparency = 1
+        avatarZone.AnchorPoint = Vector2.new(1, 0.5)
+        avatarZone.Position = UDim2.new(1, 0, 0.5, 0)
+        avatarZone.Size = UDim2.new(0, 44, 0, L.tabH)
+        avatarZone.ZIndex = 1
+        avatarZone.Parent = bar
+        local avatarLayout = Instance.new("UIListLayout")
+        avatarLayout.FillDirection = Enum.FillDirection.Horizontal
+        avatarLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+        avatarLayout.Padding = UDim.new(0, 4)
+        avatarLayout.SortOrder = Enum.SortOrder.LayoutOrder
+        avatarLayout.Parent = avatarZone
+        self._avatar = createAvatar(avatarZone)
 
         -- N3Z logo at the start of the mobile bar
         local logo = Instance.new("TextLabel")
@@ -887,6 +982,7 @@ function Dock.new(opts)
         if self._applyMobileViewport then
             self._applyMobileViewport()
         end
+        task.defer(clampMobileScroll)
     else
         -- Desktop PC: 2-zone top bar
         -- 1. Logo pinned to the left
@@ -1050,40 +1146,7 @@ function Dock.new(opts)
 
         -- Avatar / Profile in UtilityZone (pinned right, after MODULES + SETTINGS)
         if L.showAvatar then
-            local spacer = Instance.new("Frame")
-            spacer.Name = "AvatarGap"
-            spacer.BackgroundTransparency = 1
-            spacer.Size = UDim2.new(0, 2, 0, 1)
-            spacer.LayoutOrder = 3
-            spacer.Parent = utilityZone
-
-            local avWrap = Instance.new("Frame")
-            avWrap.Name = "Avatar"
-            avWrap.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-            avWrap.BorderSizePixel = 0
-            avWrap.Size = UDim2.new(0, 38, 0, 38)
-            avWrap.LayoutOrder = 4
-            avWrap.Parent = utilityZone
-            cornerRound(avWrap)
-            local grad = Instance.new("UIGradient")
-            grad.Color = ColorSequence.new({
-                ColorSequenceKeypoint.new(0, C.accent),
-                ColorSequenceKeypoint.new(1, C.accent2),
-            })
-            grad.Rotation = 135
-            grad.Parent = avWrap
-            glow(avWrap, C.accent, 8, 0.85, true)
-            local av = Instance.new("ImageLabel")
-            av.Name = "AvatarImage"
-            av.BackgroundColor3 = C.panelBg
-            av.BorderSizePixel = 0
-            av.AnchorPoint = Vector2.new(0.5, 0.5)
-            av.Position = UDim2.new(0.5, 0, 0.5, 0)
-            av.Size = UDim2.new(0, 34, 0, 34)
-            av.Image = ""
-            av.Parent = avWrap
-            cornerRound(av)
-            self._avatar = av
+            self._avatar = createAvatar(utilityZone)
         end
     end
 

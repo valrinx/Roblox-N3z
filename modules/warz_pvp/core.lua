@@ -1,6 +1,6 @@
 -- ============================================================
 -- N3Z WarZPVP shared core
--- v1.8.0 - silent aim, safezone protection filter, stamina, loot aura, auto fishing
+-- v1.8.2 - shared features with PC/Mobile adapters
 -- ============================================================
 
 return function(Window, ctx, platform)
@@ -161,7 +161,7 @@ return function(Window, ctx, platform)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.8.1"
+    environment.RAVEN_WARZPVP_VER = "1.8.2"
 
     local running = true
     local connections = {}
@@ -1777,7 +1777,7 @@ return function(Window, ctx, platform)
         return t
     end
 
-    local function applyAimPrediction(point, character)
+    local function applyAimPrediction(point, character, shotOrigin)
         if not settings.aimPrediction or not point or not character then
             predictionState.travelTime = 0
             return point
@@ -1801,7 +1801,7 @@ return function(Window, ctx, platform)
             return point
         end
 
-        local origin = camera and camera.CFrame.Position
+        local origin = typeof(shotOrigin) == "Vector3" and shotOrigin or (camera and camera.CFrame.Position)
         if not origin then return point end
 
         local relative = point - origin
@@ -1839,8 +1839,8 @@ return function(Window, ctx, platform)
         aimRayParams.FilterDescendantsInstances = cachedExclude
     end
 
-    local function canSeeAimPoint(character, point)
-        local origin = camera.CFrame.Position
+    local function canSeeAimPoint(character, point, shotOrigin)
+        local origin = typeof(shotOrigin) == "Vector3" and shotOrigin or camera.CFrame.Position
         local direction = point - origin
         if direction.Magnitude < 0.01 then return false end
 
@@ -1924,6 +1924,21 @@ return function(Window, ctx, platform)
     local function getSilentAimPoint(character, boneName)
         if not character then return nil end
         boneName = boneName or settings.silentAimBone or settings.silentBone or "Head"
+        local hitboxes = getWarzHitboxes()
+        if hitboxes then
+            local shapeName = boneName == "Head" and "Bip01_Head"
+                or boneName == "Chest" and "Chest" or "Bip01_Spine1"
+            local ok, shapes = pcall(hitboxes.DataShapes, character)
+            if ok and type(shapes) == "table" then
+                for _, shape in ipairs(shapes) do
+                    if shape.name == shapeName and typeof(shape.cf) == "CFrame" then
+                        return shape.cf.Position
+                    end
+                end
+            end
+        end
+        -- Data-driven characters have offset legacy parts; wait for their real geometry.
+        if character:GetAttribute("WarzDataHitboxes") == true then return nil end
         if boneName == "Head" then
             local bHead = character:FindFirstChild("WarzHitboxes") and character.WarzHitboxes:FindFirstChild("Bip01_Head")
             if bHead and bHead:IsA("BasePart") then return bHead.Position end
@@ -1944,8 +1959,9 @@ return function(Window, ctx, platform)
         return hrp and hrp.Position or nil
     end
 
-    local function getSilentAimTarget(playersList)
-        local bestPoint = nil
+    local function getSilentAimTarget(playersList, shotOrigin)
+        if not camera then return nil end
+        local bestPoint, bestCharacter = nil, nil
         local bestDist = math.huge
         local center = camera.ViewportSize / 2
         local maxFov = settings.silentAimFov or settings.silentFov or 120
@@ -1963,14 +1979,13 @@ return function(Window, ctx, platform)
                     if camLook:Dot(delta) > -5 and delta:Dot(delta) <= 250000 then
                         local rawPoint = getSilentAimPoint(ch, settings.silentAimBone or settings.silentBone)
                         if rawPoint then
-                            local point = settings.aimPrediction and applyAimPrediction(rawPoint, ch) or rawPoint
-                            local view, on = camera.WorldToViewportPoint(camera, point)
+                            local view, on = camera.WorldToViewportPoint(camera, rawPoint)
                             if on and view.Z > 0 then
                                 local pxDist = (Vector2.new(view.X, view.Y) - center).Magnitude
                                 if pxDist <= maxFov and pxDist < bestDist then
-                                    if canSeeAimPoint(ch, point) then
+                                    if canSeeAimPoint(ch, rawPoint, shotOrigin) then
                                         bestDist = pxDist
-                                        bestPoint = point
+                                        bestPoint, bestCharacter = rawPoint, ch
                                     end
                                 end
                             end
@@ -1978,6 +1993,9 @@ return function(Window, ctx, platform)
                     end
                 end
             end
+        end
+        if bestPoint and settings.aimPrediction then
+            return applyAimPrediction(bestPoint, bestCharacter, shotOrigin)
         end
         return bestPoint
     end
@@ -2278,6 +2296,7 @@ return function(Window, ctx, platform)
     assert(type(platform.createAimController) == "function",
         "WarZ: platform adapter missing createAimController")
     aimController = platform.createAimController({
+        localPlayer = localPlayer,
         settings = settings,
         Window = Window,
         CombatTab = CombatTab,
@@ -2463,7 +2482,13 @@ return function(Window, ctx, platform)
         Name = "Silent Aim",
         CurrentValue = false,
         Flag = "WZP_SilentAim",
-        Callback = function(v) settings.silentAim = v end,
+        Callback = function(v)
+            settings.silentAim = v
+            if v then
+                getWarzHitboxes()
+                if settings.aimPrediction then getCurrentBallistics() end
+            end
+        end,
     })
     CombatTab:CreateSlider({
         Name = "Silent FOV",
@@ -2505,20 +2530,27 @@ return function(Window, ctx, platform)
     })
 
     -- Silent Aim metamethod hook (FireRequest)
-    local activeSilentTarget = nil
     local oldNamecall = nil
-    if type(hookmetamethod) == "function" and type(getnamecallmethod) == "function" then
+    local fireRemotes = ReplicatedStorage:FindFirstChild("Remotes")
+    local fireRequest = fireRemotes and fireRemotes:FindFirstChild("FireRequest")
+    if fireRequest and fireRequest:IsA("RemoteEvent")
+        and type(hookmetamethod) == "function" and type(getnamecallmethod) == "function"
+        and type(checkcaller) == "function" then
         oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
             local method = getnamecallmethod()
-            if running and settings.silentAim and not checkcaller() and method == "FireServer" then
-                if self and self.Name == "FireRequest" then
-                    local targetPoint = activeSilentTarget
-                    if targetPoint then
-                        local args = { ... }
-                        local origin = args[4] or (camera and camera.CFrame.Position)
-                        if origin and typeof(origin) == "Vector3" then
-                            args[1] = (targetPoint - origin).Unit
-                            return oldNamecall(self, unpack(args))
+            if running and settings.silentAim and self == fireRequest
+                and method == "FireServer" and not checkcaller() then
+                camera = Workspace.CurrentCamera or camera
+                local args = table.pack(...)
+                local origin = args[4] or (camera and camera.CFrame.Position)
+                if typeof(origin) == "Vector3" then
+                    -- Read animated hitboxes at shot time; a render-frame cache can be stale.
+                    local ok, targetPoint = pcall(getSilentAimTarget, nil, origin)
+                    if ok and typeof(targetPoint) == "Vector3" then
+                        local direction = targetPoint - origin
+                        if direction.Magnitude > 0.001 and direction.Magnitude < math.huge then
+                            args[1] = direction.Unit
+                            return oldNamecall(self, table.unpack(args, 1, args.n))
                         end
                     end
                 end
@@ -2641,12 +2673,6 @@ return function(Window, ctx, platform)
         end
         pcall(updateFovCircle)
         pcall(updateAimbot, dt)
-        if settings.silentAim then
-            local ok, tPoint = pcall(getSilentAimTarget, currentPlayers)
-            activeSilentTarget = ok and tPoint or nil
-        else
-            activeSilentTarget = nil
-        end
 
         -- Catalog edits persist; refresh at 0.2 Hz (every 5.0s) to catch weapon/config reloads
         -- without scanning every weapon on every render frame.

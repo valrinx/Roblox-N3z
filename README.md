@@ -1,4 +1,4 @@
-# ⚡ Roblox-N3z (N3Z HUB v2.1.0)
+# ⚡ Roblox-N3z (N3Z HUB v2.4.6)
 
 A high-performance Roblox script hub featuring a modern **Native-GUI bottom dock UI**, responsive controls, and high-framerate visual and combat enhancements.
 
@@ -27,6 +27,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/valrinx/Roblox-N3z/ma
 - Fully interactive cards, animated switches, and responsive full-width rows.
 - Dynamic key rebind system with live `[...]` capture mode.
 - Default toggle key: **`RightShift`** (configurable in SETTINGS).
+- PC and Mobile display the running player's Roblox profile image. Mobile navigation scrolls within the screen width while the profile stays pinned.
 
 ### 🎯 Combat & Visual Enhancements
 - **Live Skeleton ESP**: True joint bones (Head, Neck, Spine, Shoulders, Arms, Hips, Legs) with 60 FPS viewport projection.
@@ -41,7 +42,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/valrinx/Roblox-N3z/ma
 
 | Module | Game | Place ID | Version | Features |
 | :--- | :--- | :--- | :--- | :--- |
-| **WarZPVP** | WarZPVP OPEN BETA | `135187059974536` | `v1.4.5` | Skeleton ESP, Aimbot, Auto Heal, No Recoil, Loot Radar |
+| **WarZPVP** | WarZPVP OPEN BETA | `135187059974536` | `v1.8.2` | PC/Mobile: ESP, Aimbot, Silent Aim, Auto Heal, No Recoil, Loot Aura, Auto Fishing |
 | **Steal An Egg** | Steal An Egg | `107778070777162` | Auto Farm, ESP, Teleport |
 | **Illegal Soccer** | Illegal Soccer | `126987974021910` | Auto Goal, Speed, Stamina, Ball ESP |
 | **Wanted** | Wanted | `14438406081` | ESP, Silent Aim, Triggerbot |

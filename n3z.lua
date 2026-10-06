@@ -1,5 +1,5 @@
 -- ============================================================
--- N3Z HUB v2.4.4 - n3z.lua (entrypoint)
+-- N3Z HUB v2.4.6 - n3z.lua (entrypoint)
 -- Native-GUI dock hub. Run:
 --   loadstring(game:HttpGet(
 --     "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/n3z.lua"))()
@@ -52,7 +52,7 @@ local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/" .. sour
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
 local HUB_URL = REPO_URL
 
-local N3Z_VERSION = "v2.4.4"
+local N3Z_VERSION = "v2.4.6"
 
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: {id,name,version,game,placeIds?,gameIds?,file,envKey?,coreFile?,platformFiles?,visualOcclusion?}
@@ -65,7 +65,7 @@ local MODULES = {
           pc = "modules/hypershot/pc.lua",
           mobile = "modules/hypershot/mobile.lua",
       } },
-    { id = "warzpvp", name = "WarZPVP", configName = "WarZ", version = "v1.8.1", game = "WarZPVP OPEN BETA",
+    { id = "warzpvp", name = "WarZPVP", configName = "WarZ", version = "v1.8.2", game = "WarZPVP OPEN BETA",
       placeIds = { 135187059974536 }, file = "modules/warz_pvp.lua", envKey = "__RAVEN_WARZPVP",
       coreFile = "modules/warz_pvp/core.lua",
       platformFiles = {
@@ -1122,18 +1122,26 @@ if isMobile then
 end
 
 -- avatar (async, never blocks boot)
-task.spawn(function()
-    local ok, content = pcall(function()
-        return Players:GetUserThumbnailAsync(
-            localPlayer.UserId,
-            Enum.ThumbnailType.HeadShot,
-            Enum.ThumbnailSize.Size100x100
-        )
+if dock._avatar then
+    task.spawn(function()
+        for attempt = 1, 5 do
+            if dock._dead then return end
+            local ok, content, isReady = pcall(function()
+                return Players:GetUserThumbnailAsync(
+                    localPlayer.UserId,
+                    Enum.ThumbnailType.HeadShot,
+                    Enum.ThumbnailSize.Size150x150
+                )
+            end)
+            if dock._dead then return end
+            if ok and isReady and type(content) == "string" and content ~= "" then
+                dock:SetAvatar(content)
+                return
+            end
+            if attempt < 5 then task.wait(0.5) end
+        end
     end)
-    if ok and type(content) == "string" and content ~= "" then
-        dock:SetAvatar(content)
-    end
-end)
+end
 
 -- ---------- MODULES tab: cards from registry ----------
 for _, m in ipairs(MODULES) do

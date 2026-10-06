@@ -1,5 +1,5 @@
 -- ============================================================
--- N3Z HUB - n3z-dock-mobile.lua
+-- N3Z HUB v2.4.6 - n3z-dock-mobile.lua
 -- Mobile entry point. Reuses n3z-dock.lua with the touch layout selected by
 -- default so desktop/mobile share one implementation.
 -- ============================================================
