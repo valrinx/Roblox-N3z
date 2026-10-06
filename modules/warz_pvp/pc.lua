@@ -1,4 +1,4 @@
--- N3Z WarZPVP v1.8.6 - PC adapter
+-- N3Z WarZPVP v1.8.7 - PC adapter
 return {
     id = "pc",
 

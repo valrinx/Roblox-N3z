@@ -42,7 +42,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/valrinx/Roblox-N3z/ma
 
 | Module | Game | Place ID | Version | Features |
 | :--- | :--- | :--- | :--- | :--- |
-| **WarZPVP** | WarZPVP OPEN BETA | `135187059974536` | `v1.8.6` | PC/Mobile: ESP, Aimbot, Silent Aim (Auto position, 0–100% hit chance), Auto Heal, No Recoil (0–100% strength), Loot Aura, Auto Fishing |
+| **WarZPVP** | WarZPVP OPEN BETA | `135187059974536` | `v1.8.7` | PC/Mobile: ESP, Aimbot, Silent Aim (Auto position, 0–100% hit chance), Auto Heal, No Recoil (0–100% strength), Loot Aura, Auto Fishing |
 | **Steal An Egg** | Steal An Egg | `107778070777162` | Auto Farm, ESP, Teleport |
 | **Illegal Soccer** | Illegal Soccer | `126987974021910` | Auto Goal, Speed, Stamina, Ball ESP |
 | **Wanted** | Wanted | `14438406081` | ESP, Silent Aim, Triggerbot |

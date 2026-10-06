@@ -1,6 +1,6 @@
 -- ============================================================
 -- N3Z WarZPVP shared core
--- v1.8.6 - reduce ESP/support work and reuse the Silent Aim hook on reload
+-- v1.8.7 - defer recoil catalog work until after menu construction
 -- ============================================================
 
 return function(Window, ctx, platform)
@@ -161,7 +161,7 @@ return function(Window, ctx, platform)
             environment.__RAVEN_WINDOW.Destroy()
         end
     end)
-    environment.RAVEN_WARZPVP_VER = "1.8.6"
+    environment.RAVEN_WARZPVP_VER = "1.8.7"
 
     local running = true
     local connections = {}
@@ -2516,6 +2516,7 @@ return function(Window, ctx, platform)
             local ok2, cat = pcall(cs.GetCatalog)
             if ok2 then catalog = cat end
         end
+        if not cachedOnly and not running then return end
         if catalog and catalog.Weapons then
             for _, weapon in pairs(catalog.Weapons) do
                 if type(weapon) == "table" then
@@ -2557,6 +2558,17 @@ return function(Window, ctx, platform)
             end
         end
     end
+    local recoilApplyQueued = false
+    local function requestNoRecoilApply()
+        if not running or recoilApplyQueued then return end
+        recoilApplyQueued = true
+        -- Game catalog calls can leave executor UI parenting unavailable on
+        -- a fresh client. Keep those calls off the menu-construction stack.
+        task.defer(function()
+            recoilApplyQueued = false
+            if running then pcall(applyNoRecoil) end
+        end)
+    end
     _G.__WZP_ApplyNoRecoil = applyNoRecoil
 
     trackSection(CombatTab, "No Recoil")
@@ -2597,7 +2609,7 @@ return function(Window, ctx, platform)
         Callback = function(v)
             settings.noRecoil = v
             recoilTime = 0
-            pcall(applyNoRecoil)
+            requestNoRecoilApply()
         end,
     })
     CombatTab:CreateSlider({
@@ -2610,7 +2622,7 @@ return function(Window, ctx, platform)
         Callback = function(v)
             settings.noRecoilStrength = math.clamp(tonumber(v) or 100, 0, 100)
             recoilTime = 0
-            pcall(applyNoRecoil)
+            requestNoRecoilApply()
         end,
     })
     CombatTab:CreateToggle({
@@ -2879,7 +2891,7 @@ return function(Window, ctx, platform)
             recoilTime += dt
             if recoilTime >= 5.0 then
                 recoilTime = 0
-                pcall(applyNoRecoil)
+                requestNoRecoilApply()
             end
         else
             recoilTime = 0
