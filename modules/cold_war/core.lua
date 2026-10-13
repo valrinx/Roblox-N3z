@@ -137,12 +137,10 @@ return function(Window, runtimeInfo)
 
     local RayParams = RaycastParams.new()
     RayParams.FilterType = Enum.RaycastFilterType.Exclude
-    local MAX_VISION_PASSTHROUGHS = 12
+    local MAX_VISION_PASSTHROUGHS = 3
 
     local VISIBILITY_PARTS = {
-        "Head", "Torso", "UpperTorso", "LowerTorso",
-        "Left Arm", "Right Arm", "Left Leg", "Right Leg",
-        "LeftUpperArm", "RightUpperArm", "LeftUpperLeg", "RightUpperLeg",
+        "Head", "UpperTorso", "Torso", "HumanoidRootPart",
     }
     local visibilityCache = {}
     local visibilityFrame = 0
@@ -172,12 +170,11 @@ return function(Window, runtimeInfo)
 
     local function rayReachesTarget(fromPos, toPos, targetCharacter, targetPart)
         local direction = toPos - fromPos
-        local baseIgnored = table.clone(RayParams.FilterDescendantsInstances)
-        local ignored = table.clone(baseIgnored)
+        local currentIgnored = table.clone(RayParams.FilterDescendantsInstances)
         local reachesTarget = false
 
         for _ = 1, MAX_VISION_PASSTHROUGHS do
-            RayParams.FilterDescendantsInstances = ignored
+            RayParams.FilterDescendantsInstances = currentIgnored
             local result = workspace:Raycast(fromPos, direction, RayParams)
             if not result then
                 reachesTarget = true
@@ -189,10 +186,9 @@ return function(Window, runtimeInfo)
                 break
             end
             if not isVisionTransparent(result.Instance) then break end
-            table.insert(ignored, result.Instance)
+            table.insert(currentIgnored, result.Instance)
         end
 
-        RayParams.FilterDescendantsInstances = baseIgnored
         return reachesTarget
     end
 
@@ -216,105 +212,19 @@ return function(Window, runtimeInfo)
         return closestIndex
     end
 
-    local AUTO_VISIBLE_SAMPLE_SCALE = 0.48
-    local AUTO_VISIBLE_PARTS_PER_SCAN = 4
-    local AUTO_VISIBLE_SCAN_INTERVAL = 2
-
-    local function getVisibilityOffsets(part, scale)
-        local halfX = part.Size.X * scale
-        local halfY = part.Size.Y * scale
-        return {
-            Vector3.zero,
-            Vector3.new(halfX, 0, 0),
-            Vector3.new(-halfX, 0, 0),
-            Vector3.new(0, halfY, 0),
-            Vector3.new(0, -halfY, 0),
-            Vector3.new(halfX, halfY, 0),
-            Vector3.new(-halfX, halfY, 0),
-            Vector3.new(halfX, -halfY, 0),
-            Vector3.new(-halfX, -halfY, 0),
-        }
-    end
-
     local function getAimPartPriority(part)
         local name = part.Name
         if name == "Head" then return 1 end
         if string.find(name, "Torso", 1, true) then return 2 end
-        if string.find(name, "Arm", 1, true) then return 3 end
-        return 4
-    end
-
-    local function scanAutoVisibleParts(fromPos, targetCharacter, parts, cached)
-        buildRayFilter()
-        cached.parts = cached.parts or {}
-
-        if cached.lastAutoVisibleScan
-            and visibilityFrame - cached.lastAutoVisibleScan < AUTO_VISIBLE_SCAN_INTERVAL then
-            cached.frame = visibilityFrame
-            visibilityCache[targetCharacter] = cached
-            return cached.visible or false, cached.parts, cached.priorityPart
-        end
-        cached.lastAutoVisibleScan = visibilityFrame
-
-        local scanCount = math.min(AUTO_VISIBLE_PARTS_PER_SCAN, #parts)
-        local partIndex = math.clamp(cached.autoVisiblePartIndex or 1, 1, #parts)
-        for _ = 1, scanCount do
-            local candidate = parts[partIndex]
-            local partState = cached.parts[candidate] or {edgeIndex = 2, visible = false}
-            local offsets = getVisibilityOffsets(candidate, AUTO_VISIBLE_SAMPLE_SCALE)
-            local centerVisible = rayReachesTarget(
-                fromPos, candidate.CFrame:PointToWorldSpace(offsets[1]), targetCharacter, candidate
-            )
-            local sampleVisible = centerVisible
-            if not sampleVisible and #offsets > 1 then
-                local edgeIndex = math.clamp(partState.edgeIndex or 2, 2, #offsets)
-                sampleVisible = rayReachesTarget(
-                    fromPos, candidate.CFrame:PointToWorldSpace(offsets[edgeIndex]), targetCharacter, candidate
-                )
-                edgeIndex += 1
-                if edgeIndex > #offsets then edgeIndex = 2 end
-                partState.edgeIndex = edgeIndex
-            end
-            partState.visible = sampleVisible
-            cached.parts[candidate] = partState
-            partIndex = partIndex % #parts + 1
-        end
-        cached.autoVisiblePartIndex = partIndex
-
-        local center = Camera.ViewportSize * 0.5
-        local priorityPart, priorityDistance = nil, math.huge
-        local anyVisible = false
-        for rank = 1, 4 do
-            for _, candidate in ipairs(parts) do
-                local state = cached.parts[candidate]
-                if state and state.visible then
-                    anyVisible = true
-                    if getAimPartPriority(candidate) == rank then
-                        local point, onScreen = Camera:WorldToViewportPoint(candidate.Position)
-                        if onScreen and point.Z > 0 then
-                            local distance = (Vector2.new(point.X, point.Y) - center).Magnitude
-                            if distance < priorityDistance then
-                                priorityPart, priorityDistance = candidate, distance
-                            end
-                        end
-                    end
-                end
-            end
-            if priorityPart then break end
-        end
-
-        cached.visible = anyVisible
-        cached.priorityPart = priorityPart
-        cached.frame = visibilityFrame
-        visibilityCache[targetCharacter] = cached
-        return cached.visible, cached.parts, cached.priorityPart
+        return 3
     end
 
     local function isCharacterVisible(fromPos, targetCharacter, autoVisibleRequest)
-        if not targetCharacter then return false end
+        if not targetCharacter then return false, {}, nil end
 
+        local now = os.clock()
         local cached = visibilityCache[targetCharacter]
-        if cached and cached.frame == visibilityFrame then
+        if cached and (now - (cached.timestamp or 0) < 0.12) then
             return cached.visible, cached.parts, cached.priorityPart
         end
 
@@ -326,47 +236,29 @@ return function(Window, runtimeInfo)
             end
         end
 
-        if #parts == 0 then return false, {} end
+        if #parts == 0 then return false, {}, nil end
 
-        if not cached then
-            cached = {partIndex = closestPartIndexToCrosshair(parts), parts = {}}
-        end
+        cached = cached or { parts = {} }
         cached.parts = cached.parts or {}
-        local partIndex = math.clamp(cached.partIndex or 1, 1, #parts)
-        local autoVisibleActive = autoVisibleRequest == true and State.AutoAim
-            and State.AimPartMode == "Auto Visible"
-            and (State.AimActivation == "Always" or rightMouseDown)
-        if autoVisibleActive then
-            return scanAutoVisibleParts(fromPos, targetCharacter, parts, cached)
-        end
-        local part = parts[partIndex]
-        local partState = cached.parts[part] or {sampleIndex = 1, visible = false, cycleVisible = false}
-        local offsets = getVisibilityOffsets(part, 0.42)
-        local sampleIndex = math.clamp(partState.sampleIndex or 1, 1, #offsets)
+
         buildRayFilter()
-        local sampleVisible = rayReachesTarget(
-            fromPos, part.CFrame:PointToWorldSpace(offsets[sampleIndex]), targetCharacter, part
-        )
-        if autoVisibleActive then
-            cached.priorityPart = sampleVisible and part or nil
-        end
-        partState.cycleVisible = partState.cycleVisible or sampleVisible
-        if sampleVisible then partState.visible = true end
-        sampleIndex += 1
-        if sampleIndex > #offsets then
-            partState.visible = partState.cycleVisible
-            partState.cycleVisible = false
-            sampleIndex = 1
-            partIndex = partIndex % #parts + 1
-        end
-        partState.sampleIndex = sampleIndex
-        cached.parts[part] = partState
-        cached.partIndex = partIndex
         local anyVisible = false
-        for _, state in pairs(cached.parts) do
-            if state.visible then anyVisible = true break end
+        local priorityPart = nil
+
+        for _, part in ipairs(parts) do
+            local reaches = rayReachesTarget(fromPos, part.Position, targetCharacter, part)
+            cached.parts[part] = { visible = reaches }
+            if reaches then
+                anyVisible = true
+                if not priorityPart or part.Name == "Head" then
+                    priorityPart = part
+                end
+            end
         end
+
         cached.visible = anyVisible
+        cached.priorityPart = priorityPart
+        cached.timestamp = now
         cached.frame = visibilityFrame
         visibilityCache[targetCharacter] = cached
         return cached.visible, cached.parts, cached.priorityPart
@@ -376,9 +268,21 @@ return function(Window, runtimeInfo)
     -- ESP System
     ---------------------------------------------------------------------------
 
+    local function getEspParent()
+        if type(gethui) == "function" then
+            local ok, h = pcall(gethui)
+            if ok and h then return h end
+        end
+        local okCore, cg = pcall(game.GetService, game, "CoreGui")
+        if okCore and cg then return cg end
+        return workspace
+    end
+
     local espFolder = Instance.new("Folder")
     espFolder.Name = "ColdWar_ESP"
-    espFolder.Parent = game:GetService("CoreGui")
+    espFolder.Parent = getEspParent()
+
+    local MAX_ACTIVE_HIGHLIGHTS = 25
 
     local function createESP(player)
         if ESPObjects[player] then return end
@@ -427,52 +331,14 @@ return function(Window, runtimeInfo)
             billboard = billboard,
             nameLabel = nameLabel,
             distLabel = distLabel,
-            partBoxes = {},
         }
-    end
-
-    local function hidePartBoxes(esp)
-        for _, box in pairs(esp.partBoxes or {}) do box.Visible = false end
-    end
-
-    local function updatePartBoxes(esp, character, partStates)
-        local active = {}
-        for part, state in pairs(partStates or {}) do
-            if part.Parent and part:IsDescendantOf(character) then
-                local box = esp.partBoxes[part]
-                if not box then
-                    box = Instance.new("BoxHandleAdornment")
-                    box.Name = "PartVisibility"
-                    box.AlwaysOnTop = true
-                    box.ZIndex = 5
-                    box.Transparency = 0.72
-                    box.Adornee = part
-                    box.Parent = espFolder
-                    esp.partBoxes[part] = box
-                end
-                box.Size = part.Size + Vector3.new(0.04, 0.04, 0.04)
-                box.Color3 = state.visible and COLOR_VISIBLE or COLOR_HIDDEN
-                box.Visible = true
-                active[part] = true
-            end
-        end
-        for part, box in pairs(esp.partBoxes) do
-            if not active[part] then
-                box.Visible = false
-                if not part.Parent then
-                    box:Destroy()
-                    esp.partBoxes[part] = nil
-                end
-            end
-        end
     end
 
     local function removeESP(player)
         local obj = ESPObjects[player]
         if obj then
-            for _, box in pairs(obj.partBoxes or {}) do box:Destroy() end
-            obj.highlight:Destroy()
-            obj.billboard:Destroy()
+            pcall(function() obj.highlight:Destroy() end)
+            pcall(function() obj.billboard:Destroy() end)
             ESPObjects[player] = nil
         end
     end
@@ -488,12 +354,12 @@ return function(Window, runtimeInfo)
             for _, esp in pairs(ESPObjects) do
                 esp.highlight.Enabled = false
                 esp.billboard.Enabled = false
-                hidePartBoxes(esp)
             end
             return
         end
 
         local myHRP = getMyHRP()
+        local camPos = Camera.CFrame.Position
 
         for _, player in ipairs(Players:GetPlayers()) do
             if isEnemy(player) and not ESPObjects[player] then
@@ -501,67 +367,70 @@ return function(Window, runtimeInfo)
             end
         end
 
+        local enemiesList = {}
         for player, esp in pairs(ESPObjects) do
             if not player.Parent then
                 removeESP(player)
-                continue
-            end
-
-            if not isEnemy(player) then
+            elseif not isEnemy(player) then
                 esp.highlight.Enabled = false
                 esp.billboard.Enabled = false
-                hidePartBoxes(esp)
-                continue
-            end
-
-            local hrp = getHRP(player)
-            if hrp then
-                local dist = myHRP and (myHRP.Position - hrp.Position).Magnitude or 0
-
-                if dist <= State.MaxDistance then
-                    local char = getCharacter(player)
-                    esp.highlight.Adornee = nil
-                    esp.highlight.Enabled = false
-                    esp.billboard.Adornee = hrp
-                    esp.billboard.Enabled = true
-
-                    if State.ESPWallCheck and myHRP then
-                        local camPos = Camera.CFrame.Position
-                        local visible, partStates = isCharacterVisible(camPos, char)
-                        updatePartBoxes(esp, char, partStates)
-                        if visible then
-                            esp.highlight.FillColor = COLOR_VISIBLE
-                            esp.highlight.OutlineColor = COLOR_VISIBLE
-                            esp.nameLabel.TextColor3 = COLOR_TEXT_VISIBLE
-                        else
-                            esp.highlight.FillColor = COLOR_HIDDEN
-                            esp.highlight.OutlineColor = COLOR_HIDDEN
-                            esp.nameLabel.TextColor3 = COLOR_TEXT_HIDDEN
-                        end
+            else
+                local hrp = getHRP(player)
+                local char = getCharacter(player)
+                if hrp and char then
+                    local dist = myHRP and (myHRP.Position - hrp.Position).Magnitude or 0
+                    if dist <= State.MaxDistance then
+                        table.insert(enemiesList, {
+                            player = player,
+                            esp = esp,
+                            char = char,
+                            hrp = hrp,
+                            dist = dist,
+                        })
                     else
-                        hidePartBoxes(esp)
-                        esp.highlight.Adornee = char
-                        esp.highlight.Enabled = true
-                        esp.highlight.FillColor = COLOR_VISIBLE
-                        esp.highlight.OutlineColor = COLOR_VISIBLE
-                        esp.nameLabel.TextColor3 = COLOR_TEXT_VISIBLE
-                    end
-
-                    esp.nameLabel.Visible = State.ESPNames
-                    esp.distLabel.Visible = State.ESPDistance
-
-                    if State.ESPDistance and myHRP then
-                        esp.distLabel.Text = string.format("[%dm]", math.floor(dist))
+                        esp.highlight.Enabled = false
+                        esp.billboard.Enabled = false
                     end
                 else
                     esp.highlight.Enabled = false
                     esp.billboard.Enabled = false
-                    hidePartBoxes(esp)
                 end
+            end
+        end
+
+        table.sort(enemiesList, function(a, b) return a.dist < b.dist end)
+
+        for i, item in ipairs(enemiesList) do
+            local esp = item.esp
+            local char = item.char
+            local hrp = item.hrp
+            local dist = item.dist
+
+            esp.billboard.Adornee = hrp
+            esp.billboard.Enabled = true
+
+            local isVis = true
+            if State.ESPWallCheck and myHRP then
+                isVis = isCharacterVisible(camPos, char)
+            end
+
+            local color = isVis and COLOR_VISIBLE or COLOR_HIDDEN
+            local textColor = isVis and COLOR_TEXT_VISIBLE or COLOR_TEXT_HIDDEN
+
+            if i <= MAX_ACTIVE_HIGHLIGHTS then
+                esp.highlight.Adornee = char
+                esp.highlight.FillColor = color
+                esp.highlight.OutlineColor = color
+                esp.highlight.Enabled = true
             else
                 esp.highlight.Enabled = false
-                esp.billboard.Enabled = false
-                hidePartBoxes(esp)
+            end
+
+            esp.nameLabel.TextColor3 = textColor
+            esp.nameLabel.Visible = State.ESPNames
+            esp.distLabel.Visible = State.ESPDistance
+            if State.ESPDistance then
+                esp.distLabel.Text = string.format("[%dm]", math.floor(dist))
             end
         end
     end
@@ -655,20 +524,18 @@ return function(Window, runtimeInfo)
         return nil
     end
 
-    -- Use the game's own trajectory implementation. In Cold War, BulletSettings.Drag
-    -- is passed to Trajectory as K; applying another scale makes long-range zeroing drift.
+    -- Analytical ballistic flight time with drag approximation.
+    -- Completely avoids game module numerical loop divergence/freeze.
     local function getBulletTravelTime(distance, muzzleVelocity, drag)
-        local ok, result = pcall(function()
-            local trajectory = Trajectory.new({
-                Origin = Vector3.zero,
-                Direction = Vector3.new(0, 0, -1),
-                MuzzleSpeed = muzzleVelocity,
-                K = drag,
-                Gravity = GRAVITY,
-            })
-            return Trajectory.GetTimeForDistance(trajectory, math.max(distance, 0))
-        end)
-        return ok and type(result) == "number" and result or (distance / math.max(muzzleVelocity, 1))
+        if not distance or distance <= 0 then return 0 end
+        distance = math.clamp(distance, 0, 3000)
+        local v0 = math.max(tonumber(muzzleVelocity) or 3000, 100)
+        local k = math.clamp(tonumber(drag) or 1, 0, 5)
+        local simpleTime = distance / v0
+        if k > 0.01 then
+            simpleTime = simpleTime * (1 + 0.12 * k * (distance / 1000))
+        end
+        return math.clamp(simpleTime, 0, 3.5)
     end
 
     -- Calculate bullet drop at given time
@@ -1004,8 +871,10 @@ return function(Window, runtimeInfo)
                         end
                         local scaled = planar / State.RadarRange * (State.RadarSize - 6)
                         blip.Position = center + Vector2.new(scaled.X, scaled.Y)
-                        blip.Color = isCharacterVisible(Camera.CFrame.Position, getCharacter(player))
-                            and Color3.fromRGB(255, 70, 70) or Color3.fromRGB(255, 190, 60)
+                        local char = getCharacter(player)
+                        local cached = char and visibilityCache[char]
+                        local isVis = cached and cached.visible
+                        blip.Color = isVis and Color3.fromRGB(255, 70, 70) or Color3.fromRGB(255, 190, 60)
                         blip.Visible = true
                         active[player] = true
                     end
@@ -1145,17 +1014,48 @@ return function(Window, runtimeInfo)
 
     local aimRenderStepName = "RavenColdWarAim_" .. tostring(LP.UserId)
     RunService:BindToRenderStep(aimRenderStepName, Enum.RenderPriority.Camera.Value + 10, function(dt)
-        visibilityFrame += 1
-        predictionFrame += 1
-        updateAutoAim(dt)
-        updateAimPrediction(dt)
-        updateESP()
-        updateRadar()
-        aimFovCircle.Position = Camera.ViewportSize * 0.5
-        aimFovCircle.Radius = State.AimFOV
-        aimFovCircle.Visible = State.AutoAim
-        if State.FOVEnabled then
-            Camera.FieldOfView = State.FOVValue
+        pcall(function()
+            predictionFrame += 1
+            if State.AutoAim then
+                updateAutoAim(dt)
+            end
+            if State.AimPrediction then
+                updateAimPrediction(dt)
+            elseif predictionDot and predictionDot.Visible then
+                predictionDot.Visible = false
+                if predictionCircle then predictionCircle.Visible = false end
+                if predictionText then predictionText.Visible = false end
+            end
+            if aimFovCircle then
+                aimFovCircle.Position = Camera.ViewportSize * 0.5
+                aimFovCircle.Radius = State.AimFOV
+                aimFovCircle.Visible = State.AutoAim == true
+            end
+            if State.FOVEnabled then
+                Camera.FieldOfView = State.FOVValue
+            end
+        end)
+    end)
+
+    local lastESPUpdate = 0
+    local lastRadarUpdate = 0
+    Connections.throttledUpdates = RunService.Heartbeat:Connect(function()
+        local now = os.clock()
+        if State.ESP and (now - lastESPUpdate >= 0.05) then
+            lastESPUpdate = now
+            visibilityFrame += 1
+            pcall(updateESP)
+        elseif not State.ESP and lastESPUpdate ~= 0 then
+            lastESPUpdate = 0
+            pcall(updateESP)
+        end
+
+        if State.Radar and (now - lastRadarUpdate >= 0.066) then
+            lastRadarUpdate = now
+            pcall(updateRadar)
+        elseif not State.Radar and lastRadarUpdate ~= 0 then
+            lastRadarUpdate = 0
+            pcall(hideRadarBlips)
         end
     end)
 
@@ -1173,6 +1073,7 @@ return function(Window, runtimeInfo)
     VisualsTab:CreateToggle({
         Name = "Enemy ESP",
         CurrentValue = false,
+        Flag = "ColdWarESP",
         Callback = function(v)
             State.ESP = v
         end,
@@ -1181,6 +1082,7 @@ return function(Window, runtimeInfo)
     VisualsTab:CreateToggle({
         Name = "Show Names",
         CurrentValue = true,
+        Flag = "ColdWarESPNames",
         Callback = function(v)
             State.ESPNames = v
         end,
@@ -1189,6 +1091,7 @@ return function(Window, runtimeInfo)
     VisualsTab:CreateToggle({
         Name = "Show Distance",
         CurrentValue = true,
+        Flag = "ColdWarESPDistance",
         Callback = function(v)
             State.ESPDistance = v
         end,
@@ -1197,6 +1100,7 @@ return function(Window, runtimeInfo)
     VisualsTab:CreateToggle({
         Name = "Part Visible Check (Red=Visible, Green=Hidden)",
         CurrentValue = true,
+        Flag = "ColdWarESPWallCheck",
         Callback = function(v)
             State.ESPWallCheck = v
         end,
@@ -1207,6 +1111,7 @@ return function(Window, runtimeInfo)
         Range = {100, 5000},
         Increment = 100,
         CurrentValue = 2000,
+        Flag = "ColdWarMaxDistance",
         Callback = function(v)
             State.MaxDistance = v
         end,
@@ -1217,6 +1122,7 @@ return function(Window, runtimeInfo)
     VisualsTab:CreateToggle({
         Name = "Fullbright",
         CurrentValue = false,
+        Flag = "ColdWarFullbright",
         Callback = function(v)
             State.Fullbright = v
             applyFullbright(v)
@@ -1226,6 +1132,7 @@ return function(Window, runtimeInfo)
     VisualsTab:CreateToggle({
         Name = "No Fog",
         CurrentValue = false,
+        Flag = "ColdWarNoFog",
         Callback = function(v)
             State.NoFog = v
             applyNoFog(v)
@@ -1237,6 +1144,7 @@ return function(Window, runtimeInfo)
     VisualsTab:CreateToggle({
         Name = "Custom FOV",
         CurrentValue = false,
+        Flag = "ColdWarCustomFOV",
         Callback = function(v)
             State.FOVEnabled = v
             applyFOV(v, State.FOVValue)
@@ -1248,6 +1156,7 @@ return function(Window, runtimeInfo)
         Range = {30, 120},
         Increment = 5,
         CurrentValue = 90,
+        Flag = "ColdWarFOVValue",
         Callback = function(v)
             State.FOVValue = v
             if State.FOVEnabled then
@@ -1264,6 +1173,7 @@ return function(Window, runtimeInfo)
     AimTab:CreateToggle({
         Name = "Enable Aim Prediction",
         CurrentValue = false,
+        Flag = "ColdWarAimPrediction",
         Callback = function(v)
             State.AimPrediction = v
             if not v then
@@ -1277,6 +1187,7 @@ return function(Window, runtimeInfo)
         Options = {"Head", "HumanoidRootPart"},
         CurrentOption = {"Head"},
         MultipleOptions = false,
+        Flag = "ColdWarPredictTargetPart",
         Callback = function(v)
             State.PredictTargetPart = v[1] or v
         end,
@@ -1287,6 +1198,7 @@ return function(Window, runtimeInfo)
         Range = {3, 15},
         Increment = 1,
         CurrentValue = 6,
+        Flag = "ColdWarPredictDotSize",
         Callback = function(v)
             State.PredictDotSize = v
         end,
@@ -1390,7 +1302,7 @@ return function(Window, runtimeInfo)
             pcall(function() radarCircle:Remove() end)
             pcall(function() radarOutline:Remove() end)
             for _, blip in pairs(radarBlips) do pcall(function() blip:Remove() end) end
-            espFolder:Destroy()
+            pcall(function() espFolder:Destroy() end)
             applyFullbright(false)
             applyNoFog(false)
             applyFOV(false)
