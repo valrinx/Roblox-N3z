@@ -164,15 +164,32 @@ return function(Window, runtimeInfo)
         rayFilterFrame = visibilityFrame
     end
 
+    local function isVisionTransparent(instance)
+        return instance:IsA("BasePart") and instance.Transparency >= 0.25
+    end
+
     local function rayReachesTarget(fromPos, toPos, targetCharacter, targetPart)
         local direction = toPos - fromPos
-        local result = workspace:Raycast(fromPos, direction, RayParams)
-        if not result then return true end
-        if result.Instance == targetPart
-            or (targetCharacter ~= nil and result.Instance:IsDescendantOf(targetCharacter)) then
-            return true
+        local currentIgnored = table.clone(RayParams.FilterDescendantsInstances)
+        local reachesTarget = false
+
+        for _ = 1, MAX_VISION_PASSTHROUGHS do
+            RayParams.FilterDescendantsInstances = currentIgnored
+            local result = workspace:Raycast(fromPos, direction, RayParams)
+            if not result then
+                reachesTarget = true
+                break
+            end
+            if result.Instance == targetPart
+                or (targetCharacter ~= nil and result.Instance:IsDescendantOf(targetCharacter)) then
+                reachesTarget = true
+                break
+            end
+            if not isVisionTransparent(result.Instance) then break end
+            table.insert(currentIgnored, result.Instance)
         end
-        return false
+
+        return reachesTarget
     end
 
     local function isPointVisible(fromPos, toPos, targetCharacter)
@@ -236,9 +253,6 @@ return function(Window, runtimeInfo)
                 if not priorityPart or part.Name == "Head" then
                     priorityPart = part
                 end
-                if not autoVisibleRequest then
-                    break
-                end
             end
         end
 
@@ -280,8 +294,7 @@ return function(Window, runtimeInfo)
         highlight.OutlineTransparency = 0
         highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
         highlight.Enabled = false
-        local char = getCharacter(player)
-        highlight.Parent = char or espFolder
+        highlight.Parent = espFolder
 
         local billboard = Instance.new("BillboardGui")
         billboard.Size = UDim2.new(0, 200, 0, 50)
@@ -405,9 +418,6 @@ return function(Window, runtimeInfo)
             local textColor = isVis and COLOR_TEXT_VISIBLE or COLOR_TEXT_HIDDEN
 
             if i <= MAX_ACTIVE_HIGHLIGHTS then
-                if esp.highlight.Parent ~= char then
-                    esp.highlight.Parent = char
-                end
                 esp.highlight.Adornee = char
                 esp.highlight.FillColor = color
                 esp.highlight.OutlineColor = color
@@ -474,20 +484,15 @@ return function(Window, runtimeInfo)
     ---------------------------------------------------------------------------
 
     local GRAVITY = workspace.Gravity -- 75 studs/s^2
+    local WCM = game.ReplicatedStorage.Shared.WeaponConfigManager
+    local Trajectory = require(game.ReplicatedStorage.Shared.Ballistics.Trajectory)
     local STUDS_PER_METER = 3.57 -- Cold War's ZeroSolver constant
-
-    local function getWCM()
-        local shared = game.ReplicatedStorage:FindFirstChild("Shared")
-        return shared and shared:FindFirstChild("WeaponConfigManager")
-    end
 
     -- Cache weapon configs
     local WeaponCache = {}
     local function getWeaponConfig(weaponName)
         if WeaponCache[weaponName] then return WeaponCache[weaponName] end
-        local wcm = getWCM()
-        if not wcm then return nil end
-        local configModule = wcm:FindFirstChild(weaponName)
+        local configModule = WCM:FindFirstChild(weaponName)
         if not configModule then return nil end
         local ok, data = pcall(require, configModule)
         if not ok or type(data) ~= "table" then return nil end
@@ -843,16 +848,11 @@ return function(Window, runtimeInfo)
     end
 
     local function updateRadar()
-        if not State.Radar then
-            if radarCircle.Visible then radarCircle.Visible = false end
-            if radarOutline.Visible then radarOutline.Visible = false end
-            hideRadarBlips()
-            return
-        end
         local center = Vector2.new(State.RadarSize + 24, Camera.ViewportSize.Y - State.RadarSize - 44)
         radarCircle.Position, radarOutline.Position = center, center
         radarCircle.Radius, radarOutline.Radius = State.RadarSize, State.RadarSize
-        radarCircle.Visible, radarOutline.Visible = true, true
+        radarCircle.Visible, radarOutline.Visible = State.Radar, State.Radar
+        if not State.Radar then hideRadarBlips() return end
         local myRoot = getMyHRP()
         if not myRoot then hideRadarBlips() return end
         local active = {}
@@ -981,12 +981,14 @@ return function(Window, runtimeInfo)
     -- Connections
     ---------------------------------------------------------------------------
 
+    -- Init existing enemies
+    for _, p in ipairs(Players:GetPlayers()) do
+        if isEnemy(p) then createESP(p) end
+    end
+
     Connections.playerAdded = Players.PlayerAdded:Connect(function(p)
-        if State.ESP and isEnemy(p) then
-            task.delay(1, function()
-                if State.ESP and isEnemy(p) then createESP(p) end
-            end)
-        end
+        task.wait(1)
+        if isEnemy(p) then createESP(p) end
     end)
 
     Connections.playerRemoving = Players.PlayerRemoving:Connect(function(p)
@@ -1025,13 +1027,9 @@ return function(Window, runtimeInfo)
                 if predictionText then predictionText.Visible = false end
             end
             if aimFovCircle then
-                if State.AutoAim then
-                    aimFovCircle.Position = Camera.ViewportSize * 0.5
-                    aimFovCircle.Radius = State.AimFOV
-                    aimFovCircle.Visible = true
-                elseif aimFovCircle.Visible then
-                    aimFovCircle.Visible = false
-                end
+                aimFovCircle.Position = Camera.ViewportSize * 0.5
+                aimFovCircle.Radius = State.AimFOV
+                aimFovCircle.Visible = State.AutoAim == true
             end
             if State.FOVEnabled then
                 Camera.FieldOfView = State.FOVValue
@@ -1274,13 +1272,8 @@ return function(Window, runtimeInfo)
         end)
     end
     updateMatchDashboard()
-    local lastMatchUpdate = 0
     Connections.matchDashboard = RunService.Heartbeat:Connect(function()
-        local now = os.clock()
-        if now - lastMatchUpdate >= 0.5 then
-            lastMatchUpdate = now
-            updateMatchDashboard()
-        end
+        if math.floor(os.clock()*2) ~= math.floor((os.clock()-1/60)*2) then updateMatchDashboard() end
     end)
 
     -- Info Tab
