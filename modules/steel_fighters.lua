@@ -452,11 +452,11 @@ return function(Window, runtimeInfo)
     local function createStatusHUD()
         if statusGui then return end
         pcall(function()
+            local parent = LP:FindFirstChildOfClass("PlayerGui") or LP:WaitForChild("PlayerGui")
             statusGui = Instance.new("ScreenGui")
             statusGui.Name = "N3Z_SteelFighters_HUD"
             statusGui.ResetOnSpawn = false
             statusGui.DisplayOrder = 950
-            local parent = (type(gethui) == "function" and gethui()) or LP:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
             statusGui.Parent = parent
 
             local frame = Instance.new("Frame")
@@ -527,24 +527,26 @@ return function(Window, runtimeInfo)
             if statusGui then statusGui.Enabled = false end
             return
         end
-        createStatusHUD()
-        if statusGui then
-            statusGui.Enabled = true
-            local frame = statusGui:FindFirstChildOfClass("Frame")
-            if frame then
-                local sLine = frame:FindFirstChild("StatusLine")
-                local tLine = frame:FindFirstChild("TargetLine")
-                local cLine = frame:FindFirstChild("CarryLine")
-                if sLine then sLine.Text = "Status: " .. State.StatusText end
-                if tLine then tLine.Text = "Target: " .. State.TargetText end
-                if cLine then
-                    local carrying = getCarryingCount()
-                    local maxStack = math.min(State.MaxStack, JunkyardMod.StackLimit(LP) or 10)
-                    local scrapBank = LP:GetAttribute("ScrapUnit") or 0
-                    cLine.Text = string.format("Carrying: %d/%d | Scrap: %s", carrying, maxStack, tostring(scrapBank))
+        pcall(function()
+            createStatusHUD()
+            if statusGui then
+                statusGui.Enabled = true
+                local frame = statusGui:FindFirstChildOfClass("Frame")
+                if frame then
+                    local sLine = frame:FindFirstChild("StatusLine")
+                    local tLine = frame:FindFirstChild("TargetLine")
+                    local cLine = frame:FindFirstChild("CarryLine")
+                    if sLine then sLine.Text = "Status: " .. State.StatusText end
+                    if tLine then tLine.Text = "Target: " .. State.TargetText end
+                    if cLine then
+                        local carrying = getCarryingCount()
+                        local maxStack = math.min(State.MaxStack, JunkyardMod.StackLimit(LP) or 10)
+                        local scrapBank = LP:GetAttribute("ScrapUnit") or 0
+                        cLine.Text = string.format("Carrying: %d/%d | Scrap: %s", carrying, maxStack, tostring(scrapBank))
+                    end
                 end
             end
-        end
+        end)
     end
 
     ----------------------------------------------------------------
@@ -559,21 +561,17 @@ return function(Window, runtimeInfo)
     end)
 
     ----------------------------------------------------------------
-    --  MAIN HEARTBEAT LOOP
+    --  MAIN WORKER LOOP (Executor Thread Identity Preserved)
     ----------------------------------------------------------------
-    local loopAccum = 0
-    connect(RunService.Heartbeat, function(dt)
-        if destroyed then return end
-
-        loopAccum = loopAccum + dt
-        if loopAccum >= 0.4 then
-            loopAccum = 0
-            updateESP()
-            updateStatusHUD()
+    task.spawn(function()
+        while not destroyed do
+            pcall(updateESP)
+            pcall(updateStatusHUD)
 
             if State.AutoFarm and not isFarming and isAlive() then
                 task.spawn(runFarmCycle)
             end
+            task.wait(0.35)
         end
     end)
 
