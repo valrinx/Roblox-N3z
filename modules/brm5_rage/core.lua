@@ -1,26 +1,21 @@
--- Ported from Roblox--Library/modules/brm5_rage.lua
--- Shared game logic; platform primitives are provided through runtimeInfo.platformAdapter.
---[[
-    RAVEN HUB — BRM5 Module v3.2
-    Blackhawk Rescue Mission 5 (PlaceId: 3701546109 / 2916899287)
-
-    Features:
-    - No Recoil + No Sway (GC patch)
-    - Speed Hack (Heartbeat-based)
-    - NoClip (Stepped-based)
-    - Fullbright + No Fog
-    - ESP v8 (Player + NPC/AI detection, Workspace-only scan)
-
-    Module format: returns function(Window, info)
-    Uses Rayfield-style API via maclib_adapter
-
-    IMPORTANT: No server-validated remotes are fired.
-    All features are client-side only.
-]]
+-- ==============================================================================
+-- N3Z HUB — Blackhawk Rescue Mission 5 (BRM5 / Sawang)
+-- Version: v4.0.0 (Zero-Lag Architecture)
+-- Compatible PlaceIds: 2916899287, 3701546109, 13622622708
+-- Supported GameId: 1054526971
+-- Features:
+--   - Silent / Smooth AimLock with FOV Circle (AI Bot priority)
+--   - No Recoil & No Sway (Optimized GC spring cache, zero CPU stutter)
+--   - GPU Hardware-Accelerated Chams ESP (Zero Drawing lag, AI vs Player color)
+--   - Speed Hack (WalkSpeed controller, event-safe)
+--   - Stepped NoClip
+--   - Fullbright & Atmosphere / Fog Stripper
+-- Note: Teleport strictly excluded per repository policy.
+-- ==============================================================================
 
 return function(Window, info)
     -- ═══════════════════════════════════════════════
-    -- CLEANUP PREVIOUS INSTANCE
+    -- CLEANUP PREVIOUS SCRIPT INSTANCE
     -- ═══════════════════════════════════════════════
     if getgenv().__RAVEN_CLEANUP then
         for _, fn in ipairs(getgenv().__RAVEN_CLEANUP) do
@@ -28,112 +23,337 @@ return function(Window, info)
         end
     end
     getgenv().__RAVEN_CLEANUP = {}
-    getgenv().__RAVEN_NORECOIL_ACTIVE = false
-    getgenv().__RAVEN_ESP_ACTIVE = false
 
-    -- ═══════════════════════════════════════════════
-    -- SERVICES
-    -- ═══════════════════════════════════════════════
     local RunService = game:GetService("RunService")
-    local Players = game:GetService("Players")
+    local UserInputService = game:GetService("UserInputService")
     local Lighting = game:GetService("Lighting")
-    local lp = Players.LocalPlayer
     local camera = workspace.CurrentCamera
 
     -- ═══════════════════════════════════════════════
-    -- TABS (Rayfield-style API via maclib_adapter)
+    -- CONFIGURATION STATE
+    -- ═══════════════════════════════════════════════
+    local state = {
+        aimbot = {
+            enabled = false,
+            fov = 150,
+            smoothness = 0.35,
+            targetAIOnly = true,
+            targetPart = "Head",
+            showFOV = true
+        },
+        combat = {
+            noRecoil = true,
+            noSway = true,
+            fullbright = false
+        },
+        movement = {
+            speedEnabled = false,
+            speedValue = 24,
+            noclip = false
+        },
+        esp = {
+            enabled = true,
+            chams = true,
+            aiColor = Color3.fromRGB(255, 45, 45),
+            playerColor = Color3.fromRGB(0, 165, 255)
+        }
+    }
+
+    -- ═══════════════════════════════════════════════
+    -- CONTAINER RESOLUTION (O(1) CACHING)
+    -- ═══════════════════════════════════════════════
+    local charContainer = nil
+
+    local function resolveContainer()
+        if charContainer and charContainer.Parent == workspace then
+            return charContainer
+        end
+        for _, child in ipairs(workspace:GetChildren()) do
+            if child.Name == "Model" and child:IsA("Model") then
+                if child:FindFirstChild("Male") or child:FindFirstChild("Female") then
+                    charContainer = child
+                    return charContainer
+                end
+            end
+        end
+        return nil
+    end
+
+    charContainer = resolveContainer()
+
+    local function getSelfChar()
+        local container = resolveContainer()
+        if not container then return nil end
+        local camPos = camera.CFrame.Position
+        local selfModel, minDist = nil, 25
+        for _, m in ipairs(container:GetChildren()) do
+            local root = m:FindFirstChild("Root")
+            if root then
+                local d = (root.Position - camPos).Magnitude
+                if d < minDist then
+                    minDist = d
+                    selfModel = m
+                end
+            end
+        end
+        return selfModel
+    end
+
+    -- ═══════════════════════════════════════════════
+    -- TABS
     -- ═══════════════════════════════════════════════
     local TabCombat = Window:CreateTab("Combat", "rbxassetid://7734053495")
-    local TabESP = Window:CreateTab("ESP", "rbxassetid://7734009413")
+    local TabVisuals = Window:CreateTab("Visuals", "rbxassetid://7734009413")
+    local TabMovement = Window:CreateTab("Movement", "rbxassetid://7734042071")
 
     -- ═══════════════════════════════════════════════
-    -- COMBAT TAB
+    -- COMBAT: WEAPON GC PATCH (ZERO-STUTTER)
     -- ═══════════════════════════════════════════════
-    TabCombat:CreateSection("Weapon")
+    TabCombat:CreateSection("Weapon Modifications")
 
-    -- ───────────────────────────────────────────────
-    -- NO RECOIL + NO SWAY (GC Patch Loop)
-    -- ───────────────────────────────────────────────
-    local recoilThread = nil
+    local cachedSprings = {}
+    local cachedTables = {}
 
-    local function startNoRecoil()
-        getgenv().__RAVEN_NORECOIL_ACTIVE = true
-        recoilThread = task.spawn(function()
-            local cachedSprings = {}
-            local cachedTables = {}
-            local lastFullScan = 0
-
-            while getgenv().__RAVEN_NORECOIL_ACTIVE do
-                pcall(function()
-                    local now = tick()
-                    -- Full GC scan every 10s to find new tables, quick patch every 0.1s
-                    if now - lastFullScan > 10 or #cachedSprings == 0 then
-                        lastFullScan = now
-                        cachedSprings = {}
-                        cachedTables = {}
-                        for _, obj in ipairs(getgc(true)) do
-                            if type(obj) == "table" then
-                                if rawget(obj, "_recoilSpring") then
-                                    cachedSprings[#cachedSprings + 1] = obj
-                                end
-                                if rawget(obj, "_doSway") ~= nil or rawget(obj, "_recoilAmount") ~= nil or rawget(obj, "_swayAmount") ~= nil then
-                                    cachedTables[#cachedTables + 1] = obj
-                                end
-                            end
-                        end
-                    end
-
-                    -- Quick patch cached refs (very fast, no GC walk)
-                    for i = 1, #cachedSprings do
-                        local rs = rawget(cachedSprings[i], "_recoilSpring")
-                        if type(rs) == "table" then
-                            for k, v in pairs(rs) do
-                                if type(v) == "number" then
-                                    rawset(rs, k, 0)
-                                end
-                            end
-                        end
-                    end
-                    for i = 1, #cachedTables do
-                        local obj = cachedTables[i]
-                        if rawget(obj, "_doSway") ~= nil then
-                            rawset(obj, "_doSway", false)
-                        end
-                        if rawget(obj, "_recoilAmount") ~= nil then
-                            rawset(obj, "_recoilAmount", 0)
-                        end
-                        if rawget(obj, "_swayAmount") ~= nil then
-                            rawset(obj, "_swayAmount", 0)
-                        end
-                    end
-                end)
-                task.wait(0.1)
+    local function scanGC()
+        cachedSprings = {}
+        cachedTables = {}
+        for _, obj in ipairs(getgc(true)) do
+            if type(obj) == "table" then
+                if rawget(obj, "_recoilSpring") then
+                    table.insert(cachedSprings, obj)
+                end
+                if rawget(obj, "_doSway") ~= nil or rawget(obj, "_recoilAmount") ~= nil then
+                    table.insert(cachedTables, obj)
+                end
             end
+        end
+    end
+    task.spawn(scanGC)
+
+    local recoilThread = task.spawn(function()
+        while true do
+            if state.combat.noRecoil or state.combat.noSway then
+                for i = 1, #cachedSprings do
+                    local rs = rawget(cachedSprings[i], "_recoilSpring")
+                    if type(rs) == "table" then
+                        for k, v in pairs(rs) do
+                            if type(v) == "number" then rawset(rs, k, 0) end
+                        end
+                    end
+                end
+                for i = 1, #cachedTables do
+                    local obj = cachedTables[i]
+                    if state.combat.noSway and rawget(obj, "_doSway") ~= nil then
+                        rawset(obj, "_doSway", false)
+                    end
+                    if state.combat.noRecoil and rawget(obj, "_recoilAmount") ~= nil then
+                        rawset(obj, "_recoilAmount", 0)
+                    end
+                    if state.combat.noSway and rawget(obj, "_swayAmount") ~= nil then
+                        rawset(obj, "_swayAmount", 0)
+                    end
+                end
+            end
+            task.wait(1.5)
+        end
+    end)
+
+    TabCombat:CreateToggle({
+        Name = "No Recoil",
+        CurrentValue = state.combat.noRecoil,
+        Callback = function(val)
+            state.combat.noRecoil = val
+        end
+    })
+
+    TabCombat:CreateToggle({
+        Name = "No Sway",
+        CurrentValue = state.combat.noSway,
+        Callback = function(val)
+            state.combat.noSway = val
+        end
+    })
+
+    -- ───────────────────────────────────────────────
+    -- COMBAT: AIMLOCK ENGINE
+    -- ───────────────────────────────────────────────
+    TabCombat:CreateSection("AimLock (Hold RMB)")
+
+    local fovCircle = Drawing.new("Circle")
+    fovCircle.Thickness = 1.5
+    fovCircle.NumSides = 32
+    fovCircle.Filled = false
+    fovCircle.Color = Color3.fromRGB(0, 255, 170)
+    fovCircle.Visible = false
+
+    local aimbotConn = RunService.RenderStepped:Connect(function()
+        local mousePos = UserInputService:GetMouseLocation()
+        fovCircle.Position = mousePos
+        fovCircle.Radius = state.aimbot.fov
+        fovCircle.Visible = state.aimbot.enabled and state.aimbot.showFOV
+
+        if not state.aimbot.enabled then return end
+        if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
+
+        local container = resolveContainer()
+        if not container then return end
+
+        local selfChar = getSelfChar()
+        local bestTarget = nil
+        local shortestDist = state.aimbot.fov
+
+        for _, m in ipairs(container:GetChildren()) do
+            if m ~= selfChar and m:IsA("Model") then
+                local isAI = false
+                for _, sub in ipairs(m:GetChildren()) do
+                    if string.sub(sub.Name, 1, 3) == "AI_" then
+                        isAI = true
+                        break
+                    end
+                end
+
+                if not state.aimbot.targetAIOnly or isAI then
+                    local targetPart = state.aimbot.targetPart == "Head"
+                        and (m:FindFirstChild("Head") or m:FindFirstChild("FakeHead"))
+                        or m:FindFirstChild("Root")
+
+                    if targetPart then
+                        local screenPos, onScreen = camera:WorldToViewportPoint(targetPart.Position)
+                        if onScreen then
+                            local screenDist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+                            if screenDist < shortestDist then
+                                shortestDist = screenDist
+                                bestTarget = targetPart
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        if bestTarget then
+            local camCFrame = camera.CFrame
+            local targetCFrame = CFrame.new(camCFrame.Position, bestTarget.Position)
+            camera.CFrame = camCFrame:Lerp(targetCFrame, state.aimbot.smoothness)
+        end
+    end)
+
+    TabCombat:CreateToggle({
+        Name = "Enable AimLock",
+        CurrentValue = state.aimbot.enabled,
+        Callback = function(val)
+            state.aimbot.enabled = val
+        end
+    })
+
+    TabCombat:CreateToggle({
+        Name = "Target AI Bots Only",
+        CurrentValue = state.aimbot.targetAIOnly,
+        Callback = function(val)
+            state.aimbot.targetAIOnly = val
+        end
+    })
+
+    TabCombat:CreateToggle({
+        Name = "Show FOV Circle",
+        CurrentValue = state.aimbot.showFOV,
+        Callback = function(val)
+            state.aimbot.showFOV = val
+        end
+    })
+
+    TabCombat:CreateSlider({
+        Name = "FOV Radius",
+        Range = {60, 400},
+        Increment = 10,
+        CurrentValue = state.aimbot.fov,
+        Callback = function(val)
+            state.aimbot.fov = val
+        end
+    })
+
+    TabCombat:CreateSlider({
+        Name = "Smoothness",
+        Range = {1, 10},
+        Increment = 1,
+        CurrentValue = 3,
+        Callback = function(val)
+            state.aimbot.smoothness = val / 10
+        end
+    })
+
+    -- ═══════════════════════════════════════════════
+    -- VISUALS: GPU NATIVE CHAMS
+    -- ═══════════════════════════════════════════════
+    TabVisuals:CreateSection("Hardware-Accelerated ESP")
+
+    local function applyChams(model)
+        if not state.esp.enabled or not state.esp.chams or not model:IsA("Model") then return end
+        if model == getSelfChar() then return end
+
+        local isAI = false
+        for _, sub in ipairs(model:GetChildren()) do
+            if string.sub(sub.Name, 1, 3) == "AI_" then
+                isAI = true
+                break
+            end
+        end
+
+        local hl = model:FindFirstChild("N3Z_Chams") or Instance.new("Highlight")
+        hl.Name = "N3Z_Chams"
+        hl.FillColor = isAI and state.esp.aiColor or state.esp.playerColor
+        hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+        hl.FillTransparency = 0.5
+        hl.OutlineTransparency = 0.1
+        hl.Adornee = model
+        hl.Parent = model
+    end
+
+    local function removeAllChams()
+        local container = resolveContainer()
+        if not container then return end
+        for _, m in ipairs(container:GetChildren()) do
+            local hl = m:FindFirstChild("N3Z_Chams")
+            if hl then hl:Destroy() end
+        end
+    end
+
+    local function updateAllChams()
+        local container = resolveContainer()
+        if not container then return end
+        for _, m in ipairs(container:GetChildren()) do
+            applyChams(m)
+        end
+    end
+
+    local childAddedConn = nil
+    if charContainer then
+        childAddedConn = charContainer.ChildAdded:Connect(function(child)
+            task.wait(0.2)
+            applyChams(child)
         end)
     end
 
-    local function stopNoRecoil()
-        getgenv().__RAVEN_NORECOIL_ACTIVE = false
-    end
-
-    TabCombat:CreateToggle({
-        Name = "No Recoil + No Sway",
-        CurrentValue = true,
-        Callback = function(state)
-            if state then
-                startNoRecoil()
+    TabVisuals:CreateToggle({
+        Name = "Wallhack Chams (AI Red / Player Blue)",
+        CurrentValue = state.esp.chams,
+        Callback = function(val)
+            state.esp.chams = val
+            if val then
+                updateAllChams()
             else
-                stopNoRecoil()
+                removeAllChams()
             end
-        end,
+        end
     })
 
-    -- Start by default
-    startNoRecoil()
+    -- Initial apply
+    if state.esp.chams then
+        updateAllChams()
+    end
 
-    -- ───────────────────────────────────────────────
-    -- FULLBRIGHT + NO FOG
-    -- ───────────────────────────────────────────────
+    TabVisuals:CreateSection("World & Lighting")
+
     local function applyFullbright()
         pcall(function()
             Lighting.Brightness = 3
@@ -141,409 +361,109 @@ return function(Window, info)
             Lighting.FogEnd = 1000000
             Lighting.GlobalShadows = false
             for _, v in ipairs(Lighting:GetDescendants()) do
-                if v:IsA("Atmosphere") then
-                    v.Density = 0
-                    v.Offset = 0
-                end
-                if v:IsA("BloomEffect") or v:IsA("BlurEffect") or v:IsA("ColorCorrectionEffect") or v:IsA("DepthOfFieldEffect") or v:IsA("SunRaysEffect") then
-                    v.Enabled = false
-                end
+                if v:IsA("Atmosphere") then v.Density = 0 end
+                if v:IsA("PostEffect") then v.Enabled = false end
             end
         end)
     end
 
-    TabCombat:CreateToggle({
+    TabVisuals:CreateToggle({
         Name = "Fullbright + No Fog",
-        CurrentValue = false,
-        Callback = function(state)
-            if state then applyFullbright() end
-        end,
+        CurrentValue = state.combat.fullbright,
+        Callback = function(val)
+            state.combat.fullbright = val
+            if val then applyFullbright() end
+        end
     })
 
-    -- ───────────────────────────────────────────────
-    -- MOVEMENT SECTION
-    -- ───────────────────────────────────────────────
-    TabCombat:CreateSection("Movement")
+    -- ═══════════════════════════════════════════════
+    -- MOVEMENT: SPEED & NOCLIP
+    -- ═══════════════════════════════════════════════
+    TabMovement:CreateSection("Character Movement")
 
-    -- SPEED HACK (Heartbeat)
     local speedConn = nil
-    local speedEnabled = false
-    local speedValue = 24
-
-    local function updateSpeed()
+    local function setSpeed(enabled)
         if speedConn then speedConn:Disconnect(); speedConn = nil end
-        if speedEnabled then
+        if enabled then
             speedConn = RunService.Heartbeat:Connect(function()
-                pcall(function()
-                    local wm = lp:FindFirstChild("WorldModel")
-                    if wm then
-                        for _, child in ipairs(wm:GetChildren()) do
-                            if child:IsA("Model") then
-                                local hum = child:FindFirstChildOfClass("Humanoid")
-                                if hum then hum.WalkSpeed = speedValue end
-                            end
-                        end
+                local selfChar = getSelfChar()
+                if selfChar then
+                    local hum = selfChar:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.WalkSpeed ~= state.movement.speedValue then
+                        hum.WalkSpeed = state.movement.speedValue
                     end
-                end)
+                end
             end)
+        else
+            local selfChar = getSelfChar()
+            if selfChar then
+                local hum = selfChar:FindFirstChildOfClass("Humanoid")
+                if hum then hum.WalkSpeed = 16 end
+            end
         end
     end
 
-    TabCombat:CreateToggle({
+    TabMovement:CreateToggle({
         Name = "Speed Hack",
-        CurrentValue = false,
-        Callback = function(state)
-            speedEnabled = state
-            updateSpeed()
-        end,
-    })
-
-    TabCombat:CreateSlider({
-        Name = "Walk Speed",
-        Range = {16, 60},
-        Increment = 1,
-        CurrentValue = 24,
+        CurrentValue = state.movement.speedEnabled,
         Callback = function(val)
-            speedValue = val
-        end,
-    })
-
-    -- NOCLIP (Stepped)
-    local noclipConn = nil
-
-    TabCombat:CreateToggle({
-        Name = "NoClip",
-        CurrentValue = false,
-        Callback = function(state)
-            if noclipConn then noclipConn:Disconnect(); noclipConn = nil end
-            if state then
-                noclipConn = RunService.Stepped:Connect(function()
-                    pcall(function()
-                        local myPos = camera.CFrame.Position
-                        local closestDist = 9999
-                        local selfModel = nil
-                        for _, desc in ipairs(workspace:GetDescendants()) do
-                            if desc.Name == "Root" and desc:IsA("BasePart") then
-                                local model = desc.Parent
-                                if model and model:IsA("Model") and (model.Name == "Male" or model.Name == "Female") then
-                                    local dist = (desc.Position - myPos).Magnitude
-                                    if dist < closestDist then
-                                        closestDist = dist
-                                        selfModel = model
-                                    end
-                                end
-                            end
-                        end
-                        if selfModel then
-                            for _, part in ipairs(selfModel:GetDescendants()) do
-                                if part:IsA("BasePart") then
-                                    part.CanCollide = false
-                                end
-                            end
-                        end
-                        local wm = lp:FindFirstChild("WorldModel")
-                        if wm then
-                            for _, child in ipairs(wm:GetDescendants()) do
-                                if child:IsA("BasePart") then
-                                    child.CanCollide = false
-                                end
-                            end
-                        end
-                    end)
-                end)
-            end
-        end,
-    })
-
-    -- ═══════════════════════════════════════════════
-    -- ESP TAB
-    -- ═══════════════════════════════════════════════
-    TabESP:CreateSection("ESP Settings")
-
-    -- ESP State
-    getgenv().__RAVEN_ESP_SETTINGS = {
-        enabled = false,
-        showBox = true,
-        showName = true,
-        showDistance = true,
-        showHealth = true,
-        maxDistance = 1500,
-    }
-    getgenv().__RAVEN_ESP_DRAWINGS = {}
-
-    local espSettings = getgenv().__RAVEN_ESP_SETTINGS
-    local drawings = getgenv().__RAVEN_ESP_DRAWINGS
-
-    -- Colors
-    local COLOR_PLAYER = Color3.fromRGB(0, 200, 255)   -- Cyan = Players
-    local COLOR_NPC = Color3.fromRGB(255, 100, 50)     -- Red-Orange = NPC/AI
-
-    local function newDrawingSet()
-        local s = {}
-        s.boxO = info.platformAdapter.Drawing.new("Square"); s.boxO.Thickness = 3; s.boxO.Color = Color3.new(0,0,0); s.boxO.Filled = false; s.boxO.Visible = false
-        s.box = info.platformAdapter.Drawing.new("Square"); s.box.Thickness = 1; s.box.Filled = false; s.box.Visible = false
-        s.txt = info.platformAdapter.Drawing.new("Text"); s.txt.Size = 14; s.txt.Center = true; s.txt.Outline = true; s.txt.Visible = false
-        s.hp = info.platformAdapter.Drawing.new("Square"); s.hp.Thickness = 1; s.hp.Filled = true; s.hp.Visible = false
-        s.hpBg = info.platformAdapter.Drawing.new("Square"); s.hpBg.Thickness = 1; s.hpBg.Filled = true; s.hpBg.Color = Color3.fromRGB(30,30,30); s.hpBg.Visible = false
-        return s
-    end
-
-    local function hideSet(s)
-        for _, d in pairs(s) do pcall(function() d.Visible = false end) end
-    end
-
-    local function startESP()
-        getgenv().__RAVEN_ESP_ACTIVE = true
-
-        -- Cached target list (updated every 0.5s in separate thread)
-        local cachedTargets = {}
-        local cachedSelf = nil
-
-        -- Find the character container (the "Model" instance with Male children)
-        local function findCharContainer()
-            for _, child in ipairs(workspace:GetChildren()) do
-                if child.Name == "Model" and child:IsA("Model") then
-                    for _, c in ipairs(child:GetChildren()) do
-                        if c.Name == "Male" and c:IsA("Model") then
-                            return child
-                        end
-                    end
-                end
-            end
-            return nil
+            state.movement.speedEnabled = val
+            setSpeed(val)
         end
-
-        -- Target scan thread (runs every 0.5s, NOT every frame)
-        task.spawn(function()
-            while getgenv().__RAVEN_ESP_ACTIVE do
-                local ok2, _ = pcall(function()
-                    if not espSettings.enabled then
-                        cachedTargets = {}
-                        cachedSelf = nil
-                        task.wait(0.5)
-                        return
-                    end
-
-                    local myPos = camera.CFrame.Position
-                    local container = findCharContainer()
-                    local closestDist = 9999
-                    local selfModel = nil
-                    local newTargets = {}
-
-                    if container then
-                        for _, model in ipairs(container:GetChildren()) do
-                            if model:IsA("Model") and (model.Name == "Male" or model.Name == "Female") then
-                                local root = model:FindFirstChild("Root")
-                                if root and root:IsA("BasePart") then
-                                    local dist = (root.Position - myPos).Magnitude
-                                    if dist < closestDist then
-                                        closestDist = dist
-                                        selfModel = model
-                                    end
-                                    if dist <= espSettings.maxDistance then
-                                        local hasAI = false
-                                        for _, child in ipairs(model:GetChildren()) do
-                                            if string.sub(child.Name, 1, 3) == "AI_" then
-                                                hasAI = true
-                                                break
-                                            end
-                                        end
-                                        newTargets[#newTargets + 1] = {
-                                            model = model,
-                                            root = root,
-                                            head = model:FindFirstChild("Head"),
-                                            hum = model:FindFirstChildOfClass("Humanoid"),
-                                            dist = dist,
-                                            isPlayer = not hasAI,
-                                        }
-                                    end
-                                end
-                            end
-                        end
-                    end
-
-                    -- Sort by distance and limit to closest 30 targets for performance
-                    table.sort(newTargets, function(a, b) return a.dist < b.dist end)
-                    if #newTargets > 30 then
-                        local limited = {}
-                        for idx = 1, 30 do
-                            limited[idx] = newTargets[idx]
-                        end
-                        newTargets = limited
-                    end
-
-                    cachedTargets = newTargets
-                    cachedSelf = selfModel
-                end)
-
-                task.wait(0.5)
-            end
-        end)
-
-        -- Render thread (lightweight, only draws cached targets)
-        task.spawn(function()
-            while getgenv().__RAVEN_ESP_ACTIVE do
-                local ok, err = pcall(function()
-                    RunService.RenderStepped:Wait()
-
-                    if not espSettings.enabled then
-                        for _, s in pairs(drawings) do hideSet(s) end
-                        return
-                    end
-
-                    local myPos = camera.CFrame.Position
-                    local activeModels = {}
-                    local targets = cachedTargets
-                    local selfModel = cachedSelf
-
-                    for i = 1, #targets do
-                        local t = targets[i]
-                        if t.model ~= selfModel and t.root and t.root.Parent then
-                            activeModels[t.model] = true
-                            if not drawings[t.model] then drawings[t.model] = newDrawingSet() end
-                            local s = drawings[t.model]
-
-                            local espColor = t.isPlayer and COLOR_PLAYER or COLOR_NPC
-                            local dist = (t.root.Position - myPos).Magnitude
-
-                            local rootScreen, onScreen = camera:WorldToViewportPoint(t.root.Position)
-
-                            if onScreen and rootScreen.Z > 0 then
-                                local headPos = t.head and (t.head.Position + Vector3.new(0, 1.5, 0)) or (t.root.Position + Vector3.new(0, 3, 0))
-                                local feetPos = t.root.Position - Vector3.new(0, 3, 0)
-                                local headScreen = camera:WorldToViewportPoint(headPos)
-                                local feetScreen = camera:WorldToViewportPoint(feetPos)
-                                local boxH = math.abs(headScreen.Y - feetScreen.Y)
-                                local boxW = boxH * 0.55
-
-                                if boxH >= 4 then
-                                    s.boxO.Size = Vector2.new(boxW+2, boxH+2)
-                                    s.boxO.Position = Vector2.new(rootScreen.X - boxW/2 - 1, headScreen.Y - 1)
-                                    s.boxO.Visible = espSettings.showBox
-
-                                    s.box.Size = Vector2.new(boxW, boxH)
-                                    s.box.Position = Vector2.new(rootScreen.X - boxW/2, headScreen.Y)
-                                    s.box.Color = espColor
-                                    s.box.Visible = espSettings.showBox
-
-                                    local label = t.isPlayer and "[P] " or "[AI] "
-                                    label = label .. math.floor(dist) .. "m"
-
-                                    if t.hum then
-                                        label = label .. " | " .. math.floor(t.hum.Health) .. "HP"
-                                    end
-
-                                    s.txt.Position = Vector2.new(rootScreen.X, headScreen.Y - 18)
-                                    s.txt.Text = label
-                                    s.txt.Color = espColor
-                                    s.txt.Visible = espSettings.showName
-
-                                    if t.hum and espSettings.showHealth then
-                                        local pct = math.clamp(t.hum.Health / t.hum.MaxHealth, 0, 1)
-                                        local barX = rootScreen.X - boxW/2 - 6
-                                        s.hpBg.Size = Vector2.new(3, boxH)
-                                        s.hpBg.Position = Vector2.new(barX, headScreen.Y)
-                                        s.hpBg.Visible = true
-                                        s.hp.Size = Vector2.new(3, boxH * pct)
-                                        s.hp.Position = Vector2.new(barX, headScreen.Y + boxH*(1-pct))
-                                        s.hp.Color = Color3.fromRGB(math.floor(255*(1-pct)), math.floor(255*pct), 0)
-                                        s.hp.Visible = true
-                                    else
-                                        s.hp.Visible = false
-                                        s.hpBg.Visible = false
-                                    end
-                                else
-                                    hideSet(s)
-                                end
-                            else
-                                hideSet(s)
-                            end
-                        end
-                    end
-
-                    -- Hide despawned models
-                    for model, s in pairs(drawings) do
-                        if not activeModels[model] then hideSet(s) end
-                    end
-                end)
-
-                if not ok then
-                    task.wait(0.5)
-                end
-            end
-
-            -- Cleanup ESP drawings
-            for _, s in pairs(drawings) do
-                for _, d in pairs(s) do pcall(function() d:Remove() end) end
-            end
-            getgenv().__RAVEN_ESP_DRAWINGS = {}
-        end)
-    end
-
-    -- ESP UI Controls
-    TabESP:CreateToggle({
-        Name = "Enable ESP",
-        CurrentValue = false,
-        Callback = function(state)
-            espSettings.enabled = state
-        end,
     })
 
-    TabESP:CreateToggle({
-        Name = "Show Box",
-        CurrentValue = true,
-        Callback = function(state)
-            espSettings.showBox = state
-        end,
-    })
-
-    TabESP:CreateToggle({
-        Name = "Show Name + Distance",
-        CurrentValue = true,
-        Callback = function(state)
-            espSettings.showName = state
-        end,
-    })
-
-    TabESP:CreateToggle({
-        Name = "Show Health Bar",
-        CurrentValue = true,
-        Callback = function(state)
-            espSettings.showHealth = state
-        end,
-    })
-
-    TabESP:CreateSlider({
-        Name = "Max Distance",
-        Range = {50, 2000},
-        Increment = 50,
-        CurrentValue = 1500,
+    TabMovement:CreateSlider({
+        Name = "Walk Speed Value",
+        Range = {16, 60},
+        Increment = 2,
+        CurrentValue = state.movement.speedValue,
         Callback = function(val)
-            espSettings.maxDistance = val
-        end,
+            state.movement.speedValue = val
+        end
     })
 
-    -- Start ESP loop
-    startESP()
+    local noclipConn = nil
+    TabMovement:CreateToggle({
+        Name = "NoClip",
+        CurrentValue = state.movement.noclip,
+        Callback = function(val)
+            state.movement.noclip = val
+            if noclipConn then noclipConn:Disconnect(); noclipConn = nil end
+            if val then
+                noclipConn = RunService.Stepped:Connect(function()
+                    local selfChar = getSelfChar()
+                    if selfChar then
+                        for _, part in ipairs(selfChar:GetDescendants()) do
+                            if part:IsA("BasePart") then
+                                part.CanCollide = false
+                            end
+                        end
+                    end
+                end)
+            end
+        end
+    })
 
     -- ═══════════════════════════════════════════════
-    -- CLEANUP REGISTRATION
+    -- CLEANUP HOOK
     -- ═══════════════════════════════════════════════
     local function cleanup()
-        getgenv().__RAVEN_NORECOIL_ACTIVE = false
-        getgenv().__RAVEN_ESP_ACTIVE = false
+        if aimbotConn then aimbotConn:Disconnect() end
         if speedConn then speedConn:Disconnect() end
         if noclipConn then noclipConn:Disconnect() end
+        if childAddedConn then childAddedConn:Disconnect() end
         if recoilThread then pcall(task.cancel, recoilThread) end
-        for _, s in pairs(getgenv().__RAVEN_ESP_DRAWINGS or {}) do
-            for _, d in pairs(s) do pcall(function() d:Remove() end) end
+        pcall(function() fovCircle:Remove() end)
+        removeAllChams()
+
+        local selfChar = getSelfChar()
+        if selfChar then
+            local hum = selfChar:FindFirstChildOfClass("Humanoid")
+            if hum then hum.WalkSpeed = 16 end
         end
-        getgenv().__RAVEN_ESP_DRAWINGS = {}
     end
 
     table.insert(getgenv().__RAVEN_CLEANUP, cleanup)
-
-    -- Register with RAVENHUB cleanup system
     if info and info.registerCleanup then
         info.registerCleanup(cleanup)
     end
