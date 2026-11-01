@@ -1,7 +1,6 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local GuiService = game:GetService("GuiService")
 local Workspace = game:GetService("Workspace")
 
 assert(game.PlaceId == 84448037861644, "Urban Reload aim assist: wrong place")
@@ -22,6 +21,7 @@ local state = {
     AimPart = nil,
     AimName = nil,
     AimGroup = nil,
+    FovCenter = nil,
     MaxDistance = 450,
     FovPixels = 180,
     FovVisible = true,
@@ -32,6 +32,7 @@ local state = {
 }
 
 local bound = false
+local fovBound = false
 local cameraStep
 local lastPriorityScan = 0
 local lastPartSwitch = 0
@@ -158,8 +159,17 @@ local function targetPart(character, camera, muzzle, params, center, fovLimit)
     return best, nearestPixels
 end
 
-local function findTarget(camera, muzzle, params)
-    local center = camera.ViewportSize / 2
+local function aimCenter(camera)
+    local playerGui = localPlayer:FindFirstChild("PlayerGui")
+    local crosshair = playerGui and playerGui:FindFirstChild("Crosshair")
+    local root = crosshair and crosshair:FindFirstChild("CrosshairRoot")
+    if root and root:IsA("GuiObject") then
+        return root.AbsolutePosition + root.AbsoluteSize / 2
+    end
+    return camera.ViewportSize / 2
+end
+
+local function findTarget(camera, muzzle, params, center)
     local bestPlayer, best, bestPlayerScore
     for _, other in ipairs(Players:GetPlayers()) do
         local character = validPlayer(other)
@@ -217,13 +227,15 @@ local function createFovCircle()
     fovStroke.Parent = fovCircle
 end
 
-local function updateFovCircle(character)
+local function updateFovCircle(character, center)
     if not fovGui or not fovCircle then return end
     local radius = math.max(10, tonumber(state.FovPixels) or 180)
-    local inset = GuiService:GetGuiInset()
     fovGui.Enabled = state.FovVisible
     fovCircle.Visible = equippedWeapon(character) ~= nil
-    fovCircle.Position = UDim2.new(0.5, inset.X, 0.5, inset.Y)
+    if center then
+        local origin = fovGui.AbsolutePosition
+        fovCircle.Position = UDim2.fromOffset(center.X - origin.X, center.Y - origin.Y)
+    end
     fovCircle.Size = UDim2.fromOffset(radius * 2, radius * 2)
     fovStroke.Color = state.Target
         and Color3.fromRGB(255, 105, 105) or Color3.fromRGB(90, 180, 255)
@@ -231,7 +243,9 @@ end
 
 local function update(dt)
     local character = localPlayer.Character
-    updateFovCircle(character)
+    local camera = Workspace.CurrentCamera
+    local center = camera and aimCenter(camera)
+    state.FovCenter = center
     if state.RequireRightMouse
         and not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
         clearTarget()
@@ -239,7 +253,6 @@ local function update(dt)
         return
     end
 
-    local camera = Workspace.CurrentCamera
     local weapon = equippedWeapon(character)
     local muzzle = weapon and muzzlePosition(weapon)
     if not camera or not muzzle then
@@ -257,7 +270,7 @@ local function update(dt)
     end
     if lockedCharacter and part and part == state.AimPart then
         local screen, onScreen = camera:WorldToViewportPoint(point)
-        local pixels = (Vector2.new(screen.X, screen.Y) - camera.ViewportSize / 2).Magnitude
+        local pixels = (Vector2.new(screen.X, screen.Y) - center).Magnitude
         if not onScreen or screen.Z <= 0 or pixels > state.FovPixels * 1.4
             or (point - camera.CFrame.Position).Magnitude > state.MaxDistance
             or not clearLine(camera.CFrame.Position, point, lockedCharacter, params)
@@ -270,12 +283,12 @@ local function update(dt)
     else
         other = nil
     end
-    if not other then other, chosen = findTarget(camera, muzzle, params) end
+    if not other then other, chosen = findTarget(camera, muzzle, params, center) end
     if other and other == state.Target and chosen and lockedCharacter
         and os.clock() - lastPriorityScan >= 0.2 then
         lastPriorityScan = os.clock()
         local preferred = targetPart(lockedCharacter, camera, muzzle, params,
-            camera.ViewportSize / 2, state.FovPixels)
+            center, state.FovPixels)
         if preferred and preferred.priority < chosen.priority
             and os.clock() - lastPartSwitch >= 0.25 then
             chosen = preferred
@@ -317,12 +330,24 @@ function state.Start()
     createFovCircle()
     RunService:BindToRenderStep("N3Z_PlayerAimAssist", Enum.RenderPriority.Camera.Value - 1, update)
     bound = true
+    RunService:BindToRenderStep("N3Z_PlayerAimFov", Enum.RenderPriority.Last.Value + 1,
+        function()
+            local camera = Workspace.CurrentCamera
+            local center = camera and aimCenter(camera)
+            state.FovCenter = center
+            updateFovCircle(localPlayer.Character, center)
+        end)
+    fovBound = true
 end
 
 function state.Stop()
     if bound then
         RunService:UnbindFromRenderStep("N3Z_PlayerAimAssist")
         bound = false
+    end
+    if fovBound then
+        RunService:UnbindFromRenderStep("N3Z_PlayerAimFov")
+        fovBound = false
     end
     state.Enabled = false
     clearTarget()
@@ -339,6 +364,7 @@ function state.Report()
         aimGroup = state.AimGroup,
         holdRightMouse = state.RequireRightMouse,
         fovPixels = state.FovPixels,
+        fovCenter = state.FovCenter,
         fovCircleVisible = fovCircle and fovCircle.Visible and fovGui.Enabled or false,
         maxDistance = state.MaxDistance,
         smoothness = state.Smoothness,
