@@ -42,7 +42,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/valrinx/Roblox-N3z/ma
 
 | Module | Game | Place ID | Version | Features |
 | :--- | :--- | :--- | :--- | :--- |
-| **Urban Reload** | Urban Reload | `84448037861644` | `v1.1.0` | Zombie farm with instant loot, player aim assist with FOV circle, infinite stamina, weapon and attachment case opening |
+| **Urban Reload** | Urban Reload | `84448037861644` | `v1.1.1` | Zombie farm with instant loot, player aim assist with FOV circle, infinite stamina, rapid weapon and attachment case opening |
 | **WarZPVP** | WarZPVP OPEN BETA | `135187059974536` | `v1.8.7` | PC/Mobile: ESP, Aimbot, Silent Aim (Auto position, 0–100% hit chance), Auto Heal, No Recoil (0–100% strength), Loot Aura, Auto Fishing |
 | **Steal An Egg** | Steal An Egg | `107778070777162` | Auto Farm, ESP, Teleport |
 | **Illegal Soccer** | Illegal Soccer | `126987974021910` | Auto Goal, Speed, Stamina, Ball ESP |

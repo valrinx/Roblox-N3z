@@ -302,7 +302,7 @@ return function(Window, ctx)
     })
 
     casesToggle = cases:CreateToggle({
-        Name = "Auto Open Cases (at station)",
+        Name = "Rapid Auto Open Cases (at station)",
         Flag = "UrbanReload_AutoCases",
         Default = false,
         Callback = function(enabled)

@@ -22,6 +22,7 @@ local state = {
     ReserveMoney = 0,
     MaxOpens = 10,
     Opened = 0,
+    BusyRetries = 0,
     Status = "stopped",
     LastItem = nil,
     LastError = nil,
@@ -32,6 +33,13 @@ local generation = 0
 function state.CanOpen(money, cost, reserve)
     return type(money) == "number" and type(cost) == "number"
         and money >= cost + (tonumber(reserve) or 0)
+end
+
+function state.RetryDelay(result)
+    if type(result) == "table" and result.err == "busy" then
+        return math.max(0.05, tonumber(result.left) or 0.5)
+    end
+    return 0.05
 end
 
 local function selection()
@@ -93,6 +101,10 @@ local function run(token)
                 if err == "far" then
                     state.Status = "move-to-" .. stationName
                     task.wait(0.5)
+                elseif err == "busy" then
+                    state.BusyRetries += 1
+                    state.Status = "server-cooldown"
+                    task.wait(state.RetryDelay(result))
                 else
                     state.Status = "server-rejected"
                     break
@@ -100,9 +112,10 @@ local function run(token)
             else
                 state.Opened += 1
                 state.LastItem = result.item or result.reward or result.id
+                    or result.weapon
                 state.LastError = nil
                 state.Status = "opened"
-                task.wait(1)
+                task.wait(state.RetryDelay(result))
             end
         end
     end
@@ -113,6 +126,7 @@ function state.Start()
     if state.Enabled then return end
     state.Enabled = true
     state.Opened = 0
+    state.BusyRetries = 0
     state.LastItem = nil
     state.LastError = nil
     generation += 1
@@ -136,6 +150,7 @@ function state.Report()
         reserveMoney = state.ReserveMoney,
         maxOpens = state.MaxOpens,
         opened = state.Opened,
+        busyRetries = state.BusyRetries,
         money = player:GetAttribute("Money"),
         status = state.Status,
         lastItem = state.LastItem,
