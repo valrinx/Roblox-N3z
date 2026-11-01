@@ -58,7 +58,7 @@ local N3Z_VERSION = "v2.4.7"
 -- add a module: {id,name,version,game,placeIds?,gameIds?,file,envKey?,coreFile?,platformFiles?,visualOcclusion?}
 local MODULES = {
     { id = "urban_reload", name = "Urban Reload", configName = "Urban Reload",
-      version = "v1.0.1", game = "Urban Reload",
+      version = "v1.0.2", game = "Urban Reload",
       placeIds = { 84448037861644 }, gameIds = { 10769552054 },
       file = "modules/urban_reload.lua" },
     { id = "hypershot", name = "Hypershot!", configName = "Hypershot", version = "v1.0.0", game = "Hypershot!",

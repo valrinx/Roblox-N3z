@@ -34,8 +34,6 @@ local state = {
 local bound = false
 local fovBound = false
 local cameraStep
-local lastPriorityScan = 0
-local lastPartSwitch = 0
 local fovGui
 local fovCircle
 local fovStroke
@@ -170,20 +168,29 @@ local function aimCenter(camera)
 end
 
 local function findTarget(camera, muzzle, params, center)
-    local bestPlayer, best, bestPlayerScore
+    local candidates = {}
     for _, other in ipairs(Players:GetPlayers()) do
         local character = validPlayer(other)
         if character then
             local candidate, nearestPixels = targetPart(character, camera, muzzle, params,
                 center, state.FovPixels)
-            if candidate and (not bestPlayerScore or nearestPixels < bestPlayerScore) then
-                bestPlayer = other
-                best = candidate
-                bestPlayerScore = nearestPixels
+            if candidate then
+                table.insert(candidates, {player = other, part = candidate, pixels = nearestPixels})
             end
         end
     end
-    return bestPlayer, best
+    local closest = state.SelectClosestCandidate(candidates)
+    return closest and closest.player, closest and closest.part
+end
+
+function state.SelectClosestCandidate(candidates)
+    local closest
+    for _, candidate in ipairs(candidates) do
+        if not closest or candidate.pixels < closest.pixels then
+            closest = candidate
+        end
+    end
+    return closest
 end
 
 local function clearTarget()
@@ -191,7 +198,6 @@ local function clearTarget()
     state.AimPart = nil
     state.AimName = nil
     state.AimGroup = nil
-    lastPartSwitch = 0
 end
 
 local function createFovCircle()
@@ -262,47 +268,13 @@ local function update(dt)
     end
 
     local params = rayParams(character)
-    local other, chosen = state.Target, nil
-    local lockedCharacter = other and validPlayer(other)
-    local part, point
-    if lockedCharacter and state.AimName then
-        part, point = pointFor(lockedCharacter, state.AimName)
-    end
-    if lockedCharacter and part and part == state.AimPart then
-        local screen, onScreen = camera:WorldToViewportPoint(point)
-        local pixels = (Vector2.new(screen.X, screen.Y) - center).Magnitude
-        if not onScreen or screen.Z <= 0 or pixels > state.FovPixels * 1.4
-            or (point - camera.CFrame.Position).Magnitude > state.MaxDistance
-            or not clearLine(camera.CFrame.Position, point, lockedCharacter, params)
-            or not clearLine(muzzle, point, lockedCharacter, params) then
-            other = nil
-        else
-            chosen = {part = part, point = point, name = state.AimName,
-                group = state.AimGroup, priority = groupPriority[state.AimGroup], score = pixels}
-        end
-    else
-        other = nil
-    end
-    if not other then other, chosen = findTarget(camera, muzzle, params, center) end
-    if other and other == state.Target and chosen and lockedCharacter
-        and os.clock() - lastPriorityScan >= 0.2 then
-        lastPriorityScan = os.clock()
-        local preferred = targetPart(lockedCharacter, camera, muzzle, params,
-            center, state.FovPixels)
-        if preferred and preferred.priority < chosen.priority
-            and os.clock() - lastPartSwitch >= 0.25 then
-            chosen = preferred
-        end
-    end
+    local other, chosen = findTarget(camera, muzzle, params, center)
     if not other or not chosen then
         clearTarget()
         state.Status = "no-visible-player"
         return
     end
 
-    if state.AimName ~= chosen.name or state.Target ~= other then
-        lastPartSwitch = os.clock()
-    end
     state.Target = other
     state.AimPart = chosen.part
     state.AimName = chosen.name
