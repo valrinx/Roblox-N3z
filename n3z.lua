@@ -1,5 +1,5 @@
 -- ============================================================
--- N3Z HUB v2.4.6 - n3z.lua (entrypoint)
+-- N3Z HUB v2.4.7 - n3z.lua (entrypoint)
 -- Native-GUI dock hub. Run:
 --   loadstring(game:HttpGet(
 --     "https://raw.githubusercontent.com/valrinx/Roblox-N3z/main/n3z.lua"))()
@@ -52,11 +52,15 @@ local REPO_URL = "https://raw.githubusercontent.com/valrinx/Roblox-N3z/" .. sour
 local HUB_DIR = "Roblox-N3z/"          -- local executor workspace path
 local HUB_URL = REPO_URL
 
-local N3Z_VERSION = "v2.4.6"
+local N3Z_VERSION = "v2.4.7"
 
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: {id,name,version,game,placeIds?,gameIds?,file,envKey?,coreFile?,platformFiles?,visualOcclusion?}
 local MODULES = {
+    { id = "urban_reload", name = "Urban Reload", configName = "Urban Reload",
+      version = "v1.0.0", game = "Urban Reload",
+      placeIds = { 84448037861644 }, gameIds = { 10769552054 },
+      file = "modules/urban_reload.lua" },
     { id = "hypershot", name = "Hypershot!", configName = "Hypershot", version = "v1.0.0", game = "Hypershot!",
       placeIds = { 86696142930150 }, gameIds = { 5995470825 },
       file = "modules/hypershot.lua", envKey = "__N3Z_HYPERSHOT", visualOcclusion = true,

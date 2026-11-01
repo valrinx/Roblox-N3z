@@ -1,4 +1,4 @@
-# ⚡ Roblox-N3z (N3Z HUB v2.4.6)
+# ⚡ Roblox-N3z (N3Z HUB v2.4.7)
 
 A high-performance Roblox script hub featuring a modern **Native-GUI bottom dock UI**, responsive controls, and high-framerate visual and combat enhancements.
 
@@ -42,6 +42,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/valrinx/Roblox-N3z/ma
 
 | Module | Game | Place ID | Version | Features |
 | :--- | :--- | :--- | :--- | :--- |
+| **Urban Reload** | Urban Reload | `84448037861644` | `v1.0.0` | Zombie farm with instant loot, player aim assist with FOV circle, infinite stamina |
 | **WarZPVP** | WarZPVP OPEN BETA | `135187059974536` | `v1.8.7` | PC/Mobile: ESP, Aimbot, Silent Aim (Auto position, 0–100% hit chance), Auto Heal, No Recoil (0–100% strength), Loot Aura, Auto Fishing |
 | **Steal An Egg** | Steal An Egg | `107778070777162` | Auto Farm, ESP, Teleport |
 | **Illegal Soccer** | Illegal Soccer | `126987974021910` | Auto Goal, Speed, Stamina, Ball ESP |
@@ -61,6 +62,7 @@ Roblox-N3z/
 ├── n3z-compat.lua     # Window adapter for legacy & new modules
 ├── modules/           # Game-specific modules
 │   ├── warz_pvp.lua
+│   ├── urban_reload.lua
 │   ├── steal_an_egg.lua
 │   ├── illegal_soccer.lua
 │   ├── wanted.lua
