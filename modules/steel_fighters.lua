@@ -48,8 +48,9 @@ return function(Window, runtimeInfo)
     ----------------------------------------------------------------
     local State = {
         AutoFarm = false,
-        MovementMode = "Tween (Smooth & Fast)", -- "Tween (Smooth & Fast)", "Walk (Safest)", "Speed Glide"
-        TweenSpeed = 32,
+        MovementMode = "Underground Mole (Stealth)", -- "Underground Mole (Stealth)", "Tween Sky Flight", "Walk (Safest)", "Speed Glide"
+        TweenSpeed = 26,
+        UndergroundDepth = 16,
         Noclip = true,
         ScrapPriority = "All", -- "All", "Giant/Big Only", "Giant Only", "Small/Medium"
         MaxStack = 10,
@@ -220,7 +221,7 @@ return function(Window, runtimeInfo)
 
     local function moveToTarget(targetPos, reachDistance, timeout)
         reachDistance = reachDistance or 6.5
-        timeout = timeout or 8
+        timeout = timeout or 10
 
         local root = getRoot()
         local hum = getHum()
@@ -228,18 +229,85 @@ return function(Window, runtimeInfo)
 
         local startTime = os.clock()
 
-        if State.MovementMode == "Tween (Smooth & Fast)" then
+        if State.MovementMode == "Underground Mole (Stealth)" then
+            local depth = math.clamp(State.UndergroundDepth or 16, 10, 30)
+            local speed = math.clamp(State.TweenSpeed or 26, 15, 36)
+            local surfaceTarget = targetPos + Vector3.new(0, 3, 0)
+            local curUnderY = targetPos.Y - depth
+            local underTarget = Vector3.new(targetPos.X, curUnderY, targetPos.Z)
+
+            if State.Noclip then setNoclip(true) end
+            root.Anchored = true
+
+            -- 1. Submerge vertically underground if currently near surface
+            local submergeStart = Vector3.new(root.Position.X, curUnderY, root.Position.Z)
+            if math.abs(root.Position.Y - curUnderY) > 3.5 then
+                State.StatusText = "Submerging underground..."
+                local tDown = TweenService:Create(root, TweenInfo.new(0.35, Enum.EasingStyle.Linear), {
+                    CFrame = CFrame.new(submergeStart)
+                })
+                tDown:Play()
+                tDown.Completed:Wait()
+            end
+
+            -- 2. Underground horizontal glide directly beneath target
+            local travelDist = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(underTarget.X, 0, underTarget.Z)).Magnitude
+            if travelDist > 2.5 then
+                local duration = math.clamp(travelDist / speed, 0.2, timeout)
+                local tTravel = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {
+                    CFrame = CFrame.new(underTarget)
+                })
+                local completed = false
+                local conn = tTravel.Completed:Connect(function() completed = true end)
+                tTravel:Play()
+
+                while not completed and os.clock() - startTime < (duration + 1.2) do
+                    if not isAlive() or not State.AutoFarm then
+                        tTravel:Cancel()
+                        break
+                    end
+                    if State.Noclip then setNoclip(true) end
+                    task.wait(0.05)
+                end
+                conn:Disconnect()
+            end
+
+            if not State.AutoFarm or not isAlive() then
+                local raycastResult = workspace:Raycast(Vector3.new(root.Position.X, 100, root.Position.Z), Vector3.new(0, -200, 0))
+                local surfaceY = raycastResult and raycastResult.Position.Y + 3 or (targetPos.Y + 3)
+                root.CFrame = CFrame.new(root.Position.X, surfaceY, root.Position.Z)
+                root.Anchored = false
+                if State.Noclip then setNoclip(false) end
+                root.AssemblyLinearVelocity = Vector3.zero
+                return false
+            end
+
+            -- 3. Surface up directly onto target position
+            State.StatusText = "Surfacing to grab..."
+            local tUp = TweenService:Create(root, TweenInfo.new(0.35, Enum.EasingStyle.Linear), {
+                CFrame = CFrame.new(surfaceTarget)
+            })
+            tUp:Play()
+            tUp.Completed:Wait()
+
+            root.Anchored = false
+            if State.Noclip then setNoclip(false) end
+            root.AssemblyLinearVelocity = Vector3.zero
+            task.wait(0.35) -- allow physics replication to settle smoothly
+            return (root.Position - targetPos).Magnitude <= reachDistance + 2
+
+        elseif State.MovementMode == "Tween Sky Flight" or State.MovementMode == "Tween (Smooth & Fast)" then
             local dist = (root.Position - targetPos).Magnitude
             if dist <= reachDistance then return true end
 
-            local speed = math.clamp(State.TweenSpeed or 32, 15, 45)
+            local speed = math.clamp(State.TweenSpeed or 26, 15, 36)
             local duration = math.clamp(dist / speed, 0.2, timeout)
 
             if State.Noclip then setNoclip(true) end
 
             local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear)
             local tween = TweenService:Create(root, tweenInfo, {
-                CFrame = CFrame.new(targetPos)
+                CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
             })
 
             local completed = false
@@ -258,6 +326,7 @@ return function(Window, runtimeInfo)
             conn:Disconnect()
             if State.Noclip then setNoclip(false) end
             root.AssemblyLinearVelocity = Vector3.zero
+            task.wait(0.3)
             return (root.Position - targetPos).Magnitude <= reachDistance + 2
 
         elseif State.MovementMode == "Walk (Safest)" then
@@ -305,14 +374,24 @@ return function(Window, runtimeInfo)
         local entryPos = getPlayerPlotEntry()
         local originPos = getPlayerPlotOrigin()
 
-        -- First move to entry
-        moveToTarget(entryPos, 8, 10)
+        -- First submerge and travel underground all the way to base gate (entry) and surface up
+        moveToTarget(entryPos, 8, 12)
 
-        -- Then move slightly deeper inside the plot to trigger boundary deposit
+        -- Once surfaced at gate outside junkyard, step across plot boundary into base
+        local root = getRoot()
+        local hum = getHum()
         local insidePlotPos = (entryPos + originPos) / 2
-        moveToTarget(insidePlotPos, 6, 6)
 
         State.StatusText = "Depositing scrap..."
+        if hum and root then
+            hum:MoveTo(insidePlotPos)
+            local stepWait = os.clock()
+            while os.clock() - stepWait < 2.5 and (root.Position - insidePlotPos).Magnitude > 4 do
+                if getCarryingCount() == 0 then break end
+                task.wait(0.1)
+            end
+        end
+
         local waitStart = os.clock()
         while os.clock() - waitStart < 3.5 do
             if getCarryingCount() == 0 then
@@ -321,11 +400,11 @@ return function(Window, runtimeInfo)
             task.wait(0.2)
         end
 
-        -- If still carrying, move closer to origin
-        if getCarryingCount() > 0 then
-            moveToTarget(originPos, 6, 5)
+        -- If still carrying, walk closer to origin
+        if getCarryingCount() > 0 and hum then
+            hum:MoveTo(originPos)
             local waitStart2 = os.clock()
-            while os.clock() - waitStart2 < 2 do
+            while os.clock() - waitStart2 < 2.5 do
                 if getCarryingCount() == 0 then
                     break
                 end
@@ -698,8 +777,8 @@ return function(Window, runtimeInfo)
 
     FarmTab:CreateDropdown({
         Name = "Movement Mode",
-        Options = { "Tween (Smooth & Fast)", "Walk (Safest)", "Speed Glide" },
-        CurrentOption = "Tween (Smooth & Fast)",
+        Options = { "Underground Mole (Stealth)", "Tween Sky Flight", "Walk (Safest)", "Speed Glide" },
+        CurrentOption = "Underground Mole (Stealth)",
         Flag = "SFMovementMode",
         Callback = function(opt)
             State.MovementMode = type(opt) == "table" and opt[1] or opt
@@ -707,11 +786,23 @@ return function(Window, runtimeInfo)
     })
 
     FarmTab:CreateSlider({
-        Name = "Tween Flight Speed",
-        Range = { 15, 45 },
+        Name = "Underground Depth",
+        Range = { 10, 25 },
+        Increment = 1,
+        Suffix = " studs",
+        CurrentValue = 16,
+        Flag = "SFUndergroundDepth",
+        Callback = function(val)
+            State.UndergroundDepth = val
+        end,
+    })
+
+    FarmTab:CreateSlider({
+        Name = "Travel Speed",
+        Range = { 15, 36 },
         Increment = 1,
         Suffix = " studs/s",
-        CurrentValue = 32,
+        CurrentValue = 26,
         Flag = "SFTweenSpeed",
         Callback = function(val)
             State.TweenSpeed = val
@@ -826,6 +917,13 @@ return function(Window, runtimeInfo)
         clearESP()
         if espFolder then pcall(function() espFolder:Destroy() end) end
         if statusGui then pcall(function() statusGui:Destroy() end) end
+        pcall(function()
+            local root = getRoot()
+            if root then
+                root.Anchored = false
+            end
+            setNoclip(false)
+        end)
         getgenv().__N3Z_STEEL_FIGHTERS = nil
     end
 
