@@ -63,6 +63,7 @@ return function(Window, runtimeInfo)
     local connections = {}
     local destroyed = false
     local isFarming = false
+    local blacklist = {}
     local espFolder = nil
     local statusGui = nil
 
@@ -160,7 +161,7 @@ return function(Window, runtimeInfo)
 
         for attrName, val in pairs(jy:GetAttributes()) do
             local id = JunkyardMod.IdOf(attrName)
-            if id then
+            if id and (not blacklist[id] or os.clock() >= blacklist[id]) then
                 local scrapKey, cf = JunkyardMod.Decode(val)
                 if cf and scrapKey then
                     local realm = JunkyardMod.YardOf(cf.Position)
@@ -302,18 +303,36 @@ return function(Window, runtimeInfo)
         State.TargetText = "Base Gate (Entry)"
 
         local entryPos = getPlayerPlotEntry()
-        local reached = moveToTarget(entryPos, 8, 12)
+        local originPos = getPlayerPlotOrigin()
 
-        if reached then
-            State.StatusText = "Depositing scrap..."
-            local waitStart = os.clock()
-            while os.clock() - waitStart < 3 do
+        -- First move to entry
+        moveToTarget(entryPos, 8, 10)
+
+        -- Then move slightly deeper inside the plot to trigger boundary deposit
+        local insidePlotPos = (entryPos + originPos) / 2
+        moveToTarget(insidePlotPos, 6, 6)
+
+        State.StatusText = "Depositing scrap..."
+        local waitStart = os.clock()
+        while os.clock() - waitStart < 3.5 do
+            if getCarryingCount() == 0 then
+                break
+            end
+            task.wait(0.2)
+        end
+
+        -- If still carrying, move closer to origin
+        if getCarryingCount() > 0 then
+            moveToTarget(originPos, 6, 5)
+            local waitStart2 = os.clock()
+            while os.clock() - waitStart2 < 2 do
                 if getCarryingCount() == 0 then
                     break
                 end
                 task.wait(0.2)
             end
         end
+
         State.StatusText = "Idle"
         State.TargetText = "None"
     end
@@ -326,11 +345,19 @@ return function(Window, runtimeInfo)
         isFarming = true
 
         pcall(function()
-            local carryingCount = getCarryingCount()
+            local carryingTable = getCarryingTable()
+            local carryingCount = #carryingTable
             local maxAllowed = math.min(State.MaxStack, JunkyardMod.StackLimit(LP) or 10)
 
-            -- If hands are full, deliver immediately
+            -- If carrying count reached limit, deliver immediately
             if carryingCount >= maxAllowed then
+                deliverScrap()
+                isFarming = false
+                return
+            end
+
+            -- If carrying a robot part, hands are full! (Cannot stack robot parts)
+            if carryingCount > 0 and not JunkyardMod.ScrapOf(carryingTable[1]) then
                 deliverScrap()
                 isFarming = false
                 return
@@ -341,7 +368,6 @@ return function(Window, runtimeInfo)
             if #junks == 0 then
                 State.StatusText = "No target scrap in realm"
                 State.TargetText = "Waiting for spawns"
-                -- If we are carrying some scrap and no targets left, deliver what we have
                 if carryingCount > 0 then
                     deliverScrap()
                 end
@@ -349,7 +375,40 @@ return function(Window, runtimeInfo)
                 return
             end
 
-            local target = junks[1]
+            -- Find target that we can actually add
+            local target = nil
+            for _, candidate in ipairs(junks) do
+                local canAdd, refusal = JunkyardMod.CanAdd(carryingTable, candidate.key, LP)
+                if canAdd then
+                    target = candidate
+                    break
+                else
+                    if refusal == "Your hands are full" or refusal == "Too heavy" then
+                        if carryingCount > 0 then
+                            -- Hands are full with what we carry right now! Deliver!
+                            deliverScrap()
+                            isFarming = false
+                            return
+                        else
+                            -- Can't pick up this candidate even with empty hands (blacklist it)
+                            blacklist[candidate.id] = os.clock() + 15
+                        end
+                    end
+                end
+            end
+
+            if not target then
+                -- No valid targets that can be added
+                if carryingCount > 0 then
+                    deliverScrap()
+                else
+                    State.StatusText = "No valid scrap can be taken"
+                    State.TargetText = "Waiting"
+                end
+                isFarming = false
+                return
+            end
+
             State.StatusText = string.format("Moving to %s", target.key)
             State.TargetText = string.format("#%d (%d studs)", target.id, math.floor(target.dist))
 
@@ -358,19 +417,47 @@ return function(Window, runtimeInfo)
                 State.StatusText = string.format("Grabbing #%d...", target.id)
                 task.wait(0.15)
 
-                -- Call PickUpJunk
+                -- Invoke PickUpJunk
                 local ok, res, extra = pcall(PickUpJunkRemote.InvokeServer, PickUpJunkRemote, target.id)
                 if ok and res == true then
                     State.StatusText = string.format("Picked up %s!", target.key)
                     task.wait(State.FarmInterval)
-                elseif extra == "Slow down" then
-                    task.wait(0.4)
-                    pcall(PickUpJunkRemote.InvokeServer, PickUpJunkRemote, target.id)
+                else
+                    -- Pick up failed / refused
+                    if extra == "Slow down" then
+                        task.wait(0.4)
+                        local ok2, res2, extra2 = pcall(PickUpJunkRemote.InvokeServer, PickUpJunkRemote, target.id)
+                        if ok2 and res2 == true then
+                            State.StatusText = string.format("Picked up %s!", target.key)
+                            task.wait(State.FarmInterval)
+                        elseif extra2 == "Your hands are full" or extra2 == "Too heavy" then
+                            if getCarryingCount() > 0 then
+                                deliverScrap()
+                                isFarming = false
+                                return
+                            end
+                        else
+                            blacklist[target.id] = os.clock() + 10
+                        end
+                    elseif extra == "Your hands are full" or extra == "Too heavy" then
+                        State.StatusText = "Hands full! Delivering..."
+                        if getCarryingCount() > 0 then
+                            deliverScrap()
+                            isFarming = false
+                            return
+                        else
+                            blacklist[target.id] = os.clock() + 15
+                        end
+                    else
+                        -- Item gone, too far, or failed
+                        blacklist[target.id] = os.clock() + 10
+                    end
                 end
             end
 
-            -- Check if full after pickup
-            if getCarryingCount() >= maxAllowed then
+            -- Re-check carrying count after grab attempt
+            local updatedCarrying = getCarryingTable()
+            if #updatedCarrying >= maxAllowed or (#updatedCarrying > 0 and not JunkyardMod.ScrapOf(updatedCarrying[1])) then
                 deliverScrap()
             end
         end)
@@ -409,7 +496,7 @@ return function(Window, runtimeInfo)
 
         for attrName, val in pairs(jy:GetAttributes()) do
             local id = JunkyardMod.IdOf(attrName)
-            if id then
+            if id and (not blacklist[id] or os.clock() >= blacklist[id]) then
                 local scrapKey, cf = JunkyardMod.Decode(val)
                 if cf and scrapKey and JunkyardMod.YardOf(cf.Position) == pRealm then
                     activeIds[id] = true
