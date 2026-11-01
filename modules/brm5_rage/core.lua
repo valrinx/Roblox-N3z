@@ -85,14 +85,16 @@ return function(Window, info)
         local container = resolveContainer()
         if not container then return nil end
         local camPos = camera.CFrame.Position
-        local selfModel, minDist = nil, 25
+        local selfModel, minDist = nil, 9999
         for _, m in ipairs(container:GetChildren()) do
-            local root = m:FindFirstChild("Root")
-            if root then
-                local d = (root.Position - camPos).Magnitude
-                if d < minDist then
-                    minDist = d
-                    selfModel = m
+            if m:IsA("Model") and (m.Name == "Male" or m.Name == "Female") then
+                local root = m:FindFirstChild("Root") or m:FindFirstChild("Head")
+                if root then
+                    local d = (root.Position - camPos).Magnitude
+                    if d < minDist then
+                        minDist = d
+                        selfModel = m
+                    end
                 end
             end
         end
@@ -287,9 +289,13 @@ return function(Window, info)
     -- ═══════════════════════════════════════════════
     TabVisuals:CreateSection("Hardware-Accelerated ESP")
 
-    local function applyChams(model)
+    local function applyChams(model, selfChar)
         if not state.esp.enabled or not state.esp.chams or not model:IsA("Model") then return end
-        if model == getSelfChar() then return end
+        if model == selfChar then
+            local existing = model:FindFirstChild("N3Z_Chams")
+            if existing then existing:Destroy() end
+            return
+        end
 
         local isAI = false
         for _, sub in ipairs(model:GetChildren()) do
@@ -299,14 +305,26 @@ return function(Window, info)
             end
         end
 
-        local hl = model:FindFirstChild("N3Z_Chams") or Instance.new("Highlight")
-        hl.Name = "N3Z_Chams"
-        hl.FillColor = isAI and state.esp.aiColor or state.esp.playerColor
-        hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-        hl.FillTransparency = 0.5
-        hl.OutlineTransparency = 0.1
-        hl.Adornee = model
-        hl.Parent = model
+        local hl = model:FindFirstChild("N3Z_Chams")
+        local targetColor = isAI and state.esp.aiColor or state.esp.playerColor
+        if not hl then
+            hl = Instance.new("Highlight")
+            hl.Name = "N3Z_Chams"
+            hl.FillColor = targetColor
+            hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+            hl.FillTransparency = 0.5
+            hl.OutlineTransparency = 0.1
+            hl.Adornee = model
+            hl.Parent = model
+            hl.Enabled = true
+        else
+            if hl.FillColor ~= targetColor then
+                hl.FillColor = targetColor
+            end
+            if not hl.Enabled then
+                hl.Enabled = true
+            end
+        end
     end
 
     local function removeAllChams()
@@ -321,16 +339,31 @@ return function(Window, info)
     local function updateAllChams()
         local container = resolveContainer()
         if not container then return end
+        local selfChar = getSelfChar()
         for _, m in ipairs(container:GetChildren()) do
-            applyChams(m)
+            if m:IsA("Model") and (m.Name == "Male" or m.Name == "Female") then
+                applyChams(m, selfChar)
+            end
         end
     end
+
+    -- Continuous background watcher: auto-detects newly spawned bots and players without manual toggling
+    local espLoop = task.spawn(function()
+        while true do
+            if state.esp.enabled and state.esp.chams then
+                pcall(updateAllChams)
+            end
+            task.wait(1.0)
+        end
+    end)
 
     local childAddedConn = nil
     if charContainer then
         childAddedConn = charContainer.ChildAdded:Connect(function(child)
-            task.wait(0.2)
-            applyChams(child)
+            task.wait(0.4)
+            if state.esp.enabled and state.esp.chams and child:IsA("Model") then
+                pcall(function() applyChams(child, getSelfChar()) end)
+            end
         end)
     end
 
@@ -453,6 +486,7 @@ return function(Window, info)
         if noclipConn then noclipConn:Disconnect() end
         if childAddedConn then childAddedConn:Disconnect() end
         if recoilThread then pcall(task.cancel, recoilThread) end
+        if espLoop then pcall(task.cancel, espLoop) end
         pcall(function() fovCircle:Remove() end)
         removeAllChams()
 
