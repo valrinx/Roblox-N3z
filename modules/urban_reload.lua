@@ -7,17 +7,20 @@ return function(Window, ctx)
         farm = "tools/urban_reload_auto_farm.lua",
         aim = "tools/urban_reload_player_aim_assist.lua",
         stamina = "tools/urban_reload_infinite_stamina.lua",
+        cases = "tools/urban_reload_auto_cases.lua",
     }
     local envKeys = {
         farm = "N3Z_UrbanFarm",
         aim = "N3Z_PlayerAimAssist",
         stamina = "N3Z_UrbanInfiniteStamina",
+        cases = "N3Z_UrbanCaseOpener",
     }
     local features = {}
     local destroyed = false
     local farmToggle
     local aimToggle
     local staminaToggle
+    local casesToggle
     local options = {
         farmRange = 95,
         farmMinHealth = 35,
@@ -27,6 +30,11 @@ return function(Window, ctx)
         aimTurnSpeed = 120,
         aimCircle = true,
         aimHold = false,
+        caseCategory = "Weapon",
+        weaponCase = "Basic",
+        attachmentCase = "AttSights",
+        caseReserve = 0,
+        caseLimit = 10,
     }
 
     local function instanceFor(name)
@@ -51,6 +59,12 @@ return function(Window, ctx)
             instance.MaxTurnDegreesPerSecond = options.aimTurnSpeed
             instance.FovVisible = options.aimCircle
             instance.RequireRightMouse = options.aimHold
+        elseif name == "cases" then
+            instance.Category = options.caseCategory
+            instance.WeaponCase = options.weaponCase
+            instance.AttachmentCase = options.attachmentCase
+            instance.ReserveMoney = options.caseReserve
+            instance.MaxOpens = options.caseLimit
         end
     end
 
@@ -84,6 +98,7 @@ return function(Window, ctx)
     local combat = Window:CreateTab("Urban Reload Combat")
     local visuals = Window:CreateTab("Urban Reload Visuals")
     local movement = Window:CreateTab("Urban Reload Movement")
+    local cases = Window:CreateTab("Urban Reload Cases")
 
     farmToggle = combat:CreateToggle({
         Name = "Auto Farm Zombies + Instant Loot",
@@ -223,6 +238,78 @@ return function(Window, ctx)
                 if not startFeature("stamina") then rollbackToggle(staminaToggle) end
             else
                 stopFeature("stamina")
+            end
+        end,
+    })
+
+    cases:CreateDropdown({
+        Name = "Case Category",
+        Flag = "UrbanReload_CaseCategory",
+        Options = {"Weapon", "Attachment"},
+        Default = options.caseCategory,
+        Callback = function(value)
+            options.caseCategory = value
+            if features.cases then configure("cases", features.cases) end
+        end,
+    })
+
+    cases:CreateDropdown({
+        Name = "Weapon Case",
+        Flag = "UrbanReload_WeaponCase",
+        Options = {"Basic", "Normal", "Legendary"},
+        Default = options.weaponCase,
+        Callback = function(value)
+            options.weaponCase = value
+            if features.cases then configure("cases", features.cases) end
+        end,
+    })
+
+    cases:CreateDropdown({
+        Name = "Attachment Case",
+        Flag = "UrbanReload_AttachmentCase",
+        Options = {"AttSights", "AttMuzzle", "AttUnder", "AttCamoColor", "AttCamoGloss", "AttCamoWrap"},
+        Default = options.attachmentCase,
+        Callback = function(value)
+            options.attachmentCase = value
+            if features.cases then configure("cases", features.cases) end
+        end,
+    })
+
+    cases:CreateSlider({
+        Name = "Keep Money",
+        Flag = "UrbanReload_CaseReserve",
+        Min = 0,
+        Max = 500000,
+        Default = options.caseReserve,
+        Increment = 5000,
+        Callback = function(value)
+            options.caseReserve = value
+            if features.cases then configure("cases", features.cases) end
+        end,
+    })
+
+    cases:CreateSlider({
+        Name = "Open Limit",
+        Flag = "UrbanReload_CaseLimit",
+        Min = 1,
+        Max = 100,
+        Default = options.caseLimit,
+        Increment = 1,
+        Callback = function(value)
+            options.caseLimit = value
+            if features.cases then configure("cases", features.cases) end
+        end,
+    })
+
+    casesToggle = cases:CreateToggle({
+        Name = "Auto Open Cases (at station)",
+        Flag = "UrbanReload_AutoCases",
+        Default = false,
+        Callback = function(enabled)
+            if enabled then
+                if not startFeature("cases") then rollbackToggle(casesToggle) end
+            else
+                stopFeature("cases")
             end
         end,
     })
