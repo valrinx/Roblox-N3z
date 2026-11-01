@@ -9,6 +9,22 @@ return function(Window, runtimeInfo)
         local prev = getgenv().__N3Z_STEEL_FIGHTERS
         if prev and type(prev.Destroy) == "function" then prev.Destroy() end
     end)
+    pcall(function()
+        for _, obj in ipairs(workspace:GetChildren()) do
+            if obj.Name:find("SteelFighters") then pcall(function() obj:Destroy() end) end
+        end
+        local lp = game:GetService("Players").LocalPlayer
+        if lp and lp:FindFirstChild("PlayerGui") then
+            for _, g in ipairs(lp.PlayerGui:GetChildren()) do
+                if g.Name:find("SteelFighters") then pcall(function() g:Destroy() end) end
+            end
+        end
+        if type(gethui) == "function" then
+            for _, g in ipairs(gethui():GetChildren()) do
+                if g.Name:find("SteelFighters") then pcall(function() g:Destroy() end) end
+            end
+        end
+    end)
 
     local Players = game:GetService("Players")
     local RunService = game:GetService("RunService")
