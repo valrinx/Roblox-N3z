@@ -594,7 +594,7 @@ return function(Window, runtimeInfo)
     ----------------------------------------------------------------
     --  UI TABS
     ----------------------------------------------------------------
-    local FarmTab = Window:CreateTab("Scrap Farm", 4483362458)
+    local FarmTab = Window:CreateTab("Combat", 4483362458)
     FarmTab:CreateSection("Auto Scrap Farmer")
 
     FarmTab:CreateToggle({
