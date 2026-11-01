@@ -57,6 +57,10 @@ local N3Z_VERSION = "v2.4.7"
 -- ---------- module registry (mirror of the old project's registry) ----------
 -- add a module: {id,name,version,game,placeIds?,gameIds?,file,envKey?,coreFile?,platformFiles?,visualOcclusion?}
 local MODULES = {
+    { id = "steelfighters", name = "Steel Fighters", configName = "SteelFighters",
+      version = "v1.0.0", game = "Steel Fighters",
+      placeIds = { 74122653145285 }, gameIds = { 10765618402 },
+      file = "modules/steel_fighters.lua", envKey = "__N3Z_STEEL_FIGHTERS" },
     { id = "urban_reload", name = "Urban Reload", configName = "Urban Reload",
       version = "v1.1.1", game = "Urban Reload",
       placeIds = { 84448037861644 }, gameIds = { 10769552054 },
