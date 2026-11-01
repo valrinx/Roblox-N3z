@@ -36,13 +36,12 @@ return function(Window, runtimeInfo)
     local Camera = workspace.CurrentCamera
 
     ----------------------------------------------------------------
-    --  REMOTES & MODULES (Live Verified)
+    --  REMOTES & MODULES (Direct Instance Access - Preserves Thread Capability)
     ----------------------------------------------------------------
-    local Net = require(ReplicatedStorage:WaitForChild("Packages"):WaitForChild("Net"))
+    local RemotesFolder = ReplicatedStorage:WaitForChild("Packages"):WaitForChild("Net"):WaitForChild("Remotes")
+    local PickUpJunkRemote = RemotesFolder:WaitForChild("PickUpJunk")
+    local OwnJunkRemote = RemotesFolder:WaitForChild("OwnJunk")
     local JunkyardMod = require(ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Junkyard"))
-    local SpaceMod = require(ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Space"))
-    local PickUpJunkRemote = Net:RemoteFunction("PickUpJunk")
-    local OwnJunkRemote = Net:RemoteFunction("OwnJunk")
 
     ----------------------------------------------------------------
     --  STATE
