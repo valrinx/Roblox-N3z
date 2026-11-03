@@ -37,18 +37,6 @@ function Policy.choose(snapshot)
         return { type = "wait", reason = "Incoming attack; preserve troops" }
     end
 
-    if snapshot.enableNuke then
-        local strikeThreshold = (tonumber(snapshot.ownShare) or 0) >= 0.35 and 0.08 or 0.25
-        for _, target in ipairs(snapshot.nukeTargets or {}) do
-            if not target.ally and target.tile and target.kind and target.cost
-                and (tonumber(target.share) or 0) >= strikeThreshold
-                and gold >= target.cost * 1.2 then
-                return { type = "nuke", kind = target.kind, tile = target.tile,
-                    owner = target.owner, reason = "Contain runaway rival" }
-            end
-        end
-    end
-
     if snapshot.enableBuild then
         local sites = snapshot.buildSites or {}
         local counts = snapshot.buildCounts or {}
@@ -74,9 +62,42 @@ function Policy.choose(snapshot)
             and (counts.city or 0) < math.min(8, math.max(1, math.floor(tiles / 1500))) then
             return { type = "build", kind = "city", tile = city.tile, reason = "Expand troop capacity" }
         end
-        local sam = affordable("sam", 2)
+        local sam = affordable("sam", 1.25)
         if sam and tiles >= 5000 and (counts.sam or 0) < math.min(6, math.ceil(tiles / 5000)) then
             return { type = "build", kind = "sam", tile = sam.tile, reason = "Protect core territory from missiles" }
+        end
+        local silo = affordable("silo", 1.5)
+        if silo and tiles >= 5000 and (counts.silo or 0) < math.min(2, math.ceil(tiles / 20000)) then
+            return { type = "build", kind = "silo", tile = silo.tile, reason = "Establish missile launcher" }
+        end
+        local upgrades = snapshot.upgradeSites or {}
+        local function upgrade(kind, reserve, reason)
+            local candidate = upgrades[kind]
+            if candidate and candidate.tile and candidate.cost
+                and gold >= candidate.cost * reserve then
+                return { type = "build", kind = kind, tile = candidate.tile,
+                    upgrade = true, reason = reason }
+            end
+        end
+        if troops >= cap * 0.8 then
+            local action = upgrade("city", 1.5, "Upgrade troop capacity")
+            if action then return action end
+        end
+        if (tonumber(snapshot.income) or 0) < math.max(2000, tiles * 2) then
+            local action = upgrade("factory", 1.5, "Upgrade gold income")
+            if action then return action end
+        end
+    end
+
+    if snapshot.enableNuke then
+        local strikeThreshold = (tonumber(snapshot.ownShare) or 0) >= 0.35 and 0.08 or 0.25
+        for _, target in ipairs(snapshot.nukeTargets or {}) do
+            if not target.ally and target.tile and target.kind and target.cost
+                and (tonumber(target.share) or 0) >= strikeThreshold
+                and gold >= target.cost * 1.2 then
+                return { type = "nuke", kind = target.kind, tile = target.tile,
+                    owner = target.owner, reason = "Contain runaway rival" }
+            end
         end
     end
 
@@ -109,6 +130,16 @@ function Policy.choose(snapshot)
         end
     end
     if best then return best end
+    if snapshot.enableBuild then
+        for _, kind in ipairs({ "factory", "city", "port", "sam", "silo" }) do
+            local candidate = (snapshot.upgradeSites or {})[kind]
+            if candidate and candidate.tile and candidate.cost
+                and gold >= candidate.cost * 2 then
+                return { type = "build", kind = kind, tile = candidate.tile,
+                    upgrade = true, reason = "Upgrade existing infrastructure" }
+            end
+        end
+    end
     if snapshot.enableDefense and site and site.tile and site.cost
         and gold >= site.cost * 2
         and (tonumber(snapshot.defenseCount) or 0)
@@ -147,7 +178,7 @@ return function(Window)
         Callback = function(value) settings.autoExpand = value == true end })
     tab:CreateToggle({ Name = "Auto Strategic Strike", CurrentValue = false, Flag = "RoWorldNuke",
         Callback = function(value) settings.autoNuke = value == true end })
-    tab:CreateLabel("Builds cities, factories, ports, and SAMs. Attacks keep a troop reserve.")
+    tab:CreateLabel("Builds and upgrades cities, factories, ports, SAMs, and launchers.")
 
     local function setStatus(value)
         if value ~= status then
@@ -191,12 +222,16 @@ return function(Window)
         local seenOwners = {}
         local defenseSite
         local defenseDistance
-        local buildCounts = { city = 0, port = 0, factory = 0, defense = 0, sam = 0 }
-        local kindsById = { [0] = "city", [1] = "port", [2] = "factory", [3] = "defense", [4] = "sam" }
+        local buildCounts = { city = 0, port = 0, factory = 0, defense = 0, sam = 0, silo = 0 }
+        local kindsById = { [0] = "city", [1] = "port", [2] = "factory", [3] = "defense", [4] = "sam", [5] = "silo" }
+        local ownedStructures = {}
         for _, structure in pairs(state.structures or {}) do
             if structure.owner == me.id then
                 local kind = kindsById[structure.kind]
-                if kind then buildCounts[kind] += 1 end
+                if kind then
+                    buildCounts[kind] += 1
+                    if kind ~= "defense" then ownedStructures[#ownedStructures + 1] = structure end
+                end
             end
         end
         local seen = {}
@@ -236,8 +271,9 @@ return function(Window)
         end
         local sitesChecked = 0
         local buildSites = {}
+        local upgradeSites = {}
         local buildTries = {}
-        local buildKinds = { "city", "factory", "port", "sam" }
+        local buildKinds = { "city", "factory", "port", "sam", "silo" }
         local buildAvailability = {}
         if settings.autoBuild then
             for _, kind in ipairs(buildKinds) do
@@ -247,6 +283,19 @@ return function(Window)
                     buildAvailability[kind] = availability
                 end
                 buildTries[kind] = 0
+            end
+            table.sort(ownedStructures, function(a, b)
+                return (tonumber(a.level) or 1) < (tonumber(b.level) or 1)
+            end)
+            for _, structure in ipairs(ownedStructures) do
+                local kind = kindsById[structure.kind]
+                if buildAvailability[kind] and not upgradeSites[kind] then
+                    local placement = ctx.rules:placement(kind, structure.tile)
+                    if placement and placement.ok and placement.upgrade then
+                        upgradeSites[kind] = { tile = placement.tile or structure.tile,
+                            cost = buildAvailability[kind].cost, level = placement.level }
+                    end
+                end
             end
         end
         if settings.autoExpand then
@@ -365,7 +414,7 @@ return function(Window)
             ownShare = state:land_share(me.id),
             income = me.income, incoming = incoming, threatTile = threatTile,
             defenseSite = defenseSite, defenseCount = buildCounts.defense, tiles = me.tiles,
-            buildCounts = buildCounts, buildSites = buildSites,
+            buildCounts = buildCounts, buildSites = buildSites, upgradeSites = upgradeSites,
             enableDefense = settings.autoDefense, enableBuild = settings.autoBuild,
             enableExpand = settings.autoExpand, enableNuke = settings.autoNuke,
             nukeTargets = nukeTargets,

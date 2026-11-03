@@ -148,6 +148,47 @@ checkBuild("large nation adds SAM protection", {
     buildSites = { sam = { tile = 104, cost = 1500000 } },
 }, "sam")
 
+checkBuild("large nation builds a missile launcher", {
+    troops = 500000, maxTroops = 1000000, gold = 5000000, incoming = 0,
+    tiles = 30000, enableBuild = true,
+    buildCounts = { city = 8, factory = 8, port = 6, sam = 2, silo = 0 },
+    buildSites = { silo = { tile = 105, cost = 1000000 } },
+}, "silo")
+
+checkBuild("affordable SAM does not wait for double its cost", {
+    troops = 500000, maxTroops = 1000000, gold = 4000000, incoming = 0,
+    tiles = 30000, enableBuild = true,
+    buildCounts = { city = 8, factory = 8, port = 6, sam = 2, silo = 1 },
+    buildSites = { sam = { tile = 104, cost = 3000000 } },
+}, "sam")
+
+local upgrade = policy.choose({
+    troops = 900000, maxTroops = 1000000, gold = 5000000, incoming = 0,
+    tiles = 30000, enableBuild = true,
+    buildCounts = { city = 8, factory = 8, port = 6, sam = 6, silo = 2 },
+    upgradeSites = { city = { tile = 201, cost = 1000000, level = 2 } },
+})
+assert(upgrade.type == "build" and upgrade.kind == "city" and upgrade.upgrade == true
+    and upgrade.tile == 201, "city capacity pressure must upgrade an existing city")
+
+local launcherUpgrade = policy.choose({
+    troops = 500000, maxTroops = 1000000, gold = 5000000, incoming = 0,
+    tiles = 30000, enableBuild = true,
+    buildCounts = { city = 8, factory = 8, port = 6, sam = 6, silo = 2 },
+    upgradeSites = { silo = { tile = 205, cost = 1000000, level = 2 } },
+})
+assert(launcherUpgrade.type == "build" and launcherUpgrade.kind == "silo"
+    and launcherUpgrade.upgrade == true, "existing launcher must be upgraded")
+
+checkBuild("core protection takes priority over optional missile strike", {
+    troops = 500000, maxTroops = 1000000, gold = 5000000, incoming = 0,
+    tiles = 30000, enableBuild = true, enableNuke = true,
+    buildCounts = { city = 8, factory = 8, port = 6, sam = 2, silo = 1 },
+    buildSites = { sam = { tile = 104, cost = 3000000 } },
+    nukeTargets = {{ owner = 19, tile = 4444, share = 0.42,
+        kind = "atom", cost = 750000 }},
+}, "sam")
+
 check("large nation attacks instead of endlessly building defenses", {
     troops = 10000000, maxTroops = 12000000, gold = 30000000, income = 100000,
     incoming = 0, tiles = 120000, enableBuild = true, enableDefense = true, enableExpand = true,
