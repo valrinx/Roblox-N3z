@@ -1,5 +1,28 @@
 local Policy = {}
 
+function Policy.frontierWindow(items, cursor, limit)
+    local count = #items
+    if count == 0 then return {}, 1 end
+    local start = math.clamp(math.floor(tonumber(cursor) or 1), 1, count)
+    local result = {}
+    for offset = 0, math.min(count, limit) - 1 do
+        result[#result + 1] = items[(start + offset - 1) % count + 1]
+    end
+    return result, (start + #result - 1) % count + 1
+end
+
+function Policy.candidateForOwner(ownerId, owner, tile, primary, allied)
+    if (not owner and ownerId ~= -1) or (owner and owner.alive == false)
+        or not tile or tile < 0 or allied
+        or not primary or not primary.ok
+        or (primary.type ~= "attack" and primary.type ~= "expand" and primary.type ~= "boat") then
+        return nil
+    end
+    return { tile = primary.type == "boat" and primary.boat_tile or tile,
+        probeTile = tile, owner = ownerId, kind = primary.type,
+        troops = owner and (tonumber(owner.troops) or 0) or 0, ally = false }
+end
+
 function Policy.choose(snapshot)
     local troops = math.max(0, tonumber(snapshot.troops) or 0)
     local cap = math.max(1, tonumber(snapshot.maxTroops) or 1)
@@ -14,10 +37,16 @@ function Policy.choose(snapshot)
         return { type = "wait", reason = "Incoming attack; preserve troops" }
     end
 
-    if snapshot.enableDefense and site and site.tile and site.cost
-        and gold >= site.cost * 2
-        and (tonumber(snapshot.defenseCount) or 0) < math.max(2, math.ceil((tonumber(snapshot.tiles) or 0) / 1000)) then
-        return { type = "build", kind = "defense", tile = site.tile, reason = "Fortify exposed frontier" }
+    if snapshot.enableNuke then
+        local strikeThreshold = (tonumber(snapshot.ownShare) or 0) >= 0.35 and 0.08 or 0.25
+        for _, target in ipairs(snapshot.nukeTargets or {}) do
+            if not target.ally and target.tile and target.kind and target.cost
+                and (tonumber(target.share) or 0) >= strikeThreshold
+                and gold >= target.cost * 1.2 then
+                return { type = "nuke", kind = target.kind, tile = target.tile,
+                    owner = target.owner, reason = "Contain runaway rival" }
+            end
+        end
     end
 
     if snapshot.enableBuild then
@@ -34,19 +63,19 @@ function Policy.choose(snapshot)
             return { type = "build", kind = "city", tile = city.tile, reason = "Increase troop capacity" }
         end
         local port = affordable("port", 1.5)
-        if port and (counts.port or 0) < math.max(1, math.floor(tiles / 1800)) then
+        if port and (counts.port or 0) < math.min(6, math.max(1, math.floor(tiles / 1800))) then
             return { type = "build", kind = "port", tile = port.tile, reason = "Open coastal trade" }
         end
         local factory = affordable("factory", 1.5)
-        if factory and (counts.factory or 0) < math.max(1, math.floor(tiles / 1200)) then
+        if factory and (counts.factory or 0) < math.min(8, math.max(1, math.floor(tiles / 1200))) then
             return { type = "build", kind = "factory", tile = factory.tile, reason = "Grow gold income" }
         end
         if city and troops >= cap * 0.75
-            and (counts.city or 0) < math.max(1, math.floor(tiles / 1500)) then
+            and (counts.city or 0) < math.min(8, math.max(1, math.floor(tiles / 1500))) then
             return { type = "build", kind = "city", tile = city.tile, reason = "Expand troop capacity" }
         end
         local sam = affordable("sam", 2)
-        if sam and tiles >= 5000 and (counts.sam or 0) < math.ceil(tiles / 5000) then
+        if sam and tiles >= 5000 and (counts.sam or 0) < math.min(6, math.ceil(tiles / 5000)) then
             return { type = "build", kind = "sam", tile = sam.tile, reason = "Protect core territory from missiles" }
         end
     end
@@ -57,11 +86,12 @@ function Policy.choose(snapshot)
 
     local best, bestScore
     for _, candidate in ipairs(snapshot.candidates or {}) do
-        if candidate.tile and not candidate.ally
-            and (candidate.kind == "attack" or candidate.kind == "expand") then
+        if snapshot.enableExpand ~= false and candidate.tile and not candidate.ally
+            and (candidate.kind == "attack" or candidate.kind == "expand" or candidate.kind == "boat") then
             local enemy = math.max(0, tonumber(candidate.troops) or 0)
             local neutral = candidate.kind == "expand"
-            local committed = neutral and troops * 0.25
+            local committed = candidate.kind == "boat" and troops * 0.65
+                or neutral and troops * 0.25
                 or math.min(troops * 0.7, math.max(troops * 0.25, enemy * 1.8))
             local reserve = troops - committed
             local safe = neutral and reserve >= cap * 0.15
@@ -69,7 +99,9 @@ function Policy.choose(snapshot)
             if safe then
                 local score = enemy + (candidate.owner == -1 and -1000000 or 0)
                 if not bestScore or score < bestScore then
-                    best = { type = "attack", tile = candidate.tile, owner = candidate.owner,
+                    best = { type = candidate.kind == "boat" and "boat" or "attack",
+                        tile = candidate.tile, probeTile = candidate.probeTile,
+                        owner = candidate.owner,
                         ratio = committed / troops, reason = "Favorable frontier with protected reserve" }
                     bestScore = score
                 end
@@ -77,6 +109,12 @@ function Policy.choose(snapshot)
         end
     end
     if best then return best end
+    if snapshot.enableDefense and site and site.tile and site.cost
+        and gold >= site.cost * 2
+        and (tonumber(snapshot.defenseCount) or 0)
+            < math.min(6, math.max(2, math.ceil((tonumber(snapshot.tiles) or 0) / 5000))) then
+        return { type = "build", kind = "defense", tile = site.tile, reason = "Fortify exposed frontier" }
+    end
     if snapshot.enableDefense and not snapshot.enableExpand then
         return { type = "wait", reason = site and "Saving gold for defense" or "No valid defense site" }
     end
@@ -93,8 +131,10 @@ return function(Window)
 
     local running = true
     local settings = { autoDefense = false, autoExpand = false, autoBuild = true,
+        autoNuke = false,
         scanInterval = 3, actionInterval = 8 }
     local lastActionAt = 0
+    local lastNukeAt = -math.huge
     local status = "Waiting for a live match"
     local tab = Window:CreateTab("RoWorld", "globe")
     tab:CreateSection("Territory Command")
@@ -105,6 +145,8 @@ return function(Window)
         Callback = function(value) settings.autoBuild = value == true end })
     tab:CreateToggle({ Name = "Auto Expand", CurrentValue = false, Flag = "RoWorldExpand",
         Callback = function(value) settings.autoExpand = value == true end })
+    tab:CreateToggle({ Name = "Auto Strategic Strike", CurrentValue = false, Flag = "RoWorldNuke",
+        Callback = function(value) settings.autoNuke = value == true end })
     tab:CreateLabel("Builds cities, factories, ports, and SAMs. Attacks keep a troop reserve.")
 
     local function setStatus(value)
@@ -130,6 +172,7 @@ return function(Window)
     end
 
     local context
+    local frontierCursor = 1
     local function readSnapshot(ctx)
         local state = ctx.state
         local me = state and state:local_info()
@@ -144,6 +187,8 @@ return function(Window)
         end
 
         local candidates = {}
+        local nukeTargets = {}
+        local seenOwners = {}
         local defenseSite
         local defenseDistance
         local buildCounts = { city = 0, port = 0, factory = 0, defense = 0, sam = 0 }
@@ -157,11 +202,13 @@ return function(Window)
         local seen = {}
         local width = state.W
         local offsets = { -1, 1, -width, width }
-        local frontier = {}
+        local allFrontier = {}
         for tile in pairs(ctx.borders.border or {}) do
-            frontier[#frontier + 1] = tile
-            if #frontier >= 200 then break end
+            allFrontier[#allFrontier + 1] = tile
         end
+        table.sort(allFrontier)
+        local frontier
+        frontier, frontierCursor = Policy.frontierWindow(allFrontier, frontierCursor, 200)
         if settings.autoDefense then
             table.sort(frontier, function(a, b)
                 if threatTile then
@@ -200,6 +247,58 @@ return function(Window)
                     buildAvailability[kind] = availability
                 end
                 buildTries[kind] = 0
+            end
+        end
+        if settings.autoExpand then
+            for _, ownerId in ipairs(ctx.borders:neighbour_ids()) do
+                local owner = state:get_owner(ownerId)
+                local tile = owner and state:label_tile(ownerId)
+                local primary = tile and ctx.rules:primary(tile)
+                local candidate = Policy.candidateForOwner(ownerId, owner, tile, primary,
+                    state:are_allies(me.id, ownerId))
+                if candidate then
+                    seenOwners[ownerId] = true
+                    candidates[#candidates + 1] = candidate
+                end
+            end
+            for _, entry in ipairs(state:ranking()) do
+                local ownerId = entry.id or entry
+                if ownerId ~= me.id and not seenOwners[ownerId] then
+                    local owner = state:get_owner(ownerId)
+                    local tile = owner and state:label_tile(ownerId)
+                    local primary = tile and ctx.rules:primary(tile)
+                    local candidate = Policy.candidateForOwner(ownerId, owner, tile, primary,
+                        state:are_allies(me.id, ownerId))
+                    if candidate then
+                        seenOwners[ownerId] = true
+                        candidates[#candidates + 1] = candidate
+                    end
+                end
+            end
+        end
+        if settings.autoNuke and os.clock() - lastNukeAt >= 20 then
+            for _, entry in ipairs(state:ranking()) do
+                local ownerId = entry.id or entry
+                if ownerId ~= me.id and not state:are_allies(me.id, ownerId)
+                    and state:land_share(ownerId)
+                        >= (state:land_share(me.id) >= 0.35 and 0.08 or 0.25) then
+                    local tile = state:label_tile(ownerId)
+                    for _, kind in ipairs({ "mirv", "hydrogen", "atom" }) do
+                        local availability = ctx.rules:availability(kind)
+                        if availability and availability.ok and availability.cost
+                            and me.gold >= availability.cost * 1.2 then
+                            local placement = ctx.rules:placement(kind, tile)
+                            if placement and placement.ok then
+                                nukeTargets[#nukeTargets + 1] = {
+                                    owner = ownerId, tile = tile, share = state:land_share(ownerId),
+                                    kind = kind, cost = availability.cost,
+                                }
+                                break
+                            end
+                        end
+                    end
+                    if #nukeTargets > 0 then break end
+                end
             end
         end
         for _, borderTile in ipairs(frontier) do
@@ -248,16 +347,14 @@ return function(Window)
                     if tile >= 0 and tile < state.N and not seen[tile] then
                         seen[tile] = true
                         local owner = state:tile_owner(tile)
-                        if owner ~= me.id and owner ~= 0 then
+                        if owner ~= me.id and owner ~= 0 and not seenOwners[owner] then
                             local primary = ctx.rules:primary(tile)
-                            if primary and primary.ok
-                                and (primary.type == "attack" or primary.type == "expand") then
-                                local target = state:get_owner(owner)
-                                candidates[#candidates + 1] = {
-                                    tile = tile, owner = owner, kind = primary.type,
-                                    troops = target and target.troops or 0,
-                                    ally = owner > 0 and state:are_allies(me.id, owner) or false,
-                                }
+                            local target = state:get_owner(owner)
+                            local candidate = Policy.candidateForOwner(owner, target, tile, primary,
+                                owner > 0 and state:are_allies(me.id, owner))
+                            if candidate then
+                                seenOwners[owner] = true
+                                candidates[#candidates + 1] = candidate
                             end
                         end
                     end
@@ -265,16 +362,19 @@ return function(Window)
             end
         end
         return { troops = me.troops, maxTroops = me.max_troops, gold = me.gold,
+            ownShare = state:land_share(me.id),
             income = me.income, incoming = incoming, threatTile = threatTile,
             defenseSite = defenseSite, defenseCount = buildCounts.defense, tiles = me.tiles,
             buildCounts = buildCounts, buildSites = buildSites,
             enableDefense = settings.autoDefense, enableBuild = settings.autoBuild,
-            enableExpand = settings.autoExpand,
+            enableExpand = settings.autoExpand, enableNuke = settings.autoNuke,
+            nukeTargets = nukeTargets,
             candidates = candidates }
     end
 
     local function step()
-        if not settings.autoDefense and not settings.autoBuild and not settings.autoExpand then
+        if not settings.autoDefense and not settings.autoBuild
+            and not settings.autoExpand and not settings.autoNuke then
             setStatus("All modes off")
             return
         end
@@ -295,8 +395,10 @@ return function(Window)
             action = { type = "wait", reason = "Defense mode off" }
         elseif action.type == "build" and action.kind ~= "defense" and not settings.autoBuild then
             action = { type = "wait", reason = "Build mode off" }
-        elseif action.type == "attack" and not settings.autoExpand then
+        elseif (action.type == "attack" or action.type == "boat") and not settings.autoExpand then
             action = { type = "wait", reason = "Expansion mode off" }
+        elseif action.type == "nuke" and not settings.autoNuke then
+            action = { type = "wait", reason = "Strategic strike mode off" }
         end
         if action.type == "wait" then
             setStatus(action.reason)
@@ -315,17 +417,31 @@ return function(Window)
                 return
             end
             intent = { type = "build", kind = action.kind, tile = placement.tile or action.tile }
-        elseif action.type == "attack" then
-            local primary = context.rules:primary(action.tile)
-            if not primary or not primary.ok or (primary.type ~= "attack" and primary.type ~= "expand") then
+        elseif action.type == "nuke" then
+            local availability = context.rules:availability(action.kind)
+            local placement = context.rules:placement(action.kind, action.tile)
+            if not availability or not availability.ok or not placement or not placement.ok then
+                setStatus("Strike target changed; rescanning")
+                return
+            end
+            intent = { type = "nuke", kind = action.kind, tile = action.tile }
+        elseif action.type == "attack" or action.type == "boat" then
+            local primary = context.rules:primary(action.probeTile or action.tile)
+            local valid = action.type == "boat" and primary and primary.type == "boat"
+                or action.type == "attack" and primary
+                    and (primary.type == "attack" or primary.type == "expand")
+            if not primary or not primary.ok or not valid then
                 setStatus("Target changed; rescanning")
                 return
             end
-            intent = { type = "attack", tile = action.tile, ratio = action.ratio }
+            intent = { type = action.type,
+                tile = action.type == "boat" and primary.boat_tile or action.tile,
+                ratio = action.ratio }
         end
         if not intent then return end
         context.session:send_intent(intent)
         lastActionAt = os.clock()
+        if action.type == "nuke" then lastNukeAt = lastActionAt end
         setStatus(action.type .. " at tile " .. tostring(action.tile))
     end
 
