@@ -39,4 +39,21 @@ check("unclaimed land expands safely", {
     incoming = 0, candidates = {{ tile = 11, owner = -1, troops = 0, kind = "expand" }},
 }, "attack")
 
+check("early nation expands neutral land before troop cap", {
+    troops = 30000, maxTroops = 100000, gold = 1000, income = 100,
+    incoming = 0, candidates = {{ tile = 77, owner = -1, troops = 0, kind = "expand" }},
+}, "attack")
+
+check("strong army can commit enough troops to defeat neighbor", {
+    troops = 80000, maxTroops = 100000, gold = 1000, income = 100,
+    incoming = 0, candidates = {{ tile = 91, owner = 36, troops = 25000, kind = "attack" }},
+}, "attack")
+
+local defenseWait = policy.choose({
+    troops = 80000, maxTroops = 100000, gold = 75000, income = 1000,
+    incoming = 0, enableDefense = true, enableExpand = false,
+    defenseSite = { tile = 22, cost = 50000 }, candidates = {},
+})
+assert(defenseWait.reason == "Saving gold for defense", "defense-only wait must explain the defense budget")
+
 return "RoWorld policy tests passed"

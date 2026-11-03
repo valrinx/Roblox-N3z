@@ -20,7 +20,7 @@ function Policy.choose(snapshot)
         return { type = "build", kind = "defense", tile = site.tile, reason = "Fortify exposed frontier" }
     end
 
-    if troops < cap * 0.6 then
+    if troops < cap * 0.25 then
         return { type = "wait", reason = "Recover troop reserve" }
     end
 
@@ -29,9 +29,13 @@ function Policy.choose(snapshot)
         if candidate.tile and not candidate.ally
             and (candidate.kind == "attack" or candidate.kind == "expand") then
             local enemy = math.max(0, tonumber(candidate.troops) or 0)
-            local committed = math.min(troops * 0.35, math.max(troops * 0.15, enemy * 2.5))
+            local neutral = candidate.kind == "expand"
+            local committed = neutral and troops * 0.25
+                or math.min(troops * 0.7, math.max(troops * 0.25, enemy * 1.8))
             local reserve = troops - committed
-            if reserve >= cap * 0.45 and (candidate.kind == "expand" or committed >= enemy * 2.2) then
+            local safe = neutral and reserve >= cap * 0.15
+                or not neutral and reserve >= cap * 0.25 and committed >= enemy * 1.8
+            if safe then
                 local score = enemy + (candidate.owner == -1 and -1000000 or 0)
                 if not bestScore or score < bestScore then
                     best = { type = "attack", tile = candidate.tile, owner = candidate.owner,
@@ -41,7 +45,11 @@ function Policy.choose(snapshot)
             end
         end
     end
-    return best or { type = "wait", reason = "No safe expansion target" }
+    if best then return best end
+    if snapshot.enableDefense and not snapshot.enableExpand then
+        return { type = "wait", reason = site and "Saving gold for defense" or "No valid defense site" }
+    end
+    return { type = "wait", reason = "No safe expansion target" }
 end
 
 local environment = (type(getgenv) == "function" and getgenv()) or _G
