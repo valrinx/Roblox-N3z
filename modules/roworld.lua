@@ -8,7 +8,7 @@ function Policy.choose(snapshot)
     local site = snapshot.defenseSite
 
     if incoming >= troops * 0.2 then
-        if site and site.tile and site.cost and gold >= site.cost * 1.25 then
+        if snapshot.enableDefense and site and site.tile and site.cost and gold >= site.cost * 1.25 then
             return { type = "build", kind = "defense", tile = site.tile, reason = "Incoming attack; fortify border" }
         end
         return { type = "wait", reason = "Incoming attack; preserve troops" }
@@ -18,6 +18,37 @@ function Policy.choose(snapshot)
         and gold >= site.cost * 2
         and (tonumber(snapshot.defenseCount) or 0) < math.max(2, math.ceil((tonumber(snapshot.tiles) or 0) / 1000)) then
         return { type = "build", kind = "defense", tile = site.tile, reason = "Fortify exposed frontier" }
+    end
+
+    if snapshot.enableBuild then
+        local sites = snapshot.buildSites or {}
+        local counts = snapshot.buildCounts or {}
+        local tiles = tonumber(snapshot.tiles) or 0
+        local function affordable(kind, reserve)
+            local candidate = sites[kind]
+            return candidate and candidate.tile and candidate.cost
+                and gold >= candidate.cost * reserve and candidate
+        end
+        local city = affordable("city", 1.25)
+        if city and (counts.city or 0) == 0 then
+            return { type = "build", kind = "city", tile = city.tile, reason = "Increase troop capacity" }
+        end
+        local port = affordable("port", 1.5)
+        if port and (counts.port or 0) < math.max(1, math.floor(tiles / 1800)) then
+            return { type = "build", kind = "port", tile = port.tile, reason = "Open coastal trade" }
+        end
+        local factory = affordable("factory", 1.5)
+        if factory and (counts.factory or 0) < math.max(1, math.floor(tiles / 1200)) then
+            return { type = "build", kind = "factory", tile = factory.tile, reason = "Grow gold income" }
+        end
+        if city and troops >= cap * 0.75
+            and (counts.city or 0) < math.max(1, math.floor(tiles / 1500)) then
+            return { type = "build", kind = "city", tile = city.tile, reason = "Expand troop capacity" }
+        end
+        local sam = affordable("sam", 2)
+        if sam and tiles >= 5000 and (counts.sam or 0) < math.ceil(tiles / 5000) then
+            return { type = "build", kind = "sam", tile = sam.tile, reason = "Protect core territory from missiles" }
+        end
     end
 
     if troops < cap * 0.25 then
@@ -60,10 +91,9 @@ return function(Window)
         environment.__N3Z_ROWORLD.Destroy()
     end
 
-    local Players = game:GetService("Players")
-    local localPlayer = Players.LocalPlayer
     local running = true
-    local settings = { autoDefense = false, autoExpand = false, scanInterval = 3, actionInterval = 8 }
+    local settings = { autoDefense = false, autoExpand = false, autoBuild = true,
+        scanInterval = 3, actionInterval = 8 }
     local lastActionAt = 0
     local status = "Waiting for a live match"
     local tab = Window:CreateTab("RoWorld", "globe")
@@ -71,9 +101,11 @@ return function(Window)
     local statusLabel = tab:CreateLabel("Status: " .. status)
     tab:CreateToggle({ Name = "Auto Defense", CurrentValue = false, Flag = "RoWorldDefense",
         Callback = function(value) settings.autoDefense = value == true end })
+    tab:CreateToggle({ Name = "Auto Build", CurrentValue = true, Flag = "RoWorldBuild",
+        Callback = function(value) settings.autoBuild = value == true end })
     tab:CreateToggle({ Name = "Auto Expand", CurrentValue = false, Flag = "RoWorldExpand",
         Callback = function(value) settings.autoExpand = value == true end })
-    tab:CreateLabel("Uses local match state. Keeps at least 45% of troop capacity in reserve.")
+    tab:CreateLabel("Builds cities, factories, ports, and SAMs. Attacks keep a troop reserve.")
 
     local function setStatus(value)
         if value ~= status then
@@ -114,9 +146,13 @@ return function(Window)
         local candidates = {}
         local defenseSite
         local defenseDistance
-        local defenseCount = 0
+        local buildCounts = { city = 0, port = 0, factory = 0, defense = 0, sam = 0 }
+        local kindsById = { [0] = "city", [1] = "port", [2] = "factory", [3] = "defense", [4] = "sam" }
         for _, structure in pairs(state.structures or {}) do
-            if structure.owner == me.id and structure.kind == 3 then defenseCount += 1 end
+            if structure.owner == me.id then
+                local kind = kindsById[structure.kind]
+                if kind then buildCounts[kind] += 1 end
+            end
         end
         local seen = {}
         local width = state.W
@@ -152,6 +188,20 @@ return function(Window)
             end)
         end
         local sitesChecked = 0
+        local buildSites = {}
+        local buildTries = {}
+        local buildKinds = { "city", "factory", "port", "sam" }
+        local buildAvailability = {}
+        if settings.autoBuild then
+            for _, kind in ipairs(buildKinds) do
+                local availability = ctx.rules:availability(kind)
+                if availability and availability.ok and availability.cost
+                    and me.gold >= availability.cost * 1.25 then
+                    buildAvailability[kind] = availability
+                end
+                buildTries[kind] = 0
+            end
+        end
         for _, borderTile in ipairs(frontier) do
             if settings.autoDefense and sitesChecked < 60 and (threatTile or not defenseSite) then
                 for _, tile in ipairs({ borderTile, borderTile - width * 4, borderTile + width * 4 }) do
@@ -169,6 +219,24 @@ return function(Window)
                                     defenseDistance = distance
                                 end
                                 if not threatTile then break end
+                            end
+                        end
+                    end
+                end
+            end
+            if settings.autoBuild then
+                for _, kind in ipairs(buildKinds) do
+                    if buildAvailability[kind] and not buildSites[kind] and buildTries[kind] < 24 then
+                        for _, tile in ipairs({ borderTile, borderTile - width * 6, borderTile + width * 6 }) do
+                            if buildTries[kind] >= 24 then break end
+                            if tile >= 0 and tile < state.N and state:tile_owner(tile) == me.id then
+                                buildTries[kind] += 1
+                                local placement = ctx.rules:placement(kind, tile)
+                                if placement and placement.ok and not placement.upgrade then
+                                    buildSites[kind] = { tile = placement.tile or tile,
+                                        cost = buildAvailability[kind].cost }
+                                    break
+                                end
                             end
                         end
                     end
@@ -198,14 +266,16 @@ return function(Window)
         end
         return { troops = me.troops, maxTroops = me.max_troops, gold = me.gold,
             income = me.income, incoming = incoming, threatTile = threatTile,
-            defenseSite = defenseSite, defenseCount = defenseCount, tiles = me.tiles,
-            enableDefense = settings.autoDefense, enableExpand = settings.autoExpand,
+            defenseSite = defenseSite, defenseCount = buildCounts.defense, tiles = me.tiles,
+            buildCounts = buildCounts, buildSites = buildSites,
+            enableDefense = settings.autoDefense, enableBuild = settings.autoBuild,
+            enableExpand = settings.autoExpand,
             candidates = candidates }
     end
 
     local function step()
-        if not settings.autoDefense and not settings.autoExpand then
-            setStatus("Both modes off")
+        if not settings.autoDefense and not settings.autoBuild and not settings.autoExpand then
+            setStatus("All modes off")
             return
         end
         if not context or not context.session or context.session.state ~= context.state then
@@ -221,8 +291,10 @@ return function(Window)
             return
         end
         local action = Policy.choose(snapshot)
-        if action.type == "build" and not settings.autoDefense then
+        if action.type == "build" and action.kind == "defense" and not settings.autoDefense then
             action = { type = "wait", reason = "Defense mode off" }
+        elseif action.type == "build" and action.kind ~= "defense" and not settings.autoBuild then
+            action = { type = "wait", reason = "Build mode off" }
         elseif action.type == "attack" and not settings.autoExpand then
             action = { type = "wait", reason = "Expansion mode off" }
         end
@@ -236,7 +308,13 @@ return function(Window)
         end
         local intent
         if action.type == "build" then
-            intent = { type = "build", kind = "defense", tile = action.tile }
+            local placement = context.rules:placement(action.kind, action.tile)
+            local availability = context.rules:availability(action.kind)
+            if not placement or not placement.ok or not availability or not availability.ok then
+                setStatus("Build site changed; rescanning")
+                return
+            end
+            intent = { type = "build", kind = action.kind, tile = placement.tile or action.tile }
         elseif action.type == "attack" then
             local primary = context.rules:primary(action.tile)
             if not primary or not primary.ok or (primary.type ~= "attack" and primary.type ~= "expand") then

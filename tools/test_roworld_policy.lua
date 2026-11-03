@@ -8,7 +8,8 @@ end
 
 check("under attack blocks expansion", {
     troops = 10000, maxTroops = 20000, gold = 200000, income = 1000,
-    incoming = 7000, candidates = {{ tile = 11, owner = 2, troops = 1000, kind = "attack" }},
+    incoming = 7000, enableDefense = true,
+    candidates = {{ tile = 11, owner = 2, troops = 1000, kind = "attack" }},
     defenseSite = { tile = 22, cost = 50000 },
 }, "build")
 
@@ -55,5 +56,47 @@ local defenseWait = policy.choose({
     defenseSite = { tile = 22, cost = 50000 }, candidates = {},
 })
 assert(defenseWait.reason == "Saving gold for defense", "defense-only wait must explain the defense budget")
+
+local function checkBuild(name, snapshot, kind)
+    local action = policy.choose(snapshot)
+    assert(action.type == "build" and action.kind == kind,
+        name .. ": expected " .. kind .. ", got " .. tostring(action.kind))
+end
+
+checkBuild("troop cap pressure builds city", {
+    troops = 90000, maxTroops = 100000, gold = 300000, incoming = 0,
+    tiles = 1800, enableBuild = true, buildCounts = { city = 0, factory = 0, port = 0 },
+    buildSites = { city = { tile = 101, cost = 125000 }, factory = { tile = 102, cost = 125000 } },
+}, "city")
+
+checkBuild("income base builds factory", {
+    troops = 50000, maxTroops = 100000, gold = 250000, incoming = 0,
+    tiles = 1800, enableBuild = true, buildCounts = { city = 1, factory = 0, port = 0 },
+    buildSites = { factory = { tile = 102, cost = 125000 } },
+}, "factory")
+
+checkBuild("coastal trade takes priority over inland factory", {
+    troops = 50000, maxTroops = 100000, gold = 250000, incoming = 0,
+    tiles = 1800, enableBuild = true, buildCounts = { city = 1, factory = 0, port = 0 },
+    buildSites = { factory = { tile = 102, cost = 125000 }, port = { tile = 103, cost = 125000 } },
+}, "port")
+
+checkBuild("one city does not starve the first port", {
+    troops = 90000, maxTroops = 100000, gold = 300000, incoming = 0,
+    tiles = 4000, enableBuild = true, buildCounts = { city = 1, factory = 0, port = 0 },
+    buildSites = { city = { tile = 101, cost = 125000 }, port = { tile = 103, cost = 125000 } },
+}, "port")
+
+checkBuild("coastal trade builds port", {
+    troops = 50000, maxTroops = 100000, gold = 300000, incoming = 0,
+    tiles = 1800, enableBuild = true, buildCounts = { city = 1, factory = 1, port = 0 },
+    buildSites = { port = { tile = 103, cost = 125000 } },
+}, "port")
+
+checkBuild("large nation adds SAM protection", {
+    troops = 50000, maxTroops = 100000, gold = 5000000, incoming = 0,
+    tiles = 6000, enableBuild = true, buildCounts = { city = 6, factory = 5, port = 3, sam = 0 },
+    buildSites = { sam = { tile = 104, cost = 1500000 } },
+}, "sam")
 
 return "RoWorld policy tests passed"

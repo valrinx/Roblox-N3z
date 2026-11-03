@@ -88,7 +88,7 @@ local MODULES = {
       placeIds = { 14438406081 }, file = "modules/wanted.lua", visualOcclusion = true },
     { id = "wartycoon", name = "War Tycoon", version = "v1.1.1", game = "War Tycoon",
       placeIds = { 4639625707 }, file = "modules/war_tycoon.lua", visualOcclusion = true },
-    { id = "roworld", name = "RoWorld", configName = "RoWorld", version = "v1.0.1", game = "RoWorld [World PvP]",
+    { id = "roworld", name = "RoWorld", configName = "RoWorld", version = "v1.1.0", game = "RoWorld [World PvP]",
       placeIds = { 137151641329864 }, gameIds = { 10768172922 },
       file = "modules/roworld.lua", envKey = "__N3Z_ROWORLD" },
     { id = "frisbeefrenzy", name = "Frisbee Frenzy", version = "v1.1.1", game = "Frisbee Frenzy",

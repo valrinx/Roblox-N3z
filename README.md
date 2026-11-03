@@ -48,7 +48,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/valrinx/Roblox-N3z/ma
 | **Illegal Soccer** | Illegal Soccer | `126987974021910` | Auto Goal, Speed, Stamina, Ball ESP |
 | **Wanted** | Wanted | `14438406081` | ESP, Silent Aim, Triggerbot |
 | **War Tycoon** | War Tycoon | `4639625707` | Base Auto Collect, Player ESP |
-| **RoWorld** | RoWorld [World PvP] | `137151641329864` | `v1.0.1` | Optional Auto Defense and Auto Expand with troop reserve, alliance checks, and build cooldown |
+| **RoWorld** | RoWorld [World PvP] | `137151641329864` | `v1.1.0` | Auto Build for cities, ports, factories, and SAMs; optional Auto Defense and Auto Expand |
 | **Frisbee Frenzy** | Frisbee Frenzy | `106986181033085` | Auto Catch, Curve Boost |
 
 ---
