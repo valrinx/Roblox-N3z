@@ -20,7 +20,48 @@ function Policy.candidateForOwner(ownerId, owner, tile, primary, allied)
     end
     return { tile = primary.type == "boat" and primary.boat_tile or tile,
         probeTile = tile, owner = ownerId, kind = primary.type,
-        troops = owner and (tonumber(owner.troops) or 0) or 0, ally = false }
+        troops = owner and (tonumber(owner.troops) or 0) or 0,
+        tiles = owner and (tonumber(owner.tiles) or 0) or 0, ally = false }
+end
+
+function Policy.preferCandidate(current, replacement)
+    if not current or not replacement or current.owner ~= replacement.owner then return false end
+    if current.kind == "boat" and replacement.kind == "attack" then return true end
+    if current.kind == "attack" and replacement.kind == "boat" then return false end
+    return (tonumber(replacement.strategicValue) or 0)
+        > (tonumber(current.strategicValue) or 0)
+end
+
+function Policy.chooseSamSite(sites)
+    local best, bestScore
+    for _, site in ipairs(sites or {}) do
+        if site.tile and site.cost then
+            local score = (tonumber(site.distanceToEconomy) or 10000)
+                + ((tonumber(site.nearestSam) or math.huge) < 80 and 10000 or 0)
+            if not bestScore or score < bestScore then
+                best, bestScore = site, score
+            end
+        end
+    end
+    return best
+end
+
+function Policy.actionCooldown(share, kind)
+    if kind == "build" then return 8 end
+    if kind == "nuke" then return 20 end
+    if kind == "boat" then return 10 end
+    return (tonumber(share) or 0) < 0.15 and 3 or 5
+end
+
+function Policy.campaignResult(attempt)
+    local gained = (tonumber(attempt.currentTiles) or 0) - (tonumber(attempt.initialTiles) or 0)
+    local targetLoss = (tonumber(attempt.initialTargetTiles) or 0)
+        - (tonumber(attempt.currentTargetTiles) or 0)
+    if gained > 0 and targetLoss > 0 then return "captured" end
+    if (tonumber(attempt.age) or 0) >= (attempt.kind == "boat" and 45 or 25) then
+        return "failed"
+    end
+    return "pending"
 end
 
 function Policy.choose(snapshot)
@@ -29,6 +70,11 @@ function Policy.choose(snapshot)
     local incoming = math.max(0, tonumber(snapshot.incoming) or 0)
     local gold = math.max(0, tonumber(snapshot.gold) or 0)
     local site = snapshot.defenseSite
+    local reserveFloor = cap * ((tonumber(snapshot.ownShare) or 0) >= 0.4 and 0.15 or 0.25)
+
+    if (tonumber(snapshot.ownShare) or 0) >= 0.8 then
+        return { type = "wait", reason = "Victory territory reached" }
+    end
 
     if incoming >= troops * 0.2 then
         if snapshot.enableDefense and site and site.tile and site.cost and gold >= site.cost * 1.25 then
@@ -90,7 +136,7 @@ function Policy.choose(snapshot)
     end
 
     if snapshot.enableNuke then
-        local strikeThreshold = (tonumber(snapshot.ownShare) or 0) >= 0.35 and 0.08 or 0.25
+        local strikeThreshold = math.max(0.25, (tonumber(snapshot.ownShare) or 0) * 0.8)
         for _, target in ipairs(snapshot.nukeTargets or {}) do
             if not target.ally and target.tile and target.kind and target.cost
                 and (tonumber(target.share) or 0) >= strikeThreshold
@@ -101,13 +147,14 @@ function Policy.choose(snapshot)
         end
     end
 
-    if troops < cap * 0.25 then
+    if troops < reserveFloor then
         return { type = "wait", reason = "Recover troop reserve" }
     end
 
     local best, bestScore
     for _, candidate in ipairs(snapshot.candidates or {}) do
         if snapshot.enableExpand ~= false and candidate.tile and not candidate.ally
+            and not candidate.blocked
             and (candidate.kind == "attack" or candidate.kind == "expand" or candidate.kind == "boat") then
             local enemy = math.max(0, tonumber(candidate.troops) or 0)
             local neutral = candidate.kind == "expand"
@@ -115,10 +162,28 @@ function Policy.choose(snapshot)
                 or neutral and troops * 0.25
                 or math.min(troops * 0.7, math.max(troops * 0.25, enemy * 1.8))
             local reserve = troops - committed
+            local enoughForTarget = committed >= enemy * 1.8
+            if candidate.kind == "boat"
+                and (tonumber(snapshot.tiles) or 0) > 0
+                and (tonumber(candidate.tiles) or 0) > 0 then
+                local ownDensity = troops / snapshot.tiles
+                local enemyDensity = enemy / candidate.tiles
+                enoughForTarget = enoughForTarget
+                    or (committed >= enemy * 0.5
+                        and enemyDensity <= ownDensity * 0.75)
+            end
             local safe = neutral and reserve >= cap * 0.15
-                or not neutral and reserve >= cap * 0.25 and committed >= enemy * 1.8
+                or not neutral and reserve >= reserveFloor and enoughForTarget
             if safe then
-                local score = enemy + (candidate.owner == -1 and -1000000 or 0)
+                local score = enemy
+                if (tonumber(candidate.tiles) or 0) > 0 then
+                    score = enemy / candidate.tiles
+                    score /= 1 + (tonumber(candidate.strategicValue) or 0) * 0.25
+                    if candidate.kind == "boat" then
+                        score *= 1 + (tonumber(candidate.portDistance) or 0) / 500
+                    end
+                end
+                if candidate.owner == -1 then score -= 1000000 end
                 if not bestScore or score < bestScore then
                     best = { type = candidate.kind == "boat" and "boat" or "attack",
                         tile = candidate.tile, probeTile = candidate.probeTile,
@@ -163,7 +228,7 @@ return function(Window)
     local running = true
     local settings = { autoDefense = false, autoExpand = false, autoBuild = true,
         autoNuke = false,
-        scanInterval = 3, actionInterval = 8 }
+        scanInterval = 3 }
     local lastActionAt = 0
     local lastNukeAt = -math.huge
     local status = "Waiting for a live match"
@@ -204,10 +269,39 @@ return function(Window)
 
     local context
     local frontierCursor = 1
+    local targetCampaigns = {}
+    local failedTargets = {}
+    local campaignNationId
+    local campaignTick = 0
     local function readSnapshot(ctx)
         local state = ctx.state
         local me = state and state:local_info()
         if not me or not me.alive or not me.spawned or state.phase ~= 1 then return nil end
+        if campaignNationId ~= me.id or state.tick < campaignTick then
+            targetCampaigns = {}
+            failedTargets = {}
+            campaignNationId = me.id
+        end
+        campaignTick = state.tick
+        local now = os.clock()
+        for ownerId, attempt in pairs(targetCampaigns) do
+            local target = state:get_owner(ownerId)
+            local result = Policy.campaignResult({
+                kind = attempt.kind, age = now - attempt.startedAt,
+                initialTiles = attempt.initialTiles, currentTiles = me.tiles,
+                initialTargetTiles = attempt.initialTargetTiles,
+                currentTargetTiles = target and target.tiles or 0,
+            })
+            if result == "captured" then
+                targetCampaigns[ownerId] = nil
+            elseif result == "failed" then
+                targetCampaigns[ownerId] = nil
+                failedTargets[ownerId] = now + 90
+            end
+        end
+        for ownerId, untilTime in pairs(failedTargets) do
+            if now >= untilTime then failedTargets[ownerId] = nil end
+        end
         local incoming = 0
         local threatTile
         for _, attack in pairs(state.attacks or {}) do
@@ -220,6 +314,38 @@ return function(Window)
         local candidates = {}
         local nukeTargets = {}
         local seenOwners = {}
+        local width = state.W
+        local portTiles = {}
+        local economicTiles = {}
+        local economyAnchors = {}
+        local samTiles = {}
+        local strategicByOwner = {}
+        local strategicValueByKind = { [0] = 4, [1] = 5, [2] = 6, [4] = 2, [5] = 3 }
+        local function tileDistance(a, b)
+            return math.abs(a % width - b % width)
+                + math.abs(math.floor(a / width) - math.floor(b / width))
+        end
+        local function addCandidate(candidate)
+            if not candidate then return end
+            if candidate.kind == "boat" then
+                local distance = math.huge
+                for _, portTile in ipairs(portTiles) do
+                    distance = math.min(distance, tileDistance(candidate.tile, portTile))
+                end
+                candidate.portDistance = distance == math.huge and 1000 or distance
+            end
+            candidate.blocked = targetCampaigns[candidate.owner] ~= nil
+                or failedTargets[candidate.owner] ~= nil
+            local index = seenOwners[candidate.owner]
+            if index then
+                if Policy.preferCandidate(candidates[index], candidate) then
+                    candidates[index] = candidate
+                end
+            else
+                candidates[#candidates + 1] = candidate
+                seenOwners[candidate.owner] = #candidates
+            end
+        end
         local defenseSite
         local defenseDistance
         local buildCounts = { city = 0, port = 0, factory = 0, defense = 0, sam = 0, silo = 0 }
@@ -231,11 +357,32 @@ return function(Window)
                 if kind then
                     buildCounts[kind] += 1
                     if kind ~= "defense" then ownedStructures[#ownedStructures + 1] = structure end
+                    if kind == "port" then portTiles[#portTiles + 1] = structure.tile end
+                    if kind == "city" or kind == "port" or kind == "factory" then
+                        economicTiles[#economicTiles + 1] = structure.tile
+                        economyAnchors[#economyAnchors + 1] = {
+                            tile = structure.tile,
+                            value = (strategicValueByKind[structure.kind] or 1)
+                                * math.max(1, tonumber(structure.level) or 1),
+                        }
+                    end
+                    if kind == "sam" then samTiles[#samTiles + 1] = structure.tile end
                 end
+            elseif settings.autoExpand and structure.owner > 0
+                and strategicValueByKind[structure.kind] then
+                local ownerId = structure.owner
+                local assets = strategicByOwner[ownerId] or {}
+                assets[#assets + 1] = {
+                    tile = structure.tile,
+                    value = strategicValueByKind[structure.kind]
+                        * math.max(1, tonumber(structure.level) or 1),
+                }
+                table.sort(assets, function(a, b) return a.value > b.value end)
+                if #assets > 3 then assets[4] = nil end
+                strategicByOwner[ownerId] = assets
             end
         end
         local seen = {}
-        local width = state.W
         local offsets = { -1, 1, -width, width }
         local allFrontier = {}
         for tile in pairs(ctx.borders.border or {}) do
@@ -271,18 +418,21 @@ return function(Window)
         end
         local sitesChecked = 0
         local buildSites = {}
+        local samCandidates = {}
+        local samSeen = {}
+        local samChecks = 0
         local upgradeSites = {}
         local buildTries = {}
-        local buildKinds = { "city", "factory", "port", "sam", "silo" }
+        local buildKinds = { "city", "factory", "port", "silo" }
         local buildAvailability = {}
         if settings.autoBuild then
-            for _, kind in ipairs(buildKinds) do
+            for _, kind in ipairs({ "city", "factory", "port", "sam", "silo" }) do
                 local availability = ctx.rules:availability(kind)
                 if availability and availability.ok and availability.cost
                     and me.gold >= availability.cost * 1.25 then
                     buildAvailability[kind] = availability
                 end
-                buildTries[kind] = 0
+                if kind ~= "sam" then buildTries[kind] = 0 end
             end
             table.sort(ownedStructures, function(a, b)
                 return (tonumber(a.level) or 1) < (tonumber(b.level) or 1)
@@ -298,6 +448,30 @@ return function(Window)
                 end
             end
         end
+        local function offerSam(tile)
+            if not buildAvailability.sam or samChecks >= 60
+                or tile < 0 or tile >= state.N
+                or state:tile_owner(tile) ~= me.id then return end
+            samChecks += 1
+            local placement = ctx.rules:placement("sam", tile)
+            if not placement or not placement.ok or placement.upgrade then return end
+            local siteTile = placement.tile or tile
+            if samSeen[siteTile] then return end
+            samSeen[siteTile] = true
+            local distanceToEconomy = math.huge
+            for _, assetTile in ipairs(economicTiles) do
+                distanceToEconomy = math.min(distanceToEconomy,
+                    tileDistance(siteTile, assetTile))
+            end
+            local nearestSam = math.huge
+            for _, samTile in ipairs(samTiles) do
+                nearestSam = math.min(nearestSam, tileDistance(siteTile, samTile))
+            end
+            samCandidates[#samCandidates + 1] = {
+                tile = siteTile, cost = buildAvailability.sam.cost,
+                distanceToEconomy = distanceToEconomy, nearestSam = nearestSam,
+            }
+        end
         if settings.autoExpand then
             for _, ownerId in ipairs(ctx.borders:neighbour_ids()) do
                 local owner = state:get_owner(ownerId)
@@ -305,10 +479,7 @@ return function(Window)
                 local primary = tile and ctx.rules:primary(tile)
                 local candidate = Policy.candidateForOwner(ownerId, owner, tile, primary,
                     state:are_allies(me.id, ownerId))
-                if candidate then
-                    seenOwners[ownerId] = true
-                    candidates[#candidates + 1] = candidate
-                end
+                addCandidate(candidate)
             end
             for _, entry in ipairs(state:ranking()) do
                 local ownerId = entry.id or entry
@@ -318,9 +489,20 @@ return function(Window)
                     local primary = tile and ctx.rules:primary(tile)
                     local candidate = Policy.candidateForOwner(ownerId, owner, tile, primary,
                         state:are_allies(me.id, ownerId))
-                    if candidate then
-                        seenOwners[ownerId] = true
-                        candidates[#candidates + 1] = candidate
+                    addCandidate(candidate)
+                end
+            end
+            for ownerId, assets in pairs(strategicByOwner) do
+                if not state:are_allies(me.id, ownerId) then
+                    local owner = state:get_owner(ownerId)
+                    for _, asset in ipairs(assets) do
+                        local primary = ctx.rules:primary(asset.tile)
+                        local candidate = Policy.candidateForOwner(ownerId, owner,
+                            asset.tile, primary, false)
+                        if candidate then
+                            candidate.strategicValue = asset.value
+                            addCandidate(candidate)
+                        end
                     end
                 end
             end
@@ -330,7 +512,7 @@ return function(Window)
                 local ownerId = entry.id or entry
                 if ownerId ~= me.id and not state:are_allies(me.id, ownerId)
                     and state:land_share(ownerId)
-                        >= (state:land_share(me.id) >= 0.35 and 0.08 or 0.25) then
+                        >= math.max(0.25, state:land_share(me.id) * 0.8) then
                     local tile = state:label_tile(ownerId)
                     for _, kind in ipairs({ "mirv", "hydrogen", "atom" }) do
                         local availability = ctx.rules:availability(kind)
@@ -373,6 +555,12 @@ return function(Window)
                 end
             end
             if settings.autoBuild then
+                if samChecks < 24 then
+                    for _, tile in ipairs({ borderTile, borderTile - width * 6,
+                        borderTile + width * 6 }) do
+                        offerSam(tile)
+                    end
+                end
                 for _, kind in ipairs(buildKinds) do
                     if buildAvailability[kind] and not buildSites[kind] and buildTries[kind] < 24 then
                         for _, tile in ipairs({ borderTile, borderTile - width * 6, borderTile + width * 6 }) do
@@ -396,19 +584,29 @@ return function(Window)
                     if tile >= 0 and tile < state.N and not seen[tile] then
                         seen[tile] = true
                         local owner = state:tile_owner(tile)
-                        if owner ~= me.id and owner ~= 0 and not seenOwners[owner] then
+                        if owner ~= me.id and owner ~= 0
+                            and (not seenOwners[owner]
+                                or candidates[seenOwners[owner]].kind == "boat") then
                             local primary = ctx.rules:primary(tile)
                             local target = state:get_owner(owner)
                             local candidate = Policy.candidateForOwner(owner, target, tile, primary,
                                 owner > 0 and state:are_allies(me.id, owner))
-                            if candidate then
-                                seenOwners[owner] = true
-                                candidates[#candidates + 1] = candidate
-                            end
+                            addCandidate(candidate)
                         end
                     end
                 end
             end
+        end
+        if settings.autoBuild and buildAvailability.sam then
+            table.sort(economyAnchors, function(a, b) return a.value > b.value end)
+            for index = 1, math.min(8, #economyAnchors) do
+                local tile = economyAnchors[index].tile
+                for _, offset in ipairs({ -width * 12, width * 12, -width * 8,
+                    width * 8, -12, 12, -8, 8 }) do
+                    offerSam(tile + offset)
+                end
+            end
+            buildSites.sam = Policy.chooseSamSite(samCandidates)
         end
         return { troops = me.troops, maxTroops = me.max_troops, gold = me.gold,
             ownShare = state:land_share(me.id),
@@ -453,7 +651,8 @@ return function(Window)
             setStatus(action.reason)
             return
         end
-        if os.clock() - lastActionAt < settings.actionInterval then
+        if os.clock() - lastActionAt
+            < Policy.actionCooldown(snapshot.ownShare, action.type) then
             setStatus("Cooldown: " .. action.reason)
             return
         end
@@ -488,9 +687,19 @@ return function(Window)
                 ratio = action.ratio }
         end
         if not intent then return end
+        local attempt
+        if (action.type == "attack" or action.type == "boat")
+            and (tonumber(action.owner) or 0) > 0 then
+            local me = context.state:local_info()
+            local target = context.state:get_owner(action.owner)
+            attempt = { kind = action.type, initialTiles = me.tiles,
+                initialTargetTiles = target and target.tiles or 0,
+                startedAt = os.clock() }
+        end
         context.session:send_intent(intent)
         lastActionAt = os.clock()
         if action.type == "nuke" then lastNukeAt = lastActionAt end
+        if attempt then targetCampaigns[action.owner] = attempt end
         setStatus(action.type .. " at tile " .. tostring(action.tile))
     end
 
